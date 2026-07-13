@@ -1,0 +1,72 @@
+# Cogito - Production overrides
+# Usage: helm upgrade --install cogito charts/ -f charts/values.yaml -f charts/values-production.yaml
+
+# Disable in-cluster PostgreSQL, use RDS
+postgresql:
+  enabled: false
+
+externalDatabase:
+  enabled: true
+  host: "cogito.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com"
+  port: 5432
+  user: cogito
+  password: ""
+  existingSecret: cogito-rds-credentials
+  secretKey: password
+
+# Disable in-cluster MinIO, use S3
+minio:
+  enabled: false
+
+externalObjectStore:
+  enabled: true
+  provider: s3
+  region: us-east-1
+  buckets:
+    plans: cogito-plans
+    artifacts: cogito-artifacts
+  existingSecret: cogito-s3-credentials
+
+# Production Temporal settings
+temporal:
+  server:
+    replicaCount: 3
+    config:
+      persistence:
+        datastores:
+          default:
+            sql:
+              connectAddr: "cogito.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com:5432"
+              user: cogito
+              password: ""
+              existingSecret: cogito-rds-credentials
+              secretKey: password
+              createDatabase: false
+              maxConns: 50
+              maxIdleConns: 50
+          visibility:
+            sql:
+              connectAddr: "cogito.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com:5432"
+              user: cogito
+              password: ""
+              existingSecret: cogito-rds-credentials
+              secretKey: password
+              createDatabase: false
+              maxConns: 50
+              maxIdleConns: 50
+  web:
+    replicaCount: 2
+    ingress:
+      enabled: true
+      className: alb
+      annotations:
+        alb.ingress.kubernetes.io/scheme: internal
+        alb.ingress.kubernetes.io/target-type: ip
+      hosts:
+        - "cogito.internal.example.com"
+      tls:
+        - secretName: cogito-tls
+          hosts:
+            - "cogito.internal.example.com"
+  schema:
+    useHelmHooks: true

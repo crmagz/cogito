@@ -1,0 +1,226 @@
+## Cogito - Agentic Development Platform
+## Default values target local (kind) development.
+## Override with values-production.yaml for AWS deployments.
+
+## @section Database
+## Configure the in-cluster PostgreSQL or an external database (e.g. RDS).
+## Set `postgresql.enabled=false` and `externalDatabase.enabled=true` for production.
+
+## @param postgresql.enabled Deploy in-cluster PostgreSQL
+## @param postgresql.auth.postgresPassword Password for the postgres admin user
+## @param postgresql.auth.database Default database created on init
+##
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: cogito
+    database: temporal
+  ## @param postgresql.primary.resourcesPreset Override bitnami resource preset (set "none" to use custom resources)
+  ## @param postgresql.primary.resources.requests.memory Memory request
+  ## @param postgresql.primary.resources.requests.cpu CPU request
+  ## @param postgresql.primary.resources.limits.memory Memory limit
+  ## @param postgresql.primary.persistence.size PVC size for PostgreSQL data
+  ##
+  primary:
+    resourcesPreset: none
+    resources:
+      requests:
+        memory: 256Mi
+        cpu: 100m
+      limits:
+        memory: 512Mi
+    persistence:
+      size: 2Gi
+    ## @param postgresql.primary.initdb.scripts Init scripts executed on first boot
+    ##
+    initdb:
+      scripts:
+        create-visibility-db.sql: |
+          CREATE DATABASE temporal_visibility;
+
+## @param externalDatabase.enabled Use an external database instead of the in-cluster PostgreSQL
+## @param externalDatabase.host Hostname of the external database
+## @param externalDatabase.port Port of the external database
+## @param externalDatabase.user Username for the external database
+## @param externalDatabase.password Password for the external database (ignored if existingSecret is set)
+## @param externalDatabase.existingSecret Name of an existing Secret containing the database password
+## @param externalDatabase.secretKey Key within the existing Secret that holds the password
+##
+externalDatabase:
+  enabled: false
+  host: ""
+  port: 5432
+  user: ""
+  password: ""
+  existingSecret: ""
+  secretKey: password
+
+## @section Object Storage
+## Configure the in-cluster MinIO or an external object store (e.g. S3).
+## Set `minio.enabled=false` and `externalObjectStore.enabled=true` for production.
+
+## @param minio.enabled Deploy in-cluster MinIO
+## @param minio.mode MinIO server mode
+## @param minio.replicas Number of MinIO replicas
+## @param minio.rootUser MinIO root username
+## @param minio.rootPassword MinIO root password
+## @param minio.persistence.enabled Enable persistent storage for MinIO
+## @param minio.persistence.size PVC size for MinIO data
+## @param minio.resources.requests.memory Memory request
+##
+minio:
+  enabled: true
+  mode: standalone
+  replicas: 1
+  rootUser: minioadmin
+  rootPassword: minioadmin
+  persistence:
+    enabled: true
+    size: 5Gi
+  resources:
+    requests:
+      memory: 256Mi
+  ## @param minio.buckets Buckets to create on startup
+  ##
+  buckets:
+    - name: plans
+      policy: none
+      purge: false
+    - name: artifacts
+      policy: none
+      purge: false
+  ## @param minio.service.type Kubernetes service type
+  ## @param minio.service.port MinIO API port
+  ##
+  service:
+    type: ClusterIP
+    port: "9000"
+  ## @param minio.consoleService.type Kubernetes service type for the MinIO console
+  ## @param minio.consoleService.port MinIO console port
+  ##
+  consoleService:
+    type: ClusterIP
+    port: "9001"
+
+## @param externalObjectStore.enabled Use an external object store instead of in-cluster MinIO
+## @param externalObjectStore.provider Object store provider
+## @param externalObjectStore.region Cloud region
+## @param externalObjectStore.buckets.plans Bucket name for plans
+## @param externalObjectStore.buckets.artifacts Bucket name for artifacts
+## @param externalObjectStore.existingSecret Name of an existing Secret containing object store credentials
+##
+externalObjectStore:
+  enabled: false
+  provider: s3
+  region: us-east-1
+  buckets:
+    plans: ""
+    artifacts: ""
+  existingSecret: ""
+
+## @section Temporal
+## Workflow orchestration engine.
+
+## @param temporal.enabled Deploy Temporal
+##
+temporal:
+  enabled: true
+  ## @param temporal.server.replicaCount Number of Temporal server replicas per service
+  ##
+  server:
+    replicaCount: 1
+    ## @extra temporal.server.config.persistence Temporal persistence configuration
+    ## @param temporal.server.config.persistence.numHistoryShards Number of history shards (immutable after first deploy)
+    ##
+    config:
+      persistence:
+        defaultStore: default
+        visibilityStore: visibility
+        numHistoryShards: 512
+        datastores:
+          ## @param temporal.server.config.persistence.datastores.default.sql.pluginName SQL plugin (postgres12 or mysql8)
+          ## @param temporal.server.config.persistence.datastores.default.sql.driverName SQL driver
+          ## @param temporal.server.config.persistence.datastores.default.sql.databaseName Database name for the default store
+          ## @param temporal.server.config.persistence.datastores.default.sql.connectAddr Database address as host:port
+          ## @param temporal.server.config.persistence.datastores.default.sql.user Database user
+          ## @param temporal.server.config.persistence.datastores.default.sql.password Database password
+          ## @param temporal.server.config.persistence.datastores.default.sql.maxConns Maximum open connections
+          ## @param temporal.server.config.persistence.datastores.default.sql.maxIdleConns Maximum idle connections
+          ## @param temporal.server.config.persistence.datastores.default.sql.maxConnLifetime Maximum connection lifetime
+          ## @param temporal.server.config.persistence.datastores.default.sql.createDatabase Create the database if it does not exist
+          ##
+          default:
+            sql:
+              pluginName: postgres12
+              driverName: postgres12
+              databaseName: temporal
+              connectAddr: "cogito-postgresql:5432"
+              connectProtocol: tcp
+              user: postgres
+              password: cogito
+              maxConns: 20
+              maxIdleConns: 20
+              maxConnLifetime: "1h"
+              createDatabase: true
+          ## @param temporal.server.config.persistence.datastores.visibility.sql.pluginName SQL plugin (postgres12 or mysql8)
+          ## @param temporal.server.config.persistence.datastores.visibility.sql.driverName SQL driver
+          ## @param temporal.server.config.persistence.datastores.visibility.sql.databaseName Database name for the visibility store
+          ## @param temporal.server.config.persistence.datastores.visibility.sql.connectAddr Database address as host:port
+          ## @param temporal.server.config.persistence.datastores.visibility.sql.user Database user
+          ## @param temporal.server.config.persistence.datastores.visibility.sql.password Database password
+          ## @param temporal.server.config.persistence.datastores.visibility.sql.maxConns Maximum open connections
+          ## @param temporal.server.config.persistence.datastores.visibility.sql.maxIdleConns Maximum idle connections
+          ## @param temporal.server.config.persistence.datastores.visibility.sql.maxConnLifetime Maximum connection lifetime
+          ## @param temporal.server.config.persistence.datastores.visibility.sql.createDatabase Create the database if it does not exist
+          ##
+          visibility:
+            sql:
+              pluginName: postgres12
+              driverName: postgres12
+              databaseName: temporal_visibility
+              connectAddr: "cogito-postgresql:5432"
+              connectProtocol: tcp
+              user: postgres
+              password: cogito
+              maxConns: 20
+              maxIdleConns: 20
+              maxConnLifetime: "1h"
+              createDatabase: true
+  ## @param temporal.web.enabled Deploy Temporal Web UI
+  ## @param temporal.web.replicaCount Number of Web UI replicas
+  ## @param temporal.web.service.type Kubernetes service type for the Web UI
+  ## @param temporal.web.service.port Web UI port
+  ##
+  web:
+    enabled: true
+    replicaCount: 1
+    service:
+      type: ClusterIP
+      port: 8080
+    ## @param temporal.web.ingress.enabled Enable ingress for the Temporal Web UI
+    ## @param temporal.web.ingress.className Ingress class name (e.g. alb, nginx)
+    ## @param temporal.web.ingress.annotations [object] Ingress annotations
+    ## @param temporal.web.ingress.hosts Ingress hostnames
+    ## @param temporal.web.ingress.tls [array] Ingress TLS configuration
+    ##
+    ingress:
+      enabled: false
+      className: ""
+      annotations: {}
+      hosts:
+        - "/"
+      tls: []
+  ## @param temporal.admintools.enabled Deploy Temporal admin tools
+  ##
+  admintools:
+    enabled: true
+  ## @param temporal.schema.useHelmHooks Use Helm hooks for schema setup (set false for umbrella charts)
+  ##
+  schema:
+    useHelmHooks: false
+  ## @param temporal.shims.dockerize Enable dockerize shim (set false for Temporal 1.30+)
+  ## @param temporal.shims.elasticsearchTool Enable ES tool shim (set false for Temporal 1.30+)
+  ##
+  shims:
+    dockerize: false
+    elasticsearchTool: false
