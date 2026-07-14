@@ -258,10 +258,10 @@ litellm:
   ##
   resources:
     requests:
-      memory: 256Mi
+      memory: 512Mi
       cpu: 100m
     limits:
-      memory: 512Mi
+      memory: 2Gi
   ## @param litellm.database.name Database name for LiteLLM's virtual-key/budget store
   ## @param litellm.database.host Postgres host used to build the gateway's connection string
   ## @param litellm.database.port Postgres port used to build the gateway's connection string
