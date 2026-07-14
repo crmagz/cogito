@@ -37,6 +37,8 @@ postgresql:
       scripts:
         create-visibility-db.sql: |
           CREATE DATABASE temporal_visibility;
+        create-litellm-db.sql: |
+          CREATE DATABASE litellm;
 
 ## @param externalDatabase.enabled Use an external database instead of the in-cluster PostgreSQL
 ## @param externalDatabase.host Hostname of the external database
@@ -224,3 +226,65 @@ temporal:
   shims:
     dockerize: false
     elasticsearchTool: false
+
+## @section LiteLLM
+## OpenAI-compatible LLM gateway: per-tier model routing, virtual keys, and budget tracking.
+## Provider API keys and the proxy master key are never set here — supply them via `litellm.existingSecret`.
+
+## @param litellm.enabled Deploy the LiteLLM gateway
+## @param litellm.replicaCount Number of LiteLLM replicas
+## @param litellm.image.repository LiteLLM image (database-enabled variant, required for Postgres-backed virtual keys/budgets)
+## @param litellm.image.tag LiteLLM image tag
+## @param litellm.image.pullPolicy Image pull policy
+## @param litellm.existingSecret Name of an existing Secret containing LITELLM_MASTER_KEY and one `<PROVIDER>_API_KEY` entry per provider referenced in litellm.tiers (e.g. ANTHROPIC_API_KEY). The chart never creates this Secret.
+##
+litellm:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/berriai/litellm-database
+    tag: v1.90.2
+    pullPolicy: IfNotPresent
+  existingSecret: cogito-litellm-secret
+  ## @param litellm.service.type Kubernetes service type
+  ## @param litellm.service.port Gateway port (OpenAI-compatible API)
+  ##
+  service:
+    type: ClusterIP
+    port: 4000
+  ## @param litellm.resources.requests.memory Memory request
+  ## @param litellm.resources.requests.cpu CPU request
+  ## @param litellm.resources.limits.memory Memory limit
+  ##
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+  ## @param litellm.database.name Database name for LiteLLM's virtual-key/budget store
+  ## @param litellm.database.host Postgres host used to build the gateway's connection string
+  ## @param litellm.database.port Postgres port used to build the gateway's connection string
+  ## @param litellm.database.user Postgres user used to build the gateway's connection string
+  ## @param litellm.database.existingSecret Name of an existing Secret containing the Postgres password (defaults to the in-cluster PostgreSQL's auto-generated Secret)
+  ## @param litellm.database.secretKey Key within litellm.database.existingSecret that holds the password
+  ##
+  database:
+    name: litellm
+    host: cogito-postgresql
+    port: 5432
+    user: postgres
+    existingSecret: cogito-postgresql
+    secretKey: postgres-password
+  ## @param litellm.tiers Model tiers exposed by the gateway. Each tier is a values-driven {provider, model} pair, so the backing model can be swapped without any template change. `provider` must be a LiteLLM provider prefix (e.g. anthropic, openai) whose credential is supplied as `<PROVIDER>_API_KEY` in litellm.existingSecret.
+  ##
+  tiers:
+    discovery:
+      provider: anthropic
+      model: claude-3-5-haiku-20241022
+    balanced:
+      provider: anthropic
+      model: claude-sonnet-5
+    complex:
+      provider: anthropic
+      model: claude-opus-4-8

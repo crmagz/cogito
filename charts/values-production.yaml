@@ -70,3 +70,13 @@ temporal:
             - "cogito.internal.example.com"
   schema:
     useHelmHooks: true
+
+# Production LiteLLM settings
+litellm:
+  replicaCount: 2
+  existingSecret: cogito-litellm-credentials
+  database:
+    host: "cogito.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com"
+    user: cogito
+    existingSecret: cogito-rds-credentials
+    secretKey: password

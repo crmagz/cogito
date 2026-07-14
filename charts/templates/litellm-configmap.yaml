@@ -1,0 +1,21 @@
+{{- if .Values.litellm.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-litellm-config
+  labels:
+    app.kubernetes.io/name: litellm
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  config.yaml: |
+    model_list:
+      {{- range $tierName, $tier := .Values.litellm.tiers }}
+      - model_name: {{ $tierName }}
+        litellm_params:
+          model: {{ $tier.provider }}/{{ $tier.model }}
+          api_key: os.environ/{{ $tier.provider | upper }}_API_KEY
+      {{- end }}
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+      database_url: os.environ/DATABASE_URL
+{{- end }}
