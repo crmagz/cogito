@@ -75,6 +75,12 @@ temporal:
 litellm:
   replicaCount: 2
   existingSecret: cogito-litellm-credentials
+  # IRSA: grants the litellm pod AWS credentials for the bedrock provider without static keys.
+  # Requires an IAM role trusting this cluster's OIDC provider, scoped to bedrock:InvokeModel.
+  serviceAccount:
+    create: true
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::xxxxxxxxxxxx:role/cogito-litellm-bedrock"
   database:
     host: "cogito.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com"
     user: cogito
