@@ -236,7 +236,10 @@ temporal:
 ## @param litellm.image.repository LiteLLM image (database-enabled variant, required for Postgres-backed virtual keys/budgets)
 ## @param litellm.image.tag LiteLLM image tag
 ## @param litellm.image.pullPolicy Image pull policy
-## @param litellm.existingSecret Name of an existing Secret containing LITELLM_MASTER_KEY and one `<PROVIDER>_API_KEY` entry per provider referenced in litellm.tiers (e.g. ANTHROPIC_API_KEY). The chart never creates this Secret.
+## @param litellm.existingSecret Name of an existing Secret containing LITELLM_MASTER_KEY and one `<PROVIDER>_API_KEY` entry per provider referenced in litellm.tiers (e.g. ANTHROPIC_API_KEY). Not used for the `bedrock` provider, which authenticates via AWS credentials instead (see litellm.serviceAccount for IRSA, or inject AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_REGION_NAME into this Secret for local dev). The chart never creates this Secret.
+## @param litellm.serviceAccount.create Create a ServiceAccount for the LiteLLM pod (for IRSA when using the bedrock provider in production; leave false for local kind demos where AWS creds are injected via litellm.existingSecret instead)
+## @param litellm.serviceAccount.name Name of the ServiceAccount to use or create. Defaults to the release's litellm name if empty.
+## @param litellm.serviceAccount.annotations [object] Annotations for the ServiceAccount (e.g. eks.amazonaws.com/role-arn for IRSA)
 ##
 litellm:
   enabled: true
@@ -246,6 +249,10 @@ litellm:
     tag: v1.90.2
     pullPolicy: IfNotPresent
   existingSecret: cogito-litellm-secret
+  serviceAccount:
+    create: false
+    name: ""
+    annotations: {}
   ## @param litellm.service.type Kubernetes service type
   ## @param litellm.service.port Gateway port (OpenAI-compatible API)
   ##
@@ -276,7 +283,7 @@ litellm:
     user: postgres
     existingSecret: cogito-postgresql
     secretKey: postgres-password
-  ## @param litellm.tiers Model tiers exposed by the gateway. Each tier is a values-driven {provider, model} pair, so the backing model can be swapped without any template change. `provider` must be a LiteLLM provider prefix (e.g. anthropic, openai) whose credential is supplied as `<PROVIDER>_API_KEY` in litellm.existingSecret.
+  ## @param litellm.tiers Model tiers exposed by the gateway. Each tier is a values-driven {provider, model} pair, so the backing model can be swapped without any template change. `provider` must be a LiteLLM provider prefix (e.g. anthropic, openai, bedrock) whose credential is supplied as `<PROVIDER>_API_KEY` in litellm.existingSecret — except `bedrock`, which uses AWS credentials (IRSA or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_REGION_NAME) instead of an API key.
   ##
   tiers:
     discovery:

@@ -13,7 +13,9 @@ data:
       - model_name: {{ $tierName }}
         litellm_params:
           model: {{ $tier.provider }}/{{ $tier.model }}
+          {{- if ne $tier.provider "bedrock" }}
           api_key: os.environ/{{ $tier.provider | upper }}_API_KEY
+          {{- end }}
       {{- end }}
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
