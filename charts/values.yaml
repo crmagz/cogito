@@ -295,3 +295,60 @@ litellm:
     complex:
       provider: anthropic
       model: claude-opus-4-8
+
+## @section API
+## Plan submission API: schema/DAG/constraint validation and plan storage in the object store.
+
+## @param api.enabled Deploy the API service
+## @param api.replicaCount Number of API replicas
+## @param api.image.repository API image repository
+## @param api.image.tag API image tag
+## @param api.image.pullPolicy Image pull policy
+##
+api:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: cogito-api
+    tag: local
+    pullPolicy: IfNotPresent
+  ## @param api.service.type Kubernetes service type
+  ## @param api.service.port API port
+  ##
+  service:
+    type: ClusterIP
+    port: 8000
+  ## @param api.resources.requests.memory Memory request
+  ## @param api.resources.requests.cpu CPU request
+  ## @param api.resources.limits.memory Memory limit
+  ##
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 256Mi
+  ## @param api.objectStore.endpoint Object store endpoint (host:port, no scheme)
+  ## @param api.objectStore.secure Use TLS for the object store connection
+  ## @param api.objectStore.bucket Bucket used for plan storage
+  ## @param api.objectStore.existingSecret Name of an existing Secret containing the object store credentials (defaults to the in-cluster MinIO's auto-generated root credentials Secret)
+  ## @param api.objectStore.accessKeySecretKey Key within api.objectStore.existingSecret that holds the access key
+  ## @param api.objectStore.secretKeySecretKey Key within api.objectStore.existingSecret that holds the secret key
+  ##
+  objectStore:
+    endpoint: "cogito-minio:9000"
+    secure: false
+    bucket: "plans"
+    existingSecret: cogito-minio
+    accessKeySecretKey: rootUser
+    secretKeySecretKey: rootPassword
+  ## @param api.constraints.maxWallClockMinutes System-configured maximum for plan.constraints.max_wall_clock_minutes
+  ## @param api.constraints.maxCostUsd System-configured maximum for plan.constraints.max_cost_usd
+  ## @param api.constraints.maxReviewRounds System-configured maximum for plan.constraints.max_review_rounds
+  ## @param api.constraints.maxTurnsPerPhase System-configured maximum for plan.constraints.max_turns_per_phase
+  ##
+  constraints:
+    maxWallClockMinutes: 240
+    maxCostUsd: 50
+    maxReviewRounds: 10
+    maxTurnsPerPhase: 500
