@@ -1,5 +1,6 @@
 .tokensave
 charts/charts/*.tgz
+.claude/
 .venv/
 __pycache__/
 *.egg-info/
