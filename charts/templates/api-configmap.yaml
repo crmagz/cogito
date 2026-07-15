@@ -1,0 +1,17 @@
+{{- if .Values.api.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-api-config
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  MINIO_ENDPOINT: {{ .Values.api.objectStore.endpoint | quote }}
+  MINIO_SECURE: {{ .Values.api.objectStore.secure | quote }}
+  MINIO_PLANS_BUCKET: {{ .Values.api.objectStore.bucket | quote }}
+  COGITO_MAX_WALL_CLOCK_MINUTES: {{ .Values.api.constraints.maxWallClockMinutes | quote }}
+  COGITO_MAX_COST_USD: {{ .Values.api.constraints.maxCostUsd | quote }}
+  COGITO_MAX_REVIEW_ROUNDS: {{ .Values.api.constraints.maxReviewRounds | quote }}
+  COGITO_MAX_TURNS_PER_PHASE: {{ .Values.api.constraints.maxTurnsPerPhase | quote }}
+{{- end }}

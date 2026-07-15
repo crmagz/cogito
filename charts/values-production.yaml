@@ -86,3 +86,14 @@ litellm:
     user: cogito
     existingSecret: cogito-rds-credentials
     secretKey: password
+
+# Production API settings
+api:
+  replicaCount: 2
+  objectStore:
+    endpoint: "s3.us-east-1.amazonaws.com"
+    secure: true
+    bucket: "cogito-plans"
+    existingSecret: cogito-s3-credentials
+    accessKeySecretKey: access-key
+    secretKeySecretKey: secret-key

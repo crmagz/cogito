@@ -15,6 +15,7 @@ Cogito deploys as an umbrella Helm chart with the following components:
 | PostgreSQL | `bitnami/postgresql` | Persistence for Temporal (default + visibility stores) |
 | Temporal | `temporalio/temporal` | Durable workflow orchestration |
 | MinIO | `minio/minio` | Object storage for plans and artifacts |
+| API | local template (`services/api`) | Plan submission REST API: schema/DAG/constraint validation, plan storage |
 
 ### Local Development
 
@@ -34,6 +35,7 @@ make destroy   # Delete the kind cluster
 | Temporal gRPC | localhost:7233 |
 | MinIO Console | http://localhost:9001 |
 | MinIO API | localhost:9000 |
+| API | http://localhost:8000 |
 
 ### Production
 
