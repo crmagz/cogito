@@ -15,6 +15,9 @@ class Settings:
     max_cost_usd: float
     max_review_rounds: int
     max_turns_per_phase: int
+    temporal_host: str
+    temporal_namespace: str
+    temporal_task_queue: str
 
 
 def load_settings() -> Settings:
@@ -28,4 +31,7 @@ def load_settings() -> Settings:
         max_cost_usd=float(os.environ.get("COGITO_MAX_COST_USD", "50")),
         max_review_rounds=int(os.environ.get("COGITO_MAX_REVIEW_ROUNDS", "10")),
         max_turns_per_phase=int(os.environ.get("COGITO_MAX_TURNS_PER_PHASE", "500")),
+        temporal_host=os.environ.get("COGITO_TEMPORAL_HOST", "cogito-temporal-frontend:7233"),
+        temporal_namespace=os.environ.get("COGITO_TEMPORAL_NAMESPACE", "default"),
+        temporal_task_queue=os.environ.get("COGITO_TEMPORAL_TASK_QUEUE", "developer-tasks"),
     )

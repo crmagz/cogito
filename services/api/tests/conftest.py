@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from cogito_api.config import Settings
 from cogito_api.main import create_app
 
-from .fakes import InMemoryPlanStore
+from .fakes import FakeRunStarter, InMemoryPlanStore
 
 
 def make_settings(**overrides) -> Settings:
@@ -20,6 +20,9 @@ def make_settings(**overrides) -> Settings:
         max_cost_usd=50.0,
         max_review_rounds=10,
         max_turns_per_phase=500,
+        temporal_host="localhost:7233",
+        temporal_namespace="default",
+        temporal_task_queue="developer-tasks",
     )
     defaults.update(overrides)
     return Settings(**defaults)
@@ -31,8 +34,13 @@ def store() -> InMemoryPlanStore:
 
 
 @pytest.fixture
-def client(store: InMemoryPlanStore) -> TestClient:
-    app = create_app(store=store, settings=make_settings())
+def starter() -> FakeRunStarter:
+    return FakeRunStarter()
+
+
+@pytest.fixture
+def client(store: InMemoryPlanStore, starter: FakeRunStarter) -> TestClient:
+    app = create_app(store=store, settings=make_settings(), starter=starter)
     return TestClient(app)
 
 

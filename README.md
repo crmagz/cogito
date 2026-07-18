@@ -16,6 +16,7 @@ Cogito deploys as an umbrella Helm chart with the following components:
 | Temporal | `temporalio/temporal` | Durable workflow orchestration |
 | MinIO | `minio/minio` | Object storage for plans and artifacts |
 | API | local template (`services/api`) | Plan submission REST API: schema/DAG/constraint validation, plan storage |
+| Worker | local template (`services/worker`) | Temporal workflow worker: loads persisted plans and reports run status |
 
 ### Local Development
 

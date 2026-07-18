@@ -10,8 +10,9 @@ from minio import Minio
 
 from .config import Settings, load_settings
 from .dag import validate_constraints, validate_phase_dag
-from .models import RunSubmission, Violation
+from .models import RunEnvelope, RunSubmission, Violation
 from .storage import MinioPlanStore, PlanStore
+from .temporal import RunStarter, TemporalRunStarter
 
 
 class PlanValidationError(Exception):
@@ -34,7 +35,11 @@ def _schema_violations(exc: RequestValidationError) -> list[Violation]:
     return violations
 
 
-def create_app(store: PlanStore | None = None, settings: Settings | None = None) -> FastAPI:
+def create_app(
+    store: PlanStore | None = None,
+    settings: Settings | None = None,
+    starter: RunStarter | None = None,
+) -> FastAPI:
     settings = settings or load_settings()
     store = store or MinioPlanStore(
         Minio(
@@ -44,6 +49,9 @@ def create_app(store: PlanStore | None = None, settings: Settings | None = None)
             secure=settings.minio_secure,
         ),
         settings.plans_bucket,
+    )
+    starter = starter or TemporalRunStarter(
+        settings.temporal_host, settings.temporal_namespace, settings.temporal_task_queue
     )
 
     app = FastAPI(title="Cogito API")
@@ -81,6 +89,18 @@ def create_app(store: PlanStore | None = None, settings: Settings | None = None)
             run_id,
             {"run_id": run_id, "status": "queued", "plan_ref": plan_ref, "submitted_at": submitted_at},
         )
+
+        envelope = RunEnvelope(
+            run_id=run_id,
+            plan_ref=plan_ref,
+            spec_ref=plan.spec_set,
+            target_repos=plan.target_repos,
+            constraints=plan.constraints,
+            priority=submission.priority,
+            submitted_at=submitted_at,
+            submitted_by="api",
+        )
+        await starter.start_run(envelope)
 
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
