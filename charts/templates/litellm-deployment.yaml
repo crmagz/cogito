@@ -25,7 +25,7 @@ spec:
       {{- end }}
       containers:
         - name: litellm
-          image: "{{ .Values.litellm.image.repository }}:{{ .Values.litellm.image.tag }}"
+          image: "{{ include "cogito.image" (dict "root" . "image" .Values.litellm.image) }}"
           imagePullPolicy: {{ .Values.litellm.image.pullPolicy }}
           command: ["/bin/sh", "-c"]
           args:

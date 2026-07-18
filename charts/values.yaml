@@ -91,6 +91,9 @@ minio:
     - name: artifacts
       policy: none
       purge: false
+    - name: specs
+      policy: none
+      purge: false
   ## @param minio.service.type Kubernetes service type
   ## @param minio.service.port MinIO API port
   ##
@@ -109,6 +112,7 @@ minio:
 ## @param externalObjectStore.region Cloud region
 ## @param externalObjectStore.buckets.plans Bucket name for plans
 ## @param externalObjectStore.buckets.artifacts Bucket name for artifacts
+## @param externalObjectStore.buckets.specs Bucket name for immutable spec archives
 ## @param externalObjectStore.existingSecret Name of an existing Secret containing object store credentials
 ##
 externalObjectStore:
@@ -118,7 +122,14 @@ externalObjectStore:
   buckets:
     plans: ""
     artifacts: ""
+    specs: ""
   existingSecret: ""
+
+## @section Repository policy
+## Repositories may only be fetched from these HTTPS hosts. Every reference must include a commit SHA fragment.
+repositoryPolicy:
+  allowedGitHosts:
+    - github.com
 
 ## @section Temporal
 ## Workflow orchestration engine.
@@ -247,6 +258,7 @@ litellm:
   image:
     repository: ghcr.io/berriai/litellm-database
     tag: v1.90.2
+    digest: ""
     pullPolicy: IfNotPresent
   existingSecret: cogito-litellm-secret
   serviceAccount:
@@ -311,6 +323,7 @@ api:
   image:
     repository: cogito-api
     tag: local
+    digest: ""
     pullPolicy: IfNotPresent
   ## @param api.service.type Kubernetes service type
   ## @param api.service.port API port
@@ -339,6 +352,8 @@ api:
     endpoint: "cogito-minio:9000"
     secure: false
     bucket: "plans"
+    planSnapshotsBucket: "plan-snapshots"
+    planSnapshotRetentionDays: 30
     existingSecret: cogito-minio
     accessKeySecretKey: rootUser
     secretKeySecretKey: rootPassword
@@ -376,7 +391,58 @@ worker:
   image:
     repository: cogito-worker
     tag: local
+    digest: ""
     pullPolicy: IfNotPresent
+  ## @param worker.serviceAccount.create Create the worker ServiceAccount and its namespaced Job-management role
+  ## @param worker.serviceAccount.name Name of the ServiceAccount to use or create. Defaults to the release worker name if empty.
+  ## @param worker.serviceAccount.annotations [object] Annotations for the worker ServiceAccount (for example, workload identity)
+  ##
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  ## @param worker.execution.workspaceRoot Path to the pod-local emptyDir used by each execution Job
+  ## @param worker.execution.idleSeconds Maximum time the placeholder execution pod waits for the future harness
+  ## @param worker.execution.startupTimeoutSeconds Maximum time the worker waits for Kubernetes to create the execution pod
+  ##
+  execution:
+    namespace: cogito-executions
+    createNamespace: true
+    workspaceRoot: /workspace
+    idleSeconds: 3600
+    startupTimeoutSeconds: 30
+    cleanupTimeoutSeconds: 90
+    activeDeadlineSeconds: 3900
+    ttlSecondsAfterFinished: 300
+    terminationGracePeriodSeconds: 10
+    workspaceSizeLimit: 2Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+        ephemeral-storage: 1Gi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+    ## This Secret must contain a dedicated read-only credential for only specs/<prefix>/*.
+    specStore:
+      ## Empty uses the in-cluster MinIO service's fully qualified DNS name.
+      endpoint: ""
+      secure: false
+      existingSecret: cogito-execution-spec-reader
+      accessKeySecretKey: access-key
+      secretKeySecretKey: secret-key
+    networkPolicy:
+      enabled: true
+      dnsServiceCidrs:
+        - 10.96.0.0/12
+      ## Explicit CIDRs for allowed Git providers. Empty denies all external Git egress.
+      ## Local `make up` populates GitHub's current Git CIDRs automatically.
+      gitEgress: []
+      ## Explicit CIDRs for an external object store such as S3. Prefer a VPC endpoint.
+      ## Empty keeps the execution namespace restricted to the in-cluster MinIO Service.
+      objectStoreEgress: []
   ## @param worker.resources.requests.memory Memory request
   ## @param worker.resources.requests.cpu CPU request
   ## @param worker.resources.limits.memory Memory limit
@@ -398,9 +464,20 @@ worker:
     endpoint: "cogito-minio:9000"
     secure: false
     bucket: "plans"
+    planSnapshotsBucket: "plan-snapshots"
     existingSecret: cogito-minio
     accessKeySecretKey: rootUser
     secretKeySecretKey: rootPassword
+  ## @param worker.specStore.bucket Bucket used for immutable spec archives
+  ## @param worker.specStore.prefix Object prefix within worker.specStore.bucket; prefixes provide directory-like layout on MinIO/S3
+  ## @param worker.specStore.maxArchiveBytes Maximum compressed archive size accepted from object storage
+  ## @param worker.specStore.maxExtractedBytes Maximum uncompressed content accepted after archive validation
+  ##
+  specStore:
+    bucket: "specs"
+    prefix: "specs"
+    maxArchiveBytes: 10485760
+    maxExtractedBytes: 26214400
   ## @param worker.temporal.host Temporal frontend address (host:port) the worker long-polls
   ## @param worker.temporal.namespace Temporal namespace
   ## @param worker.temporal.taskQueue Task queue the worker polls (must match api.temporal.taskQueue)
@@ -409,3 +486,6 @@ worker:
     host: "cogito-temporal-frontend:7233"
     namespace: default
     taskQueue: developer-tasks
+global:
+  ## When true, every deployed image must use an immutable OCI digest.
+  production: false

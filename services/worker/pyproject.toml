@@ -10,6 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "temporalio>=1.8",
     "minio>=7.2",
+    "kubernetes>=32.0",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

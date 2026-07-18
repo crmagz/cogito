@@ -43,10 +43,14 @@ class AiPlan(BaseModel):
     title: str = Field(description="Brief title of the work")
     summary: str = Field(description="What problem this plan solves and why")
     target_repos: list[str] = Field(
-        description="Repository references (e.g., 'org/repo-name')"
+        min_length=1,
+        max_length=10,
+        description="Pinned HTTPS repository references in URL#commit-sha form",
     )
     spec_set: str = Field(
-        description="Spec set reference (e.g., 'typescript-backend@v2.1')"
+        min_length=1,
+        max_length=256,
+        description="Spec set reference with immutable archive digest (e.g., 'typescript-backend@v2.1#sha256=<digest>')",
     )
     phases: list[PlanPhase] = Field(description="Ordered execution phases")
     constraints: PlanConstraints = Field(description="Execution limits")
@@ -66,6 +70,7 @@ class RunSubmission(BaseModel):
 class RunEnvelope(BaseModel):
     run_id: str
     plan_ref: str = Field(description="Object store path of the immutable plan snapshot")
+    plan_sha256: str = Field(description="SHA-256 digest of the canonical plan snapshot")
     spec_ref: str = Field(description="Spec set reference to resolve at execution time")
     target_repos: list[str]
     constraints: PlanConstraints

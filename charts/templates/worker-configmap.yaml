@@ -10,7 +10,30 @@ data:
   COGITO_TEMPORAL_HOST: {{ .Values.worker.temporal.host | quote }}
   COGITO_TEMPORAL_NAMESPACE: {{ .Values.worker.temporal.namespace | quote }}
   COGITO_TEMPORAL_TASK_QUEUE: {{ .Values.worker.temporal.taskQueue | quote }}
+  COGITO_ALLOWED_GIT_HOSTS: {{ toJson .Values.repositoryPolicy.allowedGitHosts | quote }}
   MINIO_ENDPOINT: {{ .Values.worker.objectStore.endpoint | quote }}
   MINIO_SECURE: {{ .Values.worker.objectStore.secure | quote }}
   MINIO_PLANS_BUCKET: {{ .Values.worker.objectStore.bucket | quote }}
+  MINIO_PLAN_SNAPSHOTS_BUCKET: {{ .Values.worker.objectStore.planSnapshotsBucket | quote }}
+  MINIO_SPECS_BUCKET: {{ .Values.worker.specStore.bucket | quote }}
+  MINIO_SPECS_PREFIX: {{ .Values.worker.specStore.prefix | quote }}
+  MINIO_SPECS_MAX_ARCHIVE_BYTES: {{ printf "%.0f" .Values.worker.specStore.maxArchiveBytes | quote }}
+  MINIO_SPECS_MAX_EXTRACTED_BYTES: {{ printf "%.0f" .Values.worker.specStore.maxExtractedBytes | quote }}
+  COGITO_EXECUTION_IMAGE: {{ include "cogito.image" (dict "root" . "image" .Values.worker.image) | quote }}
+  COGITO_EXECUTION_IMAGE_PULL_POLICY: {{ .Values.worker.image.pullPolicy | quote }}
+  COGITO_EXECUTION_WORKSPACE_ROOT: {{ .Values.worker.execution.workspaceRoot | quote }}
+  COGITO_EXECUTION_IDLE_SECONDS: {{ .Values.worker.execution.idleSeconds | quote }}
+  COGITO_EXECUTION_STARTUP_TIMEOUT_SECONDS: {{ .Values.worker.execution.startupTimeoutSeconds | quote }}
+  COGITO_EXECUTION_NAMESPACE: {{ .Values.worker.execution.namespace | quote }}
+  COGITO_EXECUTION_CLEANUP_TIMEOUT_SECONDS: {{ .Values.worker.execution.cleanupTimeoutSeconds | quote }}
+  COGITO_EXECUTION_ACTIVE_DEADLINE_SECONDS: {{ .Values.worker.execution.activeDeadlineSeconds | quote }}
+  COGITO_EXECUTION_TTL_SECONDS_AFTER_FINISHED: {{ .Values.worker.execution.ttlSecondsAfterFinished | quote }}
+  COGITO_EXECUTION_TERMINATION_GRACE_PERIOD_SECONDS: {{ .Values.worker.execution.terminationGracePeriodSeconds | quote }}
+  COGITO_EXECUTION_WORKSPACE_SIZE_LIMIT: {{ .Values.worker.execution.workspaceSizeLimit | quote }}
+  COGITO_EXECUTION_RESOURCES: {{ toJson .Values.worker.execution.resources | quote }}
+  COGITO_EXECUTION_MINIO_ENDPOINT: {{ default (printf "%s-minio.%s.svc:%v" .Release.Name .Release.Namespace (.Values.minio.service.port | int)) .Values.worker.execution.specStore.endpoint | quote }}
+  COGITO_EXECUTION_MINIO_SECURE: {{ .Values.worker.execution.specStore.secure | quote }}
+  COGITO_EXECUTION_OBJECT_STORE_SECRET: {{ .Values.worker.execution.specStore.existingSecret | quote }}
+  COGITO_EXECUTION_OBJECT_STORE_ACCESS_KEY_SECRET_KEY: {{ .Values.worker.execution.specStore.accessKeySecretKey | quote }}
+  COGITO_EXECUTION_OBJECT_STORE_SECRET_KEY_SECRET_KEY: {{ .Values.worker.execution.specStore.secretKeySecretKey | quote }}
 {{- end }}

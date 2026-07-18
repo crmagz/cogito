@@ -1,6 +1,10 @@
 # Cogito - Production overrides
 # Usage: helm upgrade --install cogito charts/ -f charts/values.yaml -f charts/values-production.yaml
 
+global:
+  # CI must inject the digest values below from the signed release manifest.
+  production: true
+
 # Disable in-cluster PostgreSQL, use RDS
 postgresql:
   enabled: false
@@ -24,7 +28,10 @@ externalObjectStore:
   region: us-east-1
   buckets:
     plans: cogito-plans
+    # Provision this bucket with S3 Versioning and Compliance Object Lock before deploy.
+    planSnapshots: cogito-plan-snapshots
     artifacts: cogito-artifacts
+    specs: cogito-specs
   existingSecret: cogito-s3-credentials
 
 # Production Temporal settings
@@ -90,10 +97,19 @@ litellm:
 # Production API settings
 api:
   replicaCount: 2
+  # Publish immutable release images before applying this file. These values must
+  # never inherit the local-development image names from values.yaml.
+  image:
+    repository: ghcr.io/bluewizard/cogito-api
+    tag: "0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
   objectStore:
     endpoint: "s3.us-east-1.amazonaws.com"
     secure: true
     bucket: "cogito-plans"
+    planSnapshotsBucket: "cogito-plan-snapshots"
+    planSnapshotRetentionDays: 365
     existingSecret: cogito-s3-credentials
     accessKeySecretKey: access-key
     secretKeySecretKey: secret-key
@@ -101,10 +117,27 @@ api:
 # Production worker settings
 worker:
   replicaCount: 2
+  image:
+    repository: ghcr.io/bluewizard/cogito-worker
+    tag: "0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
   objectStore:
     endpoint: "s3.us-east-1.amazonaws.com"
     secure: true
     bucket: "cogito-plans"
+    planSnapshotsBucket: "cogito-plan-snapshots"
     existingSecret: cogito-s3-credentials
     accessKeySecretKey: access-key
     secretKeySecretKey: secret-key
+  specStore:
+    bucket: cogito-specs
+    prefix: specs
+  execution:
+    createNamespace: true
+    specStore:
+      endpoint: "s3.us-east-1.amazonaws.com"
+      secure: true
+      existingSecret: cogito-execution-spec-reader
+      accessKeySecretKey: access-key
+      secretKeySecretKey: secret-key

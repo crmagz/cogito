@@ -4,8 +4,14 @@ import pytest
 from temporalio.testing import ActivityEnvironment
 
 from cogito_worker.activities import WorkerActivities
+from cogito_worker.execution import ExecutionJobSettings, ExecutionWorkspaceService
+from cogito_worker.models import ExecutionRequest
 
-from .fakes import InMemoryRunStore
+from .fakes import (
+    InMemoryExecutionJobClient,
+    InMemoryExecutionWorkspaces,
+    InMemoryRunStore,
+)
 
 
 @pytest.fixture
@@ -15,7 +21,7 @@ def store() -> InMemoryRunStore:
 
 @pytest.fixture
 def activities(store: InMemoryRunStore) -> WorkerActivities:
-    return WorkerActivities(store)
+    return WorkerActivities(store, InMemoryExecutionWorkspaces())
 
 
 @pytest.fixture
@@ -52,3 +58,49 @@ async def test_report_status_preserves_existing_fields(
 
     assert store.statuses["run-1"]["status"] == "completed"
     assert store.statuses["run-1"]["plan_ref"] == "s3://plans/plans/run-1/plan.json"
+
+
+async def test_execution_workspace_activities_manage_only_the_current_run(
+    env: ActivityEnvironment, store: InMemoryRunStore
+):
+    jobs = InMemoryExecutionJobClient()
+    activities = WorkerActivities(
+        store,
+        ExecutionWorkspaceService(
+            ExecutionJobSettings(
+                namespace="cogito",
+                image="cogito-worker:local",
+                image_pull_policy="IfNotPresent",
+                workspace_root="/workspace",
+                idle_seconds=3600,
+                startup_timeout_seconds=30,
+                cleanup_timeout_seconds=90,
+                active_deadline_seconds=3900,
+                ttl_seconds_after_finished=300,
+                termination_grace_period_seconds=10,
+                workspace_size_limit="2Gi",
+                resources={"limits": {"memory": "1Gi"}},
+                allowed_git_hosts=("github.com",),
+                minio_endpoint="cogito-minio:9000",
+                minio_secure=False,
+                specs_bucket="specs",
+                specs_prefix="specs",
+                specs_max_archive_bytes=1024 * 1024,
+                specs_max_extracted_bytes=2 * 1024 * 1024,
+                object_store_secret="cogito-minio",
+                object_store_access_key_secret_key="rootUser",
+                object_store_secret_key_secret_key="rootPassword",
+            ),
+            jobs,
+        ),
+    )
+
+    workspace = await env.run(
+        activities.provision_execution_workspace,
+        ExecutionRequest(run_id="run-1", spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64, target_repos=[]),
+    )
+    await env.run(activities.cleanup_execution_workspace, workspace)
+
+    assert [job_name for job_name, _ in jobs.created] == [workspace.job_name]
+    assert jobs.awaited == [(workspace.job_name, 30)]
+    assert jobs.deleted == [workspace.job_name]

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
+import re
+from urllib.parse import urlsplit
+
 from .config import Settings
 from .models import PlanConstraints, PlanPhase, Violation
 
@@ -64,3 +68,77 @@ def validate_constraints(constraints: PlanConstraints, settings: Settings) -> li
         for field, value, limit in checks
         if value > limit
     ]
+
+
+_COMMIT_PATTERN = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?")
+_SPEC_REF_PATTERN = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*#sha256=[0-9a-fA-F]{64}"
+)
+
+
+def validate_target_repositories(target_repos: list[str], allowed_hosts: tuple[str, ...]) -> list[Violation]:
+    """Require pinned, credential-free HTTPS repository references from approved hosts."""
+
+    violations: list[Violation] = []
+    for index, repository in enumerate(target_repos):
+        try:
+            parsed = urlsplit(repository)
+            host = parsed.hostname
+            is_ip_address = host is not None and _is_ip_address(host)
+        except ValueError:
+            parsed = None
+            host = None
+            is_ip_address = False
+        if (
+            parsed is None
+            or parsed.scheme != "https"
+            or not host
+            or is_ip_address
+            or not _host_is_allowed(host, allowed_hosts)
+            or parsed.username is not None
+            or parsed.password is not None
+            or not parsed.path.strip("/")
+            or parsed.query
+            or not _COMMIT_PATTERN.fullmatch(parsed.fragment)
+        ):
+            violations.append(
+                Violation(
+                    field=f"target_repos[{index}]",
+                    message="must be a credential-free HTTPS URL from an approved host, pinned with a 40- or 64-character commit SHA fragment",
+                )
+            )
+    return violations
+
+
+def validate_spec_reference(spec_ref: str) -> list[Violation]:
+    """Require the spec archive digest that makes a named spec set reproducible."""
+
+    if _SPEC_REF_PATTERN.fullmatch(spec_ref):
+        return []
+    return [
+        Violation(
+            field="spec_set",
+            message="must use name@version#sha256=<64 lowercase-or-uppercase hex characters>",
+        )
+    ]
+
+
+def _host_is_allowed(host: str, allowed_hosts: tuple[str, ...]) -> bool:
+    normalized_host = host.lower().rstrip(".")
+    for allowed_host in allowed_hosts:
+        normalized_allowed = allowed_host.lower().rstrip(".")
+        if normalized_allowed.startswith("*."):
+            suffix = normalized_allowed[1:]
+            if normalized_host.endswith(suffix) and normalized_host != suffix[1:]:
+                return True
+        elif normalized_host == normalized_allowed:
+            return True
+    return False
+
+
+def _is_ip_address(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
