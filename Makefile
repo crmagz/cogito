@@ -1,9 +1,9 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-# Invoke as `make -C .claude <target>` from the repo root — paths below are relative to this file.
+# Invoke as `make <target>` from the repository root.
 
 CLUSTER_NAME := cogito
-CHART_DIR    := ../charts
+CHART_DIR    := charts
 KIND_CONFIG  := kind-config.yaml
 RELEASE_NAME := cogito
 NAMESPACE    := cogito
@@ -24,8 +24,8 @@ WORKER_IMAGE_STAMP := $(BUILD_STAMP_DIR)/worker.local
 
 # These are the files copied into each image. Changes to tests and other local
 # development artifacts do not trigger an image rebuild.
-API_BUILD_SOURCES := ../services/api/Dockerfile ../services/api/pyproject.toml $(shell find ../services/api/src -type f)
-WORKER_BUILD_SOURCES := ../services/worker/Dockerfile ../services/worker/pyproject.toml $(shell find ../services/worker/src -type f)
+API_BUILD_SOURCES := services/api/Dockerfile services/api/pyproject.toml $(shell find services/api/src -type f)
+WORKER_BUILD_SOURCES := services/worker/Dockerfile services/worker/pyproject.toml $(shell find services/worker/src -type f)
 
 # Bedrock inference-profile IDs. Override these when the assumed role has access to
 # different approved models or inference profiles.
@@ -84,13 +84,13 @@ rebuild: ## Force a rebuild of both local application images
 $(API_IMAGE_STAMP): $(API_BUILD_SOURCES)
 	@echo "==> Building $(API_IMAGE)"
 	@mkdir -p $(@D)
-	@docker build --tag $(API_IMAGE) ../services/api
+	@docker build --tag $(API_IMAGE) services/api
 	@touch $@
 
 $(WORKER_IMAGE_STAMP): $(WORKER_BUILD_SOURCES)
 	@echo "==> Building $(WORKER_IMAGE)"
 	@mkdir -p $(@D)
-	@docker build --tag $(WORKER_IMAGE) ../services/worker
+	@docker build --tag $(WORKER_IMAGE) services/worker
 	@touch $@
 
 load: pull build ## Pull, build, and load only missing or changed images into kind nodes
