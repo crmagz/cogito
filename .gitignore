@@ -1,8 +1,6 @@
 .tokensave
 charts/charts/*.tgz
-.claude/*
-!.claude/Makefile
-!.claude/kind-config.yaml
+.claude/
 .venv/
 __pycache__/
 *.egg-info/

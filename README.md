@@ -23,11 +23,11 @@ Cogito deploys as an umbrella Helm chart with the following components:
 Requires [kind](https://kind.sigs.k8s.io/), [Helm](https://helm.sh/), and [Docker](https://www.docker.com/).
 
 ```bash
-make -C .claude up            # Create kind cluster, load images, install chart
-make -C .claude status        # Show pod and helm release status
-make -C .claude port-forward  # Forward all services to localhost
-make -C .claude down          # Uninstall chart (keeps cluster)
-make -C .claude destroy       # Delete the kind cluster
+make up            # Create kind cluster, load images, install chart
+make status        # Show pod and helm release status
+make port-forward  # Forward all services to localhost
+make down          # Uninstall chart (keeps cluster)
+make destroy       # Delete the kind cluster
 ```
 
 | Service | Local URL |
