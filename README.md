@@ -18,26 +18,6 @@ Cogito deploys as an umbrella Helm chart with the following components:
 | API | local template (`services/api`) | Plan submission REST API: schema/DAG/constraint validation, plan storage |
 | Worker | local template (`services/worker`) | Temporal workflow worker: loads persisted plans and reports run status |
 
-### Local Development
-
-Requires [kind](https://kind.sigs.k8s.io/), [Helm](https://helm.sh/), and [Docker](https://www.docker.com/).
-
-```bash
-make up            # Create kind cluster, load images, install chart
-make status        # Show pod and helm release status
-make port-forward  # Forward all services to localhost
-make down          # Uninstall chart (keeps cluster)
-make destroy       # Delete the kind cluster
-```
-
-| Service | Local URL |
-|---------|-----------|
-| Temporal UI | http://localhost:8080 |
-| Temporal gRPC | localhost:7233 |
-| MinIO Console | http://localhost:9001 |
-| MinIO API | localhost:9000 |
-| API | http://localhost:8000 |
-
 ### Production
 
 Disable in-cluster PostgreSQL and MinIO, point Temporal at RDS and S3:
