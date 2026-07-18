@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cogito_api.models import AiPlan
+from cogito_api.models import AiPlan, RunEnvelope
 
 
 class InMemoryPlanStore:
@@ -17,3 +17,11 @@ class InMemoryPlanStore:
 
     def get_status(self, run_id: str) -> dict | None:
         return self.statuses.get(run_id)
+
+
+class FakeRunStarter:
+    def __init__(self) -> None:
+        self.started_runs: list[RunEnvelope] = []
+
+    async def start_run(self, envelope: RunEnvelope) -> None:
+        self.started_runs.append(envelope)

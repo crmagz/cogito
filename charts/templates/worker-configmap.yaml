@@ -1,0 +1,16 @@
+{{- if .Values.worker.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-worker-config
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  COGITO_TEMPORAL_HOST: {{ .Values.worker.temporal.host | quote }}
+  COGITO_TEMPORAL_NAMESPACE: {{ .Values.worker.temporal.namespace | quote }}
+  COGITO_TEMPORAL_TASK_QUEUE: {{ .Values.worker.temporal.taskQueue | quote }}
+  MINIO_ENDPOINT: {{ .Values.worker.objectStore.endpoint | quote }}
+  MINIO_SECURE: {{ .Values.worker.objectStore.secure | quote }}
+  MINIO_PLANS_BUCKET: {{ .Values.worker.objectStore.bucket | quote }}
+{{- end }}

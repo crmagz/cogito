@@ -352,3 +352,60 @@ api:
     maxCostUsd: 50
     maxReviewRounds: 10
     maxTurnsPerPhase: 500
+  ## @param api.temporal.host Temporal frontend address (host:port) the API connects to when starting workflows
+  ## @param api.temporal.namespace Temporal namespace
+  ## @param api.temporal.taskQueue Task queue the DeveloperRunWorkflow is started on (must match worker.temporal.taskQueue)
+  ##
+  temporal:
+    host: "cogito-temporal-frontend:7233"
+    namespace: default
+    taskQueue: developer-tasks
+
+## @section Worker
+## Temporal worker: runs DeveloperRunWorkflow and its activities.
+
+## @param worker.enabled Deploy the worker service
+## @param worker.replicaCount Number of worker replicas
+## @param worker.image.repository Worker image repository
+## @param worker.image.tag Worker image tag
+## @param worker.image.pullPolicy Image pull policy
+##
+worker:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: cogito-worker
+    tag: local
+    pullPolicy: IfNotPresent
+  ## @param worker.resources.requests.memory Memory request
+  ## @param worker.resources.requests.cpu CPU request
+  ## @param worker.resources.limits.memory Memory limit
+  ##
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 256Mi
+  ## @param worker.objectStore.endpoint Object store endpoint (host:port, no scheme)
+  ## @param worker.objectStore.secure Use TLS for the object store connection
+  ## @param worker.objectStore.bucket Bucket used for plan storage
+  ## @param worker.objectStore.existingSecret Name of an existing Secret containing the object store credentials (defaults to the in-cluster MinIO's auto-generated root credentials Secret)
+  ## @param worker.objectStore.accessKeySecretKey Key within worker.objectStore.existingSecret that holds the access key
+  ## @param worker.objectStore.secretKeySecretKey Key within worker.objectStore.existingSecret that holds the secret key
+  ##
+  objectStore:
+    endpoint: "cogito-minio:9000"
+    secure: false
+    bucket: "plans"
+    existingSecret: cogito-minio
+    accessKeySecretKey: rootUser
+    secretKeySecretKey: rootPassword
+  ## @param worker.temporal.host Temporal frontend address (host:port) the worker long-polls
+  ## @param worker.temporal.namespace Temporal namespace
+  ## @param worker.temporal.taskQueue Task queue the worker polls (must match api.temporal.taskQueue)
+  ##
+  temporal:
+    host: "cogito-temporal-frontend:7233"
+    namespace: default
+    taskQueue: developer-tasks

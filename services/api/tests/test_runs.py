@@ -4,7 +4,7 @@ import copy
 
 from fastapi.testclient import TestClient
 
-from .fakes import InMemoryPlanStore
+from .fakes import FakeRunStarter, InMemoryPlanStore
 
 
 def test_submit_valid_plan_returns_202_with_run_id_and_plan_ref(client: TestClient, valid_plan: dict):
@@ -79,6 +79,23 @@ def test_dry_run_validates_without_persisting(client: TestClient, valid_plan: di
     assert body["status"] == "validated"
     assert body["dry_run"] is True
     assert store.plans == {}
+
+
+def test_submit_valid_plan_starts_workflow(client: TestClient, valid_plan: dict, starter: FakeRunStarter):
+    response = client.post("/api/v1/runs", json={"plan": valid_plan})
+    run_id = response.json()["run_id"]
+
+    assert len(starter.started_runs) == 1
+    envelope = starter.started_runs[0]
+    assert envelope.run_id == run_id
+    assert envelope.plan_ref == response.json()["plan_ref"]
+    assert envelope.spec_ref == valid_plan["spec_set"]
+
+
+def test_dry_run_does_not_start_workflow(client: TestClient, valid_plan: dict, starter: FakeRunStarter):
+    client.post("/api/v1/runs", json={"plan": valid_plan, "dry_run": True})
+
+    assert starter.started_runs == []
 
 
 def test_get_status_for_existing_run_returns_queued(client: TestClient, valid_plan: dict):

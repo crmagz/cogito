@@ -14,4 +14,7 @@ data:
   COGITO_MAX_COST_USD: {{ .Values.api.constraints.maxCostUsd | quote }}
   COGITO_MAX_REVIEW_ROUNDS: {{ .Values.api.constraints.maxReviewRounds | quote }}
   COGITO_MAX_TURNS_PER_PHASE: {{ .Values.api.constraints.maxTurnsPerPhase | quote }}
+  COGITO_TEMPORAL_HOST: {{ .Values.api.temporal.host | quote }}
+  COGITO_TEMPORAL_NAMESPACE: {{ .Values.api.temporal.namespace | quote }}
+  COGITO_TEMPORAL_TASK_QUEUE: {{ .Values.api.temporal.taskQueue | quote }}
 {{- end }}
