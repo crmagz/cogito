@@ -16,6 +16,8 @@ def make_settings(**overrides) -> Settings:
         minio_secret_key="minioadmin",
         minio_secure=False,
         plans_bucket="plans",
+        plan_snapshots_bucket="plan-snapshots",
+        plan_snapshot_retention_days=30,
         max_wall_clock_minutes=240,
         max_cost_usd=50.0,
         max_review_rounds=10,
@@ -23,6 +25,7 @@ def make_settings(**overrides) -> Settings:
         temporal_host="localhost:7233",
         temporal_namespace="default",
         temporal_task_queue="developer-tasks",
+        allowed_git_hosts=("github.com",),
     )
     defaults.update(overrides)
     return Settings(**defaults)
@@ -49,8 +52,8 @@ def valid_plan() -> dict:
     return {
         "title": "Add rate limiting to API gateway",
         "summary": "Implement token-bucket rate limiting on /api/v2 endpoints to prevent abuse.",
-        "target_repos": ["acme/api-gateway"],
-        "spec_set": "typescript-backend@v2.1",
+        "target_repos": ["https://github.com/acme/api-gateway.git#0123456789abcdef0123456789abcdef01234567"],
+        "spec_set": "typescript-backend@v2.1#sha256=" + "a" * 64,
         "phases": [
             {
                 "id": "phase-1",

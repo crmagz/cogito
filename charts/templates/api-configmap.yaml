@@ -10,6 +10,8 @@ data:
   MINIO_ENDPOINT: {{ .Values.api.objectStore.endpoint | quote }}
   MINIO_SECURE: {{ .Values.api.objectStore.secure | quote }}
   MINIO_PLANS_BUCKET: {{ .Values.api.objectStore.bucket | quote }}
+  MINIO_PLAN_SNAPSHOTS_BUCKET: {{ .Values.api.objectStore.planSnapshotsBucket | quote }}
+  MINIO_PLAN_SNAPSHOT_RETENTION_DAYS: {{ .Values.api.objectStore.planSnapshotRetentionDays | quote }}
   COGITO_MAX_WALL_CLOCK_MINUTES: {{ .Values.api.constraints.maxWallClockMinutes | quote }}
   COGITO_MAX_COST_USD: {{ .Values.api.constraints.maxCostUsd | quote }}
   COGITO_MAX_REVIEW_ROUNDS: {{ .Values.api.constraints.maxReviewRounds | quote }}
@@ -17,4 +19,5 @@ data:
   COGITO_TEMPORAL_HOST: {{ .Values.api.temporal.host | quote }}
   COGITO_TEMPORAL_NAMESPACE: {{ .Values.api.temporal.namespace | quote }}
   COGITO_TEMPORAL_TASK_QUEUE: {{ .Values.api.temporal.taskQueue | quote }}
+  COGITO_ALLOWED_GIT_HOSTS: {{ toJson .Values.repositoryPolicy.allowedGitHosts | quote }}
 {{- end }}

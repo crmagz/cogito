@@ -71,6 +71,30 @@ def test_submit_constraints_exceeding_system_maximum_returns_422(client: TestCli
     assert any(v["field"] == "constraints.max_cost_usd" for v in body["violations"])
 
 
+def test_submit_rejects_non_https_or_credentialed_repository_urls(client: TestClient, valid_plan: dict):
+    plan = copy.deepcopy(valid_plan)
+    plan["target_repos"] = ["ssh://git@github.com/acme/api-gateway.git", "https://token@github.com/acme/private.git"]
+
+    response = client.post("/api/v1/runs", json={"plan": plan})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert {violation["field"] for violation in body["violations"]} == {
+        "target_repos[0]",
+        "target_repos[1]",
+    }
+
+
+def test_submit_rejects_malformed_or_unpinned_repository_urls(client: TestClient, valid_plan: dict):
+    plan = copy.deepcopy(valid_plan)
+    plan["target_repos"] = ["https://[bad", "https://git.example.test/repository.git#main"]
+
+    response = client.post("/api/v1/runs", json={"plan": plan})
+
+    assert response.status_code == 422
+    assert {violation["field"] for violation in response.json()["violations"]} == {"target_repos[0]", "target_repos[1]"}
+
+
 def test_dry_run_validates_without_persisting(client: TestClient, valid_plan: dict, store: InMemoryPlanStore):
     response = client.post("/api/v1/runs", json={"plan": valid_plan, "dry_run": True})
 
@@ -89,6 +113,7 @@ def test_submit_valid_plan_starts_workflow(client: TestClient, valid_plan: dict,
     envelope = starter.started_runs[0]
     assert envelope.run_id == run_id
     assert envelope.plan_ref == response.json()["plan_ref"]
+    assert len(envelope.plan_sha256) == 64
     assert envelope.spec_ref == valid_plan["spec_set"]
 
 

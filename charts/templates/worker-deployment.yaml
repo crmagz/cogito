@@ -20,9 +20,16 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/worker-configmap.yaml") . | sha256sum }}
     spec:
+      serviceAccountName: {{ .Values.worker.serviceAccount.name | default (printf "%s-worker" .Release.Name) }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: worker
-          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          image: "{{ include "cogito.image" (dict "root" . "image" .Values.worker.image) }}"
           imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
           envFrom:
             - configMapRef:
@@ -38,6 +45,14 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.worker.objectStore.existingSecret }}
                   key: {{ .Values.worker.objectStore.secretKeySecretKey }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
 {{- end }}

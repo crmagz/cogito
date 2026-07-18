@@ -1,0 +1,54 @@
+{{- if and .Values.worker.enabled .Values.worker.execution.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-execution-egress
+  namespace: {{ .Values.worker.execution.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: run-workspace
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+        {{- range .Values.worker.execution.networkPolicy.dnsServiceCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: {{ .Values.minio.service.port | int }}
+    {{- with .Values.worker.execution.networkPolicy.gitEgress }}
+    - to:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- with .Values.worker.execution.networkPolicy.objectStoreEgress }}
+    - to:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+{{- end }}

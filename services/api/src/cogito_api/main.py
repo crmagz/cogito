@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from minio import Minio
 
 from .config import Settings, load_settings
-from .dag import validate_constraints, validate_phase_dag
+from .dag import validate_constraints, validate_phase_dag, validate_spec_reference, validate_target_repositories
 from .models import RunEnvelope, RunSubmission, Violation
 from .storage import MinioPlanStore, PlanStore
 from .temporal import RunStarter, TemporalRunStarter
@@ -49,6 +49,8 @@ def create_app(
             secure=settings.minio_secure,
         ),
         settings.plans_bucket,
+        settings.plan_snapshots_bucket,
+        settings.plan_snapshot_retention_days,
     )
     starter = starter or TemporalRunStarter(
         settings.temporal_host, settings.temporal_namespace, settings.temporal_task_queue
@@ -71,7 +73,12 @@ def create_app(
     @app.post("/api/v1/runs")
     async def submit_run(submission: RunSubmission) -> JSONResponse:
         plan = submission.plan
-        violations = validate_phase_dag(plan.phases) + validate_constraints(plan.constraints, settings)
+        violations = (
+            validate_phase_dag(plan.phases)
+            + validate_constraints(plan.constraints, settings)
+            + validate_target_repositories(plan.target_repos, settings.allowed_git_hosts)
+            + validate_spec_reference(plan.spec_set)
+        )
         if violations:
             raise PlanValidationError(violations)
 
@@ -84,15 +91,22 @@ def create_app(
             )
 
         submitted_at = datetime.now(timezone.utc).isoformat()
-        plan_ref = store.put_plan(run_id, plan)
+        snapshot = store.put_plan(run_id, plan)
         store.put_status(
             run_id,
-            {"run_id": run_id, "status": "queued", "plan_ref": plan_ref, "submitted_at": submitted_at},
+            {
+                "run_id": run_id,
+                "status": "queued",
+                "plan_ref": snapshot.ref,
+                "plan_sha256": snapshot.sha256,
+                "submitted_at": submitted_at,
+            },
         )
 
         envelope = RunEnvelope(
             run_id=run_id,
-            plan_ref=plan_ref,
+            plan_ref=snapshot.ref,
+            plan_sha256=snapshot.sha256,
             spec_ref=plan.spec_set,
             target_repos=plan.target_repos,
             constraints=plan.constraints,
@@ -104,7 +118,7 @@ def create_app(
 
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
-            content={"run_id": run_id, "status": "queued", "plan_ref": plan_ref, "estimated_start": None},
+            content={"run_id": run_id, "status": "queued", "plan_ref": snapshot.ref, "estimated_start": None},
         )
 
     @app.get("/api/v1/runs/{run_id}/status")
