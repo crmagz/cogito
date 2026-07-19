@@ -74,3 +74,29 @@ helm upgrade --install cogito oci://ghcr.io/crmagz/charts/cogito \
 
 Do not use `latest` in an environment promotion. It is overwritten by each
 component release and is intentionally unsuitable as a deployment identity.
+
+## Phase implementation acceptance gate
+
+Every implementation phase that changes runtime behavior, workflow state,
+credentials, Kubernetes resources, or deployment configuration must satisfy
+this gate before it is described as production-ready or submitted for human
+review:
+
+1. Build the changed local images, load them into the current kind cluster,
+   and deploy the phase with Helm using the same values path intended for the
+   environment.
+2. Exercise every phase acceptance criterion against the running application
+   and cluster. This includes positive behavior, expected failure behavior,
+   durable status/metadata, cleanup, and the relevant credential/RBAC boundary.
+3. Capture the commands and observed evidence in the pull request. Unit tests,
+   mocked workflow tests, linting, and rendered manifests support this gate but
+   never replace it.
+4. Conduct an adversarial review after the cluster checks. Classify findings as
+   Blocker, Critical, Major, or Medium; remediate every Blocker, Critical, and
+   Major, and any Medium that affects correctness, security, or operability.
+   Re-run the affected kind checks and conduct a second independent review.
+
+If a required kind dependency, credential, or external integration is absent,
+the phase is not production-ready. Record the unmet acceptance criterion in
+the PR and keep it out of the release/promotion path until the cluster gate is
+completed.
