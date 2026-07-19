@@ -113,6 +113,13 @@ api:
     existingSecret: cogito-s3-credentials
     accessKeySecretKey: access-key
     secretKeySecretKey: secret-key
+  supervisorDatabase:
+    host: "cogito.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com"
+    port: 5432
+    name: cogito
+    user: cogito
+    existingSecret: cogito-rds-credentials
+    passwordKey: password
 
 # Production worker settings
 worker:

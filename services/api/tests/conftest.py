@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from cogito_api.config import Settings
 from cogito_api.main import create_app
 
-from .fakes import FakeRunStarter, InMemoryPlanStore
+from .fakes import FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
 
 
 def make_settings(**overrides) -> Settings:
@@ -26,6 +26,11 @@ def make_settings(**overrides) -> Settings:
         temporal_namespace="default",
         temporal_task_queue="developer-tasks",
         allowed_git_hosts=("github.com",),
+        supervisor_database_host="localhost",
+        supervisor_database_port=5432,
+        supervisor_database_name="cogito",
+        supervisor_database_user="cogito",
+        supervisor_database_password="cogito",
     )
     defaults.update(overrides)
     return Settings(**defaults)
@@ -42,8 +47,22 @@ def starter() -> FakeRunStarter:
 
 
 @pytest.fixture
-def client(store: InMemoryPlanStore, starter: FakeRunStarter) -> TestClient:
-    app = create_app(store=store, settings=make_settings(), starter=starter)
+def supervisor_store() -> InMemorySupervisorStore:
+    return InMemorySupervisorStore()
+
+
+@pytest.fixture
+def client(
+    store: InMemoryPlanStore,
+    starter: FakeRunStarter,
+    supervisor_store: InMemorySupervisorStore,
+) -> TestClient:
+    app = create_app(
+        store=store,
+        settings=make_settings(),
+        starter=starter,
+        supervisor_store=supervisor_store,
+    )
     return TestClient(app)
 
 

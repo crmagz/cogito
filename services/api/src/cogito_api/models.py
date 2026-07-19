@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from enum import Enum
+from enum import Enum, StrEnum
 
 from pydantic import BaseModel, Field
 
@@ -65,6 +65,61 @@ class RunSubmission(BaseModel):
         default=False, description="Validate the plan without persisting or queuing it"
     )
     priority: str = Field(default="normal")
+
+
+class PlanningRunStatus(StrEnum):
+    """Authoritative lifecycle states for a supervisor planning run."""
+
+    PLANNING = "planning"
+    AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
+    PLANNING_FAILED = "planning_failed"
+    REJECTED = "rejected"
+    REVISION_REQUESTED = "revision_requested"
+
+
+class PlanningRunSubmission(BaseModel):
+    """Input used to create a human-gated planning run."""
+
+    initial_specification: str = Field(
+        min_length=1,
+        max_length=100_000,
+        description="Untrusted work specification from which the planner will produce a normalized plan",
+    )
+    target_repos: list[str] = Field(
+        min_length=1,
+        max_length=10,
+        description="Pinned HTTPS repository references in URL#commit-sha form",
+    )
+    spec_set: str = Field(
+        min_length=1,
+        max_length=256,
+        description="Spec set reference with immutable archive digest",
+    )
+    constraints: PlanConstraints = Field(
+        default_factory=PlanConstraints,
+        description="Hard limits that the future generated plan must satisfy",
+    )
+    priority: str = Field(default="normal", description="Scheduling priority for the planning run")
+    dry_run: bool = Field(
+        default=False,
+        description="Validate the planning request without persisting an artifact or run record",
+    )
+
+
+class ArtifactReference(BaseModel):
+    """Immutable object-store identity for a supervisor artifact."""
+
+    ref: str = Field(description="Object store URI of the immutable artifact")
+    sha256: str = Field(description="SHA-256 digest of the canonical artifact bytes")
+
+
+class PlanningRunResponse(BaseModel):
+    """Accepted planning-run response returned to API callers."""
+
+    run_id: str = Field(description="Stable planning run identifier")
+    status: PlanningRunStatus = Field(description="Authoritative initial lifecycle state")
+    source_artifact: ArtifactReference = Field(description="Immutable submitted specification")
+    submitted_at: str = Field(description="ISO 8601 submission timestamp")
 
 
 class RunEnvelope(BaseModel):

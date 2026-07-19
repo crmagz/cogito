@@ -48,6 +48,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.api.objectStore.existingSecret }}
                   key: {{ .Values.api.objectStore.secretKeySecretKey }}
+            - name: COGITO_SUPERVISOR_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.supervisorDatabase.existingSecret }}
+                  key: {{ .Values.api.supervisorDatabase.passwordKey }}
           livenessProbe:
             httpGet:
               path: /healthz

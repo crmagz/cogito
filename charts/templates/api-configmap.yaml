@@ -20,4 +20,8 @@ data:
   COGITO_TEMPORAL_NAMESPACE: {{ .Values.api.temporal.namespace | quote }}
   COGITO_TEMPORAL_TASK_QUEUE: {{ .Values.api.temporal.taskQueue | quote }}
   COGITO_ALLOWED_GIT_HOSTS: {{ toJson .Values.repositoryPolicy.allowedGitHosts | quote }}
+  COGITO_SUPERVISOR_DATABASE_HOST: {{ .Values.api.supervisorDatabase.host | quote }}
+  COGITO_SUPERVISOR_DATABASE_PORT: {{ .Values.api.supervisorDatabase.port | quote }}
+  COGITO_SUPERVISOR_DATABASE_NAME: {{ .Values.api.supervisorDatabase.name | quote }}
+  COGITO_SUPERVISOR_DATABASE_USER: {{ .Values.api.supervisorDatabase.user | quote }}
 {{- end }}

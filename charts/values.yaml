@@ -39,6 +39,8 @@ postgresql:
           CREATE DATABASE temporal_visibility;
         create-litellm-db.sql: |
           CREATE DATABASE litellm;
+        create-cogito-db.sql: |
+          CREATE DATABASE cogito;
 
 ## @param externalDatabase.enabled Use an external database instead of the in-cluster PostgreSQL
 ## @param externalDatabase.host Hostname of the external database
@@ -383,6 +385,20 @@ api:
     host: "cogito-temporal-frontend:7233"
     namespace: default
     taskQueue: developer-tasks
+  ## @param api.supervisorDatabase.host PostgreSQL host for durable supervisor run state
+  ## @param api.supervisorDatabase.port PostgreSQL port for durable supervisor run state
+  ## @param api.supervisorDatabase.name PostgreSQL database for durable supervisor run state
+  ## @param api.supervisorDatabase.user PostgreSQL user for durable supervisor run state
+  ## @param api.supervisorDatabase.existingSecret Secret holding the supervisor database password
+  ## @param api.supervisorDatabase.passwordKey Key within api.supervisorDatabase.existingSecret holding the password
+  ##
+  supervisorDatabase:
+    host: cogito-postgresql
+    port: 5432
+    name: cogito
+    user: postgres
+    existingSecret: cogito-postgresql
+    passwordKey: postgres-password
 
 ## @section Worker
 ## Temporal worker: runs DeveloperRunWorkflow and its activities.
