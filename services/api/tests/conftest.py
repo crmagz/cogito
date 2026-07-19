@@ -36,6 +36,7 @@ def make_settings(**overrides) -> Settings:
         litellm_planner_model="balanced",
         litellm_planner_api_key="planner-test-key",
         litellm_planner_timeout_seconds=60.0,
+        deployment_mode="development",
         auth_mode="static",
         auth_static_token="operator-test-token",
         auth_static_subject="test-operator",
