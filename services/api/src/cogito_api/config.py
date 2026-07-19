@@ -32,6 +32,7 @@ class Settings:
     litellm_planner_model: str
     litellm_planner_api_key: str
     litellm_planner_timeout_seconds: float
+    deployment_mode: str
     auth_mode: str
     auth_static_token: str
     auth_static_subject: str
@@ -70,7 +71,7 @@ def load_settings() -> Settings:
         or not all(isinstance(host, str) and host.strip() for host in allowed_hosts)
     ):
         raise ValueError("COGITO_ALLOWED_GIT_HOSTS must be a non-empty JSON string array")
-    return Settings(
+    settings = Settings(
         minio_endpoint=os.environ.get("MINIO_ENDPOINT", "localhost:9000"),
         minio_access_key=os.environ.get("MINIO_ACCESS_KEY", "minioadmin"),
         minio_secret_key=os.environ.get("MINIO_SECRET_KEY", "minioadmin"),
@@ -97,6 +98,7 @@ def load_settings() -> Settings:
         litellm_planner_timeout_seconds=float(
             os.environ.get("COGITO_LITELLM_PLANNER_TIMEOUT_SECONDS", "60")
         ),
+        deployment_mode=os.environ.get("COGITO_DEPLOYMENT_MODE", "development"),
         auth_mode=os.environ.get("COGITO_AUTH_MODE", "static"),
         auth_static_token=os.environ.get("COGITO_AUTH_STATIC_TOKEN", ""),
         auth_static_subject=os.environ.get("COGITO_AUTH_STATIC_SUBJECT", "local-operator"),
@@ -106,3 +108,20 @@ def load_settings() -> Settings:
         auth_oidc_role_claim=os.environ.get("COGITO_AUTH_OIDC_ROLE_CLAIM", "roles"),
         auth_oidc_approval_role=os.environ.get("COGITO_AUTH_OIDC_APPROVAL_ROLE", "cogito-approver"),
     )
+    _validate_auth_configuration(settings)
+    return settings
+
+
+def _validate_auth_configuration(settings: Settings) -> None:
+    """Fail closed for invalid operator-approval authentication configuration."""
+
+    if settings.deployment_mode not in {"development", "production"}:
+        raise ValueError("COGITO_DEPLOYMENT_MODE must be development or production")
+    if settings.auth_mode not in {"static", "oidc"}:
+        raise ValueError("COGITO_AUTH_MODE must be static or oidc")
+    if settings.deployment_mode == "production" and settings.auth_mode != "oidc":
+        raise ValueError("production deployments require COGITO_AUTH_MODE=oidc")
+    if settings.auth_mode == "oidc" and not all(
+        (settings.auth_oidc_issuer, settings.auth_oidc_audience, settings.auth_oidc_jwks_url)
+    ):
+        raise ValueError("OIDC approval authentication requires issuer, audience, and JWKS URL")

@@ -12,6 +12,7 @@ metadata:
     app.kubernetes.io/name: api
     app.kubernetes.io/instance: {{ .Release.Name }}
 data:
+  COGITO_DEPLOYMENT_MODE: {{ ternary "production" "development" .Values.global.production | quote }}
   MINIO_ENDPOINT: {{ .Values.api.objectStore.endpoint | quote }}
   MINIO_SECURE: {{ .Values.api.objectStore.secure | quote }}
   MINIO_PLANS_BUCKET: {{ .Values.api.objectStore.bucket | quote }}
