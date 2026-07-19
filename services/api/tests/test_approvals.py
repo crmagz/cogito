@@ -99,6 +99,23 @@ def test_replayed_approval_is_idempotent(client: TestClient, valid_plan: dict, s
     assert len(starter.plan_approvals) == 1
 
 
+def test_idempotency_key_cannot_authorize_a_different_decision(client: TestClient, valid_plan: dict) -> None:
+    run_id, digest = _awaiting_plan(client, valid_plan)
+    first = client.post(
+        f"/api/v1/runs/{run_id}/approvals/plan",
+        json={"decision": "approve", "artifact_sha256": digest},
+        headers=_headers(),
+    )
+    conflicting = client.post(
+        f"/api/v1/runs/{run_id}/approvals/plan",
+        json={"decision": "reject", "artifact_sha256": digest, "comment": "different decision"},
+        headers=_headers(),
+    )
+
+    assert first.status_code == 202
+    assert conflicting.status_code == 409
+
+
 async def test_persisted_approval_is_retried_after_temporal_delivery_failure(
     client: TestClient,
     valid_plan: dict,
