@@ -21,6 +21,14 @@ def upgrade() -> None:
 
     op.add_column("supervisor_runs", sa.Column("active_workflow_id", sa.String(length=128), nullable=True))
     op.add_column("temporal_outbox", sa.Column("workflow_id", sa.String(length=128), nullable=True))
+    # Before this migration, each generated plan used the run ID as its
+    # workflow ID. Preserve that delivery address for an in-flight approval
+    # instead of stranding it after the application starts requiring an
+    # explicit workflow identity.
+    op.execute(
+        "UPDATE supervisor_runs SET active_workflow_id = run_id "
+        "WHERE plan_artifact_ref IS NOT NULL AND active_workflow_id IS NULL"
+    )
     # Existing outbox rows were created before plan-version workflow IDs and
     # target the run ID. Retain that valid historical delivery address.
     op.execute("UPDATE temporal_outbox SET workflow_id = run_id WHERE workflow_id IS NULL")
