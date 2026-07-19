@@ -95,7 +95,9 @@ def test_generate_plan_persists_validated_artifact_and_enters_approval_state(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "awaiting_plan_approval"
-    assert body["plan_artifact"]["ref"].endswith(f"/plans/{run_id}/revisions/{body['plan_artifact']['sha256']}/plan.json")
+    assert body["plan_artifact"]["ref"].endswith(
+        f"/plans/{run_id}/revisions/1/{body['plan_artifact']['sha256']}/plan.json"
+    )
     assert len(body["plan_artifact"]["sha256"]) == 64
     assert store.plans[run_id].title == valid_plan["title"]
     assert supervisor_store.planning_runs[run_id].plan_artifact is not None
@@ -146,7 +148,9 @@ def test_revision_reopens_planning_with_a_new_artifact_and_workflow(
     )
 
     assert revision.status_code == 202
-    assert client.get(f"/api/v1/planning-runs/{run_id}").json()["status"] == "planning"
+    reopened = client.get(f"/api/v1/planning-runs/{run_id}").json()
+    assert reopened["status"] == "planning"
+    assert reopened["plan_artifact"] is None
     revised_plan = copy.deepcopy(valid_plan)
     revised_plan["title"] = "Add a narrower rate limiter"
     planner.plan = AiPlan.model_validate(revised_plan)
@@ -163,6 +167,36 @@ def test_revision_reopens_planning_with_a_new_artifact_and_workflow(
         headers={"Authorization": "Bearer operator-test-token", "Idempotency-Key": "stale-after-revision"},
     )
     assert stale.status_code == 409
+
+
+def test_revision_scopes_workflow_and_idempotency_when_plan_content_is_identical(
+    client: TestClient, valid_plan: dict, starter: FakeRunStarter
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+    first = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+    digest = first.json()["plan_artifact"]["sha256"]
+    headers = {"Authorization": "Bearer operator-test-token", "Idempotency-Key": "same-key"}
+    revision = client.post(
+        f"/api/v1/runs/{run_id}/approvals/plan",
+        json={"decision": "request_revision", "artifact_sha256": digest, "comment": "Regenerate."},
+        headers=headers,
+    )
+
+    assert revision.status_code == 202
+    assert client.get(f"/api/v1/planning-runs/{run_id}").json()["plan_artifact"] is None
+    second = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+    assert second.status_code == 200
+    assert second.json()["plan_artifact"]["sha256"] == digest
+    assert second.json()["plan_artifact"]["ref"] != first.json()["plan_artifact"]["ref"]
+    assert starter.started_runs[0].workflow_id != starter.started_runs[1].workflow_id
+    approved = client.post(
+        f"/api/v1/runs/{run_id}/approvals/plan",
+        json={"decision": "approve", "artifact_sha256": digest},
+        headers=headers,
+    )
+    assert approved.status_code == 202
+    assert len(starter.plan_approvals) == 2
 
 
 def test_existing_direct_plan_submission_contract_remains_compatible(

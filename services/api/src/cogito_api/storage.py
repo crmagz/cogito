@@ -18,7 +18,7 @@ from .models import AiPlan, ArtifactReference
 class PlanStore(Protocol):
     def put_plan(self, run_id: str, plan: AiPlan) -> "PlanSnapshot": ...
 
-    def put_planning_plan(self, run_id: str, plan: AiPlan) -> "PlanSnapshot": ...
+    def put_planning_plan(self, run_id: str, revision: int, plan: AiPlan) -> "PlanSnapshot": ...
 
     def put_status(self, run_id: str, status: dict) -> None: ...
 
@@ -79,12 +79,14 @@ class MinioPlanStore:
             sha256=sha256(data).hexdigest(),
         )
 
-    def put_planning_plan(self, run_id: str, plan: AiPlan) -> PlanSnapshot:
+    def put_planning_plan(self, run_id: str, revision: int, plan: AiPlan) -> PlanSnapshot:
         """Store a generated plan under its content digest so revisions never overwrite it."""
 
+        if revision < 1:
+            raise ValueError("planning artifact revision must be positive")
         data = plan_snapshot_bytes(plan)
         digest = sha256(data).hexdigest()
-        object_name = f"plans/{run_id}/revisions/{digest}/plan.json"
+        object_name = f"plans/{run_id}/revisions/{revision}/{digest}/plan.json"
         self._put_snapshot(object_name, data)
         return PlanSnapshot(ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=digest)
 
