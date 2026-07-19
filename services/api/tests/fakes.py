@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from cogito_api.models import AiPlan, ArtifactReference, RunEnvelope
+from cogito_api.models import AiPlan, ArtifactReference, PlanningRunStatus, RunEnvelope
+from cogito_api.planner import PlanningContext
 from cogito_api.storage import PlanSnapshot, plan_snapshot_bytes, source_specification_bytes
 from cogito_api.supervisor import PlanningRunRecord
 
@@ -35,6 +36,10 @@ class InMemoryPlanStore:
             sha256=sha256(source_specification_bytes(initial_specification)).hexdigest(),
         )
 
+    def get_source_specification(self, source_artifact_ref: str) -> str:
+        run_id = source_artifact_ref.split("/")[4]
+        return self.source_specifications[run_id]
+
 
 class InMemorySupervisorStore:
     def __init__(self) -> None:
@@ -45,6 +50,41 @@ class InMemorySupervisorStore:
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         return self.planning_runs.get(run_id)
+
+    async def attach_generated_plan(
+        self,
+        run_id: str,
+        plan_artifact: ArtifactReference,
+        planner_model: str,
+    ) -> PlanningRunRecord:
+        record = self.planning_runs[run_id]
+        if record.status.value != "planning":
+            raise ValueError("planning run is not eligible to accept a generated plan")
+        updated = PlanningRunRecord(
+            run_id=record.run_id,
+            status=PlanningRunStatus.AWAITING_PLAN_APPROVAL,
+            source_artifact=record.source_artifact,
+            target_repos=record.target_repos,
+            spec_set=record.spec_set,
+            constraints=record.constraints,
+            priority=record.priority,
+            submitted_at=record.submitted_at,
+            submitted_by=record.submitted_by,
+            plan_artifact=plan_artifact,
+            planner_model=planner_model,
+        )
+        self.planning_runs[run_id] = updated
+        return updated
+
+
+class FakePlanner:
+    def __init__(self, plan: AiPlan) -> None:
+        self.plan = plan
+        self.contexts: list[PlanningContext] = []
+
+    async def generate(self, context: PlanningContext) -> AiPlan:
+        self.contexts.append(context)
+        return self.plan
 
 
 class FakeRunStarter:

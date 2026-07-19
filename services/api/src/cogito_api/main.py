@@ -14,10 +14,12 @@ from .models import (
     PlanningRunResponse,
     PlanningRunStatus,
     PlanningRunSubmission,
+    ArtifactReference,
     RunEnvelope,
     RunSubmission,
     Violation,
 )
+from .planner import LiteLLMPlanner, Planner, PlanningContext
 from .storage import MinioPlanStore, PlanStore
 from .supervisor import PlanningRunRecord, PostgresSupervisorStore, SupervisorStore
 from .temporal import RunStarter, TemporalRunStarter
@@ -48,6 +50,7 @@ def create_app(
     settings: Settings | None = None,
     starter: RunStarter | None = None,
     supervisor_store: SupervisorStore | None = None,
+    planner: Planner | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     store = store or MinioPlanStore(
@@ -65,6 +68,7 @@ def create_app(
         settings.temporal_host, settings.temporal_namespace, settings.temporal_task_queue
     )
     supervisor_store = supervisor_store or PostgresSupervisorStore(settings.supervisor_database_url)
+    planner = planner or LiteLLMPlanner(settings)
 
     app = FastAPI(title="Cogito API")
 
@@ -168,9 +172,46 @@ def create_app(
             run_id=record.run_id,
             status=record.status,
             source_artifact=record.source_artifact,
+            plan_artifact=record.plan_artifact,
             submitted_at=record.submitted_at,
         )
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
+
+    @app.post("/api/v1/planning-runs/{run_id}/generate-plan")
+    async def generate_plan(run_id: str) -> JSONResponse:
+        """Generate and persist one normalized plan for a planning run.
+
+        This endpoint becomes worker-internal when the durable workflow gate is added.
+        """
+
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
+        if record.status is not PlanningRunStatus.PLANNING:
+            raise HTTPException(status_code=409, detail="planning run is not eligible for plan generation")
+        initial_specification = store.get_source_specification(record.source_artifact.ref)
+        generated_plan = await planner.generate(
+            PlanningContext(
+                initial_specification=initial_specification,
+                target_repos=record.target_repos,
+                spec_set=record.spec_set,
+                constraints=record.constraints,
+            )
+        )
+        snapshot = store.put_plan(run_id, generated_plan)
+        updated = await supervisor_store.attach_generated_plan(
+            run_id,
+            plan_artifact=ArtifactReference(ref=snapshot.ref, sha256=snapshot.sha256),
+            planner_model=settings.litellm_planner_model,
+        )
+        response = PlanningRunResponse(
+            run_id=updated.run_id,
+            status=updated.status,
+            source_artifact=updated.source_artifact,
+            plan_artifact=updated.plan_artifact,
+            submitted_at=updated.submitted_at,
+        )
+        return JSONResponse(content=response.model_dump(mode="json"))
 
     @app.get("/api/v1/runs/{run_id}/status")
     async def get_run_status(run_id: str) -> dict:
@@ -190,6 +231,7 @@ def create_app(
             run_id=record.run_id,
             status=record.status,
             source_artifact=record.source_artifact,
+            plan_artifact=record.plan_artifact,
             submitted_at=record.submitted_at,
         )
         return JSONResponse(content=response.model_dump(mode="json"))
