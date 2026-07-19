@@ -10,6 +10,7 @@ from temporalio.worker import Worker
 from .activities import WorkerActivities
 from .config import load_settings
 from .execution import ExecutionJobSettings, ExecutionWorkspaceService, KubernetesExecutionJobClient
+from .harness import ClaudeCodeHarness
 from .storage import MinioRunStore
 from .workflows import DeveloperRunWorkflow
 
@@ -49,13 +50,24 @@ async def main() -> None:
         object_store_secret=settings.execution_object_store_secret,
         object_store_access_key_secret_key=settings.execution_object_store_access_key_secret_key,
         object_store_secret_key_secret_key=settings.execution_object_store_secret_key_secret_key,
+        litellm_endpoint=settings.execution_litellm_endpoint,
+        litellm_model=settings.execution_litellm_model,
+        litellm_key_secret=settings.execution_litellm_key_secret,
+        litellm_key_secret_key=settings.execution_litellm_key_secret_key,
+        git_credentials_secret=settings.execution_git_credentials_secret,
+        git_credentials_secret_key=settings.execution_git_credentials_secret_key,
+        git_author_name=settings.execution_git_author_name,
+        git_author_email=settings.execution_git_author_email,
+        command_output_limit_bytes=settings.execution_command_output_limit_bytes,
+    )
+    execution_workspaces = ExecutionWorkspaceService(
+        execution_settings,
+        KubernetesExecutionJobClient(settings.execution_namespace, settings.execution_cleanup_timeout_seconds),
     )
     activities = WorkerActivities(
         store,
-        ExecutionWorkspaceService(
-            execution_settings,
-            KubernetesExecutionJobClient(settings.execution_namespace, settings.execution_cleanup_timeout_seconds),
-        ),
+        execution_workspaces,
+        ClaudeCodeHarness(execution_workspaces),
     )
 
     worker = Worker(
@@ -67,6 +79,7 @@ async def main() -> None:
             activities.report_status,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
+            activities.run_phase,
         ],
     )
     await worker.run()

@@ -9,11 +9,12 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from .activities import WorkerActivities
-    from .models import ExecutionRequest, RunEnvelope, RunResult
+    from .models import ExecutionRequest, PhaseExecutionRequest, PlanPhase, RunEnvelope, RunResult
 
 _ACTIVITY_TIMEOUT = timedelta(seconds=30)
 _CLEANUP_ACTIVITY_TIMEOUT = timedelta(seconds=120)
 _PROVISION_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
+_RUN_PHASE_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 
 
 @workflow.defn
@@ -60,6 +61,7 @@ class DeveloperRunWorkflow:
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
             )
             _validate_plan_snapshot(plan, envelope)
+            phase, max_turns, phase_timeout = _single_phase_execution_limits(plan)
             if envelope.requires_plan_approval:
                 self._plan_sha256 = envelope.plan_sha256
                 self._awaiting_plan_approval = True
@@ -99,9 +101,36 @@ class DeveloperRunWorkflow:
                 retry_policy=_PROVISION_RETRY_POLICY,
             )
             try:
-                # The future harness runs inside the prepared execution pod.
-                # Keep cleanup in finally so a later harness failure cannot leak its workspace.
-                pass
+                await workflow.execute_activity(
+                    WorkerActivities.report_status,
+                    args=[envelope.run_id, "implementing"],
+                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                )
+                phase_result = await workflow.execute_activity(
+                    WorkerActivities.run_phase,
+                    args=[
+                        PhaseExecutionRequest(
+                            phase=phase,
+                            workspace=workspace,
+                            max_turns=max_turns,
+                            timeout_seconds=int(phase_timeout.total_seconds()),
+                        )
+                    ],
+                    start_to_close_timeout=phase_timeout,
+                    retry_policy=_RUN_PHASE_RETRY_POLICY,
+                )
+                await workflow.execute_activity(
+                    WorkerActivities.report_status,
+                    args=[
+                        envelope.run_id,
+                        "phase_complete" if phase_result.succeeded else "phase_failed",
+                        None,
+                        {"phase_result": phase_result.metadata()},
+                    ],
+                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                )
+                if not phase_result.succeeded:
+                    raise RuntimeError(f"phase {phase.id} failed: {phase_result.summary}")
             finally:
                 await workflow.execute_activity(
                     WorkerActivities.cleanup_execution_workspace,
@@ -133,6 +162,28 @@ def _validate_plan_snapshot(plan: dict, envelope: RunEnvelope) -> None:
         raise ValueError("run plan snapshot digest does not match the submitted envelope")
     if plan.get("spec_set") != envelope.spec_ref or plan.get("target_repos") != envelope.target_repos:
         raise ValueError("run envelope does not match its immutable plan snapshot")
+
+
+def _single_phase_execution_limits(plan: dict) -> tuple[PlanPhase, int, timedelta]:
+    """Extract one executable phase and reject multi-phase plans until Phase 8 sequencing exists."""
+
+    phases = plan.get("phases")
+    if not isinstance(phases, list) or len(phases) != 1:
+        raise ValueError("single-phase execution requires exactly one approved plan phase")
+    constraints = plan.get("constraints")
+    if not isinstance(constraints, dict):
+        raise ValueError("plan constraints are missing")
+    max_turns = constraints.get("max_turns_per_phase")
+    max_wall_clock_minutes = constraints.get("max_wall_clock_minutes")
+    if not isinstance(max_turns, int) or isinstance(max_turns, bool) or max_turns < 1:
+        raise ValueError("plan max_turns_per_phase must be a positive integer")
+    if (
+        not isinstance(max_wall_clock_minutes, int)
+        or isinstance(max_wall_clock_minutes, bool)
+        or max_wall_clock_minutes < 1
+    ):
+        raise ValueError("plan max_wall_clock_minutes must be a positive integer")
+    return PlanPhase.from_dict(phases[0]), max_turns, timedelta(minutes=max_wall_clock_minutes)
 
 
 def _failure_detail(error: Exception) -> str:

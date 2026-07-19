@@ -9,6 +9,7 @@ from cogito_worker.models import ExecutionRequest
 
 from .fakes import (
     InMemoryExecutionJobClient,
+    InMemoryHarness,
     InMemoryExecutionWorkspaces,
     InMemoryRunStore,
 )
@@ -21,7 +22,7 @@ def store() -> InMemoryRunStore:
 
 @pytest.fixture
 def activities(store: InMemoryRunStore) -> WorkerActivities:
-    return WorkerActivities(store, InMemoryExecutionWorkspaces())
+    return WorkerActivities(store, InMemoryExecutionWorkspaces(), InMemoryHarness())
 
 
 @pytest.fixture
@@ -90,9 +91,19 @@ async def test_execution_workspace_activities_manage_only_the_current_run(
                 object_store_secret="cogito-minio",
                 object_store_access_key_secret_key="rootUser",
                 object_store_secret_key_secret_key="rootPassword",
+                litellm_endpoint="http://cogito-litellm:4000",
+                litellm_model="complex",
+                litellm_key_secret="cogito-developer-key",
+                litellm_key_secret_key="api-key",
+                git_credentials_secret="cogito-developer-git",
+                git_credentials_secret_key="token",
+                git_author_name="Cogito Agent",
+                git_author_email="cogito@local.invalid",
+                command_output_limit_bytes=262144,
             ),
             jobs,
         ),
+        InMemoryHarness(),
     )
 
     workspace = await env.run(

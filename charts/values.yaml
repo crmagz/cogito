@@ -526,6 +526,20 @@ worker:
       ## Explicit CIDRs for an external object store such as S3. Prefer a VPC endpoint.
       ## Empty keeps the execution namespace restricted to the in-cluster MinIO Service.
       objectStoreEgress: []
+    ## The agent receives a dedicated LiteLLM virtual key and a repository-scoped
+    ## Git write credential only in its execution pod. The chart never creates
+    ## either Secret; supply them through external secret management.
+    harness:
+      ## Empty uses the release-local LiteLLM Service.
+      litellmEndpoint: ""
+      model: complex
+      existingSecret: cogito-developer-key
+      apiKeyKey: api-key
+      gitCredentialsSecret: cogito-developer-git
+      gitCredentialsKey: token
+      gitAuthorName: Cogito Agent
+      gitAuthorEmail: cogito@local.invalid
+      commandOutputLimitBytes: 262144
   ## @param worker.resources.requests.memory Memory request
   ## @param worker.resources.requests.cpu CPU request
   ## @param worker.resources.limits.memory Memory limit
