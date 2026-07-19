@@ -21,7 +21,7 @@ jobs:
       previous-tag: ${{ steps.version.outputs.previous-tag }}
       release-required: ${{ steps.version.outputs.release-required }}
     steps:
-      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
       - id: version
@@ -37,14 +37,14 @@ jobs:
     if: needs.api-version.outputs.release-required == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
-      - uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
       - name: Build and publish API image
         run: |
           docker buildx build services/api \
@@ -66,7 +66,7 @@ jobs:
     if: needs.api-version.outputs.release-required == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
       - uses: crmagz/forge/.github/actions/release@releases/v1
@@ -86,7 +86,7 @@ jobs:
       previous-tag: ${{ steps.version.outputs.previous-tag }}
       release-required: ${{ steps.version.outputs.release-required }}
     steps:
-      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
       - id: version
@@ -102,14 +102,14 @@ jobs:
     if: needs.worker-version.outputs.release-required == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
-      - uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
       - name: Build and publish worker image
         run: |
           docker buildx build services/worker \
@@ -131,7 +131,7 @@ jobs:
     if: needs.worker-version.outputs.release-required == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
       - uses: crmagz/forge/.github/actions/release@releases/v1
@@ -151,7 +151,7 @@ jobs:
       previous-tag: ${{ steps.version.outputs.previous-tag }}
       release-required: ${{ steps.version.outputs.release-required }}
     steps:
-      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
       - id: version
@@ -166,7 +166,7 @@ jobs:
     if: needs.chart-version.outputs.release-required == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
@@ -184,7 +184,7 @@ jobs:
     if: needs.chart-version.outputs.release-required == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
       - uses: crmagz/forge/.github/actions/release@releases/v1
