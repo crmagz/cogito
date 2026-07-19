@@ -32,6 +32,14 @@ class Settings:
     litellm_planner_model: str
     litellm_planner_api_key: str
     litellm_planner_timeout_seconds: float
+    auth_mode: str
+    auth_static_token: str
+    auth_static_subject: str
+    auth_oidc_issuer: str
+    auth_oidc_audience: str
+    auth_oidc_jwks_url: str
+    auth_oidc_role_claim: str
+    auth_oidc_approval_role: str
 
     @property
     def supervisor_database_url(self) -> str:
@@ -89,4 +97,12 @@ def load_settings() -> Settings:
         litellm_planner_timeout_seconds=float(
             os.environ.get("COGITO_LITELLM_PLANNER_TIMEOUT_SECONDS", "60")
         ),
+        auth_mode=os.environ.get("COGITO_AUTH_MODE", "static"),
+        auth_static_token=os.environ.get("COGITO_AUTH_STATIC_TOKEN", ""),
+        auth_static_subject=os.environ.get("COGITO_AUTH_STATIC_SUBJECT", "local-operator"),
+        auth_oidc_issuer=os.environ.get("COGITO_AUTH_OIDC_ISSUER", ""),
+        auth_oidc_audience=os.environ.get("COGITO_AUTH_OIDC_AUDIENCE", ""),
+        auth_oidc_jwks_url=os.environ.get("COGITO_AUTH_OIDC_JWKS_URL", ""),
+        auth_oidc_role_claim=os.environ.get("COGITO_AUTH_OIDC_ROLE_CLAIM", "roles"),
+        auth_oidc_approval_role=os.environ.get("COGITO_AUTH_OIDC_APPROVAL_ROLE", "cogito-approver"),
     )

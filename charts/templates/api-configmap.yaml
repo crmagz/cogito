@@ -27,4 +27,11 @@ data:
   COGITO_LITELLM_ENDPOINT: {{ .Values.api.planner.endpoint | quote }}
   COGITO_LITELLM_PLANNER_MODEL: {{ .Values.api.planner.model | quote }}
   COGITO_LITELLM_PLANNER_TIMEOUT_SECONDS: {{ .Values.api.planner.timeoutSeconds | quote }}
+  COGITO_AUTH_MODE: {{ .Values.api.auth.mode | quote }}
+  COGITO_AUTH_STATIC_SUBJECT: {{ .Values.api.auth.static.subject | quote }}
+  COGITO_AUTH_OIDC_ISSUER: {{ .Values.api.auth.oidc.issuer | quote }}
+  COGITO_AUTH_OIDC_AUDIENCE: {{ .Values.api.auth.oidc.audience | quote }}
+  COGITO_AUTH_OIDC_JWKS_URL: {{ .Values.api.auth.oidc.jwksUrl | quote }}
+  COGITO_AUTH_OIDC_ROLE_CLAIM: {{ .Values.api.auth.oidc.roleClaim | quote }}
+  COGITO_AUTH_OIDC_APPROVAL_ROLE: {{ .Values.api.auth.oidc.approvalRole | quote }}
 {{- end }}

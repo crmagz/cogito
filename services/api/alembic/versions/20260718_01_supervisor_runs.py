@@ -33,7 +33,7 @@ def upgrade() -> None:
         sa.Column("submitted_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("submitted_by", sa.String(length=256), nullable=False),
         sa.CheckConstraint(
-            "status IN ('planning', 'awaiting_plan_approval', 'planning_failed', 'rejected', 'revision_requested')",
+            "status IN ('planning', 'awaiting_plan_approval', 'implementing', 'planning_failed', 'rejected', 'revision_requested')",
             name="supervisor_runs_valid_status",
         ),
     )

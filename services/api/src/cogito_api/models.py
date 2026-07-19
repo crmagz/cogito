@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import Enum, StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ReviewProfile(str, Enum):
@@ -72,9 +72,18 @@ class PlanningRunStatus(StrEnum):
 
     PLANNING = "planning"
     AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
+    IMPLEMENTING = "implementing"
     PLANNING_FAILED = "planning_failed"
     REJECTED = "rejected"
     REVISION_REQUESTED = "revision_requested"
+
+
+class PlanApprovalDecision(StrEnum):
+    """Human decision permitted at the plan-approval gate."""
+
+    APPROVE = "approve"
+    REJECT = "reject"
+    REQUEST_REVISION = "request_revision"
 
 
 class PlanningRunSubmission(BaseModel):
@@ -125,6 +134,43 @@ class PlanningRunResponse(BaseModel):
     submitted_at: str = Field(description="ISO 8601 submission timestamp")
 
 
+class PlanApprovalRequest(BaseModel):
+    """Digest-bound human decision submitted to the plan-approval gate."""
+
+    decision: PlanApprovalDecision = Field(description="Human approval, rejection, or revision request")
+    artifact_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the exact generated plan being reviewed",
+    )
+    comment: str | None = Field(
+        default=None,
+        max_length=10_000,
+        description="Required rationale for rejection or revision requests",
+    )
+
+    @model_validator(mode="after")
+    def require_comment_for_non_approval(self) -> "PlanApprovalRequest":
+        """Ensure non-approval decisions carry durable reviewer context."""
+
+        if self.decision is not PlanApprovalDecision.APPROVE and not (self.comment and self.comment.strip()):
+            raise ValueError("comment is required when rejecting or requesting revision")
+        return self
+
+
+class PlanApprovalResponse(BaseModel):
+    """Auditable result of an accepted idempotent plan decision."""
+
+    decision_id: str = Field(description="Immutable decision identifier")
+    run_id: str = Field(description="Planning run identifier")
+    decision: PlanApprovalDecision = Field(description="Recorded plan decision")
+    artifact_sha256: str = Field(description="Digest reviewed by the human")
+    actor_id: str = Field(description="Authenticated reviewer subject")
+    delivered: bool = Field(description="Whether Temporal accepted the decision update")
+    created_at: str = Field(description="ISO 8601 decision timestamp")
+
+
 class RunEnvelope(BaseModel):
     run_id: str
     plan_ref: str = Field(description="Object store path of the immutable plan snapshot")
@@ -135,6 +181,10 @@ class RunEnvelope(BaseModel):
     priority: str = Field(default="normal")
     submitted_at: str = Field(description="ISO 8601 timestamp")
     submitted_by: str = Field(description="Identity of the submitter")
+    requires_plan_approval: bool = Field(
+        default=False,
+        description="Whether the workflow must wait for a digest-bound plan decision before execution",
+    )
 
 
 class Violation(BaseModel):

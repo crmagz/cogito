@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from cogito_api.models import AiPlan, ArtifactReference, PlanningRunStatus, RunEnvelope
+from datetime import datetime, timezone
+
+from cogito_api.models import AiPlan, ArtifactReference, PlanApprovalDecision, PlanningRunStatus, RunEnvelope
 from cogito_api.planner import PlanningContext
 from cogito_api.storage import PlanSnapshot, plan_snapshot_bytes, source_specification_bytes
-from cogito_api.supervisor import PlanningRunRecord
+from cogito_api.supervisor import ApprovalConflictError, ApprovalRecord, PlanningRunRecord
 
 
 class InMemoryPlanStore:
@@ -44,6 +46,7 @@ class InMemoryPlanStore:
 class InMemorySupervisorStore:
     def __init__(self) -> None:
         self.planning_runs: dict[str, PlanningRunRecord] = {}
+        self.approvals: dict[tuple[str, str], ApprovalRecord] = {}
 
     async def create_planning_run(self, record: PlanningRunRecord) -> None:
         self.planning_runs[record.run_id] = record
@@ -76,6 +79,69 @@ class InMemorySupervisorStore:
         self.planning_runs[run_id] = updated
         return updated
 
+    async def record_plan_approval(
+        self,
+        run_id: str,
+        artifact_sha256: str,
+        decision: PlanApprovalDecision,
+        actor_id: str,
+        comment: str | None,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> ApprovalRecord:
+        existing = self.approvals.get((run_id, idempotency_key))
+        if existing is not None:
+            return existing
+        run = self.planning_runs.get(run_id)
+        if run is None or run.status is not PlanningRunStatus.AWAITING_PLAN_APPROVAL:
+            raise ApprovalConflictError("planning run is not awaiting plan approval")
+        if run.plan_artifact is None or run.plan_artifact.sha256 != artifact_sha256:
+            raise ApprovalConflictError("plan approval artifact digest is stale")
+        record = ApprovalRecord(
+            decision_id=f"decision-{len(self.approvals) + 1}",
+            run_id=run_id,
+            decision=decision,
+            artifact_sha256=artifact_sha256,
+            actor_id=actor_id,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            delivered=False,
+        )
+        self.approvals[(run_id, idempotency_key)] = record
+        return record
+
+    async def mark_plan_approval_delivered(self, decision_id: str) -> None:
+        for key, record in self.approvals.items():
+            if record.decision_id == decision_id:
+                self.approvals[key] = ApprovalRecord(
+                    decision_id=record.decision_id,
+                    run_id=record.run_id,
+                    decision=record.decision,
+                    artifact_sha256=record.artifact_sha256,
+                    actor_id=record.actor_id,
+                    created_at=record.created_at,
+                    delivered=True,
+                )
+                run = self.planning_runs[record.run_id]
+                status = {
+                    PlanApprovalDecision.APPROVE: PlanningRunStatus.IMPLEMENTING,
+                    PlanApprovalDecision.REJECT: PlanningRunStatus.REJECTED,
+                    PlanApprovalDecision.REQUEST_REVISION: PlanningRunStatus.REVISION_REQUESTED,
+                }[record.decision]
+                self.planning_runs[record.run_id] = PlanningRunRecord(
+                    run_id=run.run_id,
+                    status=status,
+                    source_artifact=run.source_artifact,
+                    target_repos=run.target_repos,
+                    spec_set=run.spec_set,
+                    constraints=run.constraints,
+                    priority=run.priority,
+                    submitted_at=run.submitted_at,
+                    submitted_by=run.submitted_by,
+                    plan_artifact=run.plan_artifact,
+                    planner_model=run.planner_model,
+                )
+                return
+
 
 class FakePlanner:
     def __init__(self, plan: AiPlan) -> None:
@@ -90,6 +156,11 @@ class FakePlanner:
 class FakeRunStarter:
     def __init__(self) -> None:
         self.started_runs: list[RunEnvelope] = []
+        self.plan_approvals: list[tuple[str, dict[str, str]]] = []
 
     async def start_run(self, envelope: RunEnvelope) -> None:
         self.started_runs.append(envelope)
+
+    async def submit_plan_approval(self, run_id: str, decision: dict[str, str]) -> bool:
+        self.plan_approvals.append((run_id, decision))
+        return True

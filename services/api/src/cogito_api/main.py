@@ -1,27 +1,32 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
+from hashlib import sha256
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from minio import Minio
 
+from .auth import ApprovalAuthenticator
 from .config import Settings, load_settings
 from .dag import validate_constraints, validate_phase_dag, validate_spec_reference, validate_target_repositories
 from .models import (
+    ArtifactReference,
+    PlanApprovalRequest,
+    PlanApprovalResponse,
     PlanningRunResponse,
     PlanningRunStatus,
     PlanningRunSubmission,
-    ArtifactReference,
     RunEnvelope,
     RunSubmission,
     Violation,
 )
-from .planner import LiteLLMPlanner, Planner, PlanningContext
+from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
 from .storage import MinioPlanStore, PlanStore
-from .supervisor import PlanningRunRecord, PostgresSupervisorStore, SupervisorStore
+from .supervisor import ApprovalConflictError, PlanningRunRecord, PostgresSupervisorStore, SupervisorStore
 from .temporal import RunStarter, TemporalRunStarter
 
 
@@ -69,6 +74,7 @@ def create_app(
     )
     supervisor_store = supervisor_store or PostgresSupervisorStore(settings.supervisor_database_url)
     planner = planner or LiteLLMPlanner(settings)
+    authenticator = ApprovalAuthenticator(settings)
 
     app = FastAPI(title="Cogito API")
 
@@ -190,19 +196,36 @@ def create_app(
         if record.status is not PlanningRunStatus.PLANNING:
             raise HTTPException(status_code=409, detail="planning run is not eligible for plan generation")
         initial_specification = store.get_source_specification(record.source_artifact.ref)
-        generated_plan = await planner.generate(
-            PlanningContext(
-                initial_specification=initial_specification,
-                target_repos=record.target_repos,
-                spec_set=record.spec_set,
-                constraints=record.constraints,
+        try:
+            generated_plan = await planner.generate(
+                PlanningContext(
+                    initial_specification=initial_specification,
+                    target_repos=record.target_repos,
+                    spec_set=record.spec_set,
+                    constraints=record.constraints,
+                )
             )
-        )
+        except PlannerError as error:
+            raise HTTPException(status_code=502, detail="planner failed to produce a valid plan") from error
         snapshot = store.put_plan(run_id, generated_plan)
         updated = await supervisor_store.attach_generated_plan(
             run_id,
             plan_artifact=ArtifactReference(ref=snapshot.ref, sha256=snapshot.sha256),
             planner_model=settings.litellm_planner_model,
+        )
+        await starter.start_run(
+            RunEnvelope(
+                run_id=updated.run_id,
+                plan_ref=snapshot.ref,
+                plan_sha256=snapshot.sha256,
+                spec_ref=updated.spec_set,
+                target_repos=updated.target_repos,
+                constraints=updated.constraints,
+                priority=updated.priority,
+                submitted_at=updated.submitted_at,
+                submitted_by=updated.submitted_by,
+                requires_plan_approval=True,
+            )
         )
         response = PlanningRunResponse(
             run_id=updated.run_id,
@@ -212,6 +235,56 @@ def create_app(
             submitted_at=updated.submitted_at,
         )
         return JSONResponse(content=response.model_dump(mode="json"))
+
+    @app.post("/api/v1/runs/{run_id}/approvals/plan")
+    async def approve_plan(
+        run_id: str,
+        request_body: PlanApprovalRequest,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """Persist and deliver one authenticated decision for the current plan artifact."""
+
+        if not idempotency_key or len(idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
+        principal = await authenticator.authenticate(authorization)
+        request_sha256 = sha256(
+            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        try:
+            recorded = await supervisor_store.record_plan_approval(
+                run_id=run_id,
+                artifact_sha256=request_body.artifact_sha256,
+                decision=request_body.decision,
+                actor_id=principal.subject,
+                comment=request_body.comment,
+                idempotency_key=idempotency_key,
+                request_sha256=request_sha256,
+            )
+        except ApprovalConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        delivered = recorded.delivered
+        if not delivered:
+            delivered = await starter.submit_plan_approval(
+                run_id,
+                {
+                    "decision_id": recorded.decision_id,
+                    "artifact_sha256": recorded.artifact_sha256,
+                    "decision": recorded.decision.value,
+                },
+            )
+            if delivered:
+                await supervisor_store.mark_plan_approval_delivered(recorded.decision_id)
+        response = PlanApprovalResponse(
+            decision_id=recorded.decision_id,
+            run_id=recorded.run_id,
+            decision=recorded.decision,
+            artifact_sha256=recorded.artifact_sha256,
+            actor_id=recorded.actor_id,
+            delivered=delivered,
+            created_at=recorded.created_at,
+        )
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
 
     @app.get("/api/v1/runs/{run_id}/status")
     async def get_run_status(run_id: str) -> dict:
