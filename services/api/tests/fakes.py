@@ -47,6 +47,7 @@ class InMemorySupervisorStore:
     def __init__(self) -> None:
         self.planning_runs: dict[str, PlanningRunRecord] = {}
         self.approvals: dict[tuple[str, str], ApprovalRecord] = {}
+        self.approval_request_hashes: dict[tuple[str, str], str] = {}
         self.outbox: dict[str, OutboxDelivery] = {}
         self.leased_decision_ids: set[str] = set()
 
@@ -93,6 +94,8 @@ class InMemorySupervisorStore:
     ) -> ApprovalRecord:
         existing = self.approvals.get((run_id, idempotency_key))
         if existing is not None:
+            if self.approval_request_hashes[(run_id, idempotency_key)] != request_sha256:
+                raise ApprovalConflictError("idempotency key was reused with a different decision")
             return existing
         run = self.planning_runs.get(run_id)
         if run is None or run.status is not PlanningRunStatus.AWAITING_PLAN_APPROVAL:
@@ -109,6 +112,7 @@ class InMemorySupervisorStore:
             delivered=False,
         )
         self.approvals[(run_id, idempotency_key)] = record
+        self.approval_request_hashes[(run_id, idempotency_key)] = request_sha256
         self.outbox[record.decision_id] = OutboxDelivery(
             decision_id=record.decision_id,
             run_id=record.run_id,

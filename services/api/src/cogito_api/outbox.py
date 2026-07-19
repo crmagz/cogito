@@ -4,20 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from dataclasses import dataclass
 
 from .supervisor import SupervisorStore
 from .temporal import RunStarter
 
-
-@dataclass(frozen=True)
-class PendingPlanApproval:
-    """A claimed, immutable decision awaiting Temporal delivery."""
-
-    decision_id: str
-    run_id: str
-    payload: dict[str, str]
-    attempt_count: int
+_LOGGER = logging.getLogger(__name__)
 
 
 class PlanApprovalOutboxDispatcher:
@@ -62,7 +55,13 @@ class PlanApprovalOutboxDispatcher:
         """Poll until cancelled; leasing makes this safe with multiple API replicas."""
 
         while True:
-            await self.deliver_once()
+            try:
+                await self.deliver_once()
+            except Exception:
+                # A transient database or gateway failure must not terminate the
+                # only background retry loop. Do not log exception text: provider
+                # exceptions can embed request headers or connection strings.
+                _LOGGER.warning("plan approval outbox delivery pass failed", exc_info=False)
             await asyncio.sleep(self._poll_seconds)
 
 
@@ -83,4 +82,5 @@ def _retry_delay(attempt_count: int) -> int:
 def _error_detail(error: Exception) -> str:
     """Persist a bounded, non-secret diagnostic string for operators."""
 
-    return " ".join(str(error).split())[:1024] or error.__class__.__name__
+    del error
+    return "transient Temporal delivery failure"
