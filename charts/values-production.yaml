@@ -82,6 +82,13 @@ temporal:
 litellm:
   replicaCount: 2
   existingSecret: cogito-litellm-credentials
+  rolePolicies:
+    planner:
+      existingSecret: cogito-planner-key
+    developer:
+      existingSecret: cogito-developer-key
+    reviewer:
+      existingSecret: cogito-reviewer-key
   # IRSA: grants the litellm pod AWS credentials for the bedrock provider without static keys.
   # Requires an IAM role trusting this cluster's OIDC provider, scoped to bedrock:InvokeModel.
   serviceAccount:
@@ -122,10 +129,7 @@ api:
     passwordKey: password
   planner:
     endpoint: http://cogito-litellm:4000
-    model: balanced
     timeoutSeconds: 60
-    existingSecret: cogito-planner-key
-    apiKeyKey: api-key
   auth:
     mode: oidc
     oidc:

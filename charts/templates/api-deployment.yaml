@@ -1,6 +1,8 @@
 {{- if .Values.api.enabled }}
 {{- $supervisorDatabase := default (dict) .Values.api.supervisorDatabase }}
 {{- $planner := default (dict) .Values.api.planner }}
+{{- $rolePolicies := required "litellm.rolePolicies must define planner, developer, and reviewer policies" .Values.litellm.rolePolicies }}
+{{- $plannerRole := required "litellm.rolePolicies.planner is required" $rolePolicies.planner }}
 {{- $auth := default (dict) .Values.api.auth }}
 {{- $staticAuth := default (dict) $auth.static }}
 apiVersion: apps/v1
@@ -60,8 +62,8 @@ spec:
             - name: COGITO_LITELLM_PLANNER_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ default "cogito-planner-key" $planner.existingSecret }}
-                  key: {{ default "api-key" $planner.apiKeyKey }}
+                  name: {{ required "litellm.rolePolicies.planner.existingSecret is required" $plannerRole.existingSecret }}
+                  key: {{ required "litellm.rolePolicies.planner.apiKeyKey is required" $plannerRole.apiKeyKey }}
             {{- if eq (default "static" $auth.mode) "static" }}
             - name: COGITO_AUTH_STATIC_TOKEN
               valueFrom:

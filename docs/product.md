@@ -33,12 +33,28 @@ The first governed planning path is now present: an initial work specification
 is stored as an immutable artifact, the Supervisor can generate a normalized
 plan through an API-only LiteLLM virtual key, and Temporal waits at a
 digest-bound human plan-approval gate before it provisions an execution
-workspace. Approval decisions are authenticated, idempotent, and retained as
-audit records. They are placed in a leased, retrying transactional outbox
-before delivery to Temporal, so a transient control-plane failure cannot turn
-an approval into a lost instruction. A persisted plan's workflow start is also
+workspace. A requested revision clears the active plan, creates a new
+revisioned artifact and Temporal workflow even when the plan content is
+byte-identical, and scopes idempotency to that revision. Prior artifacts and
+decisions remain auditable, but cannot authorize the replacement plan.
+Approval decisions are authenticated, idempotent, and retained as audit
+records. They are placed in a leased, retrying transactional outbox before
+delivery to Temporal, so a transient control-plane failure cannot turn an
+approval into a lost instruction. A persisted plan's workflow start is also
 safe to retry without regenerating the plan. Local kind uses an explicit
 development credential; production requires OIDC bearer-token validation.
+
+The Helm chart declares three stable role policies: `planner`, `developer`,
+and `reviewer`. Each names one model alias, a positive LiteLLM virtual-key
+budget ceiling and reset period, and a toolset label. Keys are provisioned by
+trusted secret-management infrastructure into distinct Kubernetes Secrets;
+the chart never creates or aggregates them. Only the planner Secret is mounted
+by the API today. Developer and reviewer runtimes do not yet exist, so their
+keys are deliberately not mounted anywhere. No MCP server is registered in
+this release, which means every role has zero tool authority. When MCP arrives,
+the provisioning layer must map the role's toolset label to an explicit LiteLLM
+MCP-server and per-tool allow-list—semantic discovery may narrow that list but
+must never expand it.
 
 Delegated A2A sub-agents, semantic tool discovery, MCP tool execution,
 adversarial implementation review, the final implementation gate, and the

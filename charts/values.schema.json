@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "litellm": {
+      "type": "object",
+      "properties": {
+        "rolePolicies": {
+          "type": "object",
+          "required": ["planner", "developer", "reviewer"],
+          "properties": {
+            "planner": { "$ref": "#/definitions/rolePolicy" },
+            "developer": { "$ref": "#/definitions/rolePolicy" },
+            "reviewer": { "$ref": "#/definitions/rolePolicy" }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "rolePolicy": {
+      "type": "object",
+      "required": ["model", "maxBudgetUsd", "budgetDuration", "toolset", "existingSecret", "apiKeyKey"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "maxBudgetUsd": { "type": "number", "exclusiveMinimum": 0 },
+        "budgetDuration": { "type": "string", "minLength": 1 },
+        "toolset": { "type": "string", "minLength": 1 },
+        "existingSecret": { "type": "string", "minLength": 1 },
+        "apiKeyKey": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
