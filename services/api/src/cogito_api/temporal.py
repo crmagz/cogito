@@ -4,6 +4,7 @@ import asyncio
 from typing import Protocol
 
 from temporalio.client import Client
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from .models import RunEnvelope
 
@@ -24,12 +25,17 @@ class TemporalRunStarter:
 
     async def start_run(self, envelope: RunEnvelope) -> None:
         client = await self._get_client()
-        await client.start_workflow(
-            "DeveloperRunWorkflow",
-            args=[envelope.model_dump()],
-            id=envelope.run_id,
-            task_queue=self._task_queue,
-        )
+        try:
+            await client.start_workflow(
+                "DeveloperRunWorkflow",
+                args=[envelope.model_dump()],
+                id=envelope.run_id,
+                task_queue=self._task_queue,
+            )
+        except WorkflowAlreadyStartedError:
+            # A caller can lose its response after Temporal accepted a start.
+            # The immutable workflow ID makes that retry safe and idempotent.
+            return
 
     async def submit_plan_approval(self, run_id: str, decision: dict[str, str]) -> bool:
         """Deliver an idempotent, digest-bound decision through a Temporal Update."""

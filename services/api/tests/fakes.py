@@ -202,8 +202,13 @@ class FakeRunStarter:
         self.plan_approvals: list[tuple[str, dict[str, str]]] = []
         self.approval_error: Exception | None = None
         self.approval_result = True
+        self.start_error: Exception | None = None
 
     async def start_run(self, envelope: RunEnvelope) -> None:
+        if self.start_error is not None:
+            raise self.start_error
+        if any(run.run_id == envelope.run_id for run in self.started_runs):
+            return
         self.started_runs.append(envelope)
 
     async def submit_plan_approval(self, run_id: str, decision: dict[str, str]) -> bool:

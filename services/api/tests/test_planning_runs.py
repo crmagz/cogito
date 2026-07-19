@@ -4,7 +4,7 @@ import copy
 
 from fastapi.testclient import TestClient
 
-from .fakes import InMemoryPlanStore, InMemorySupervisorStore
+from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
 
 
 def _planning_request(valid_plan: dict) -> dict:
@@ -100,16 +100,35 @@ def test_generate_plan_persists_validated_artifact_and_enters_approval_state(
     assert supervisor_store.planning_runs[run_id].plan_artifact is not None
 
 
-def test_generate_plan_rejects_repeated_generation_after_immutable_artifact_exists(
-    client: TestClient, valid_plan: dict
+def test_generate_plan_retries_workflow_start_without_regenerating_artifact(
+    client: TestClient, valid_plan: dict, planner: FakePlanner, starter: FakeRunStarter
 ) -> None:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
     run_id = submitted.json()["run_id"]
-    client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+    first = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
 
     response = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
 
-    assert response.status_code == 409
+    assert first.status_code == 200
+    assert response.status_code == 200
+    assert response.json()["plan_artifact"] == first.json()["plan_artifact"]
+    assert len(planner.contexts) == 1
+    assert len(starter.started_runs) == 1
+
+
+def test_generate_plan_reports_retryable_temporal_start_failure(
+    client: TestClient, valid_plan: dict, starter: FakeRunStarter
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+    starter.start_error = ConnectionError("Temporal unavailable")
+
+    failed = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+
+    assert failed.status_code == 503
+    starter.start_error = None
+    retried = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+    assert retried.status_code == 200
 
 
 def test_existing_direct_plan_submission_contract_remains_compatible(
