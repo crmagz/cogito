@@ -1,4 +1,9 @@
 {{- if .Values.api.enabled }}
+{{- $supervisorDatabase := default (dict) .Values.api.supervisorDatabase }}
+{{- $planner := default (dict) .Values.api.planner }}
+{{- $auth := default (dict) .Values.api.auth }}
+{{- $staticAuth := default (dict) $auth.static }}
+{{- $oidcAuth := default (dict) $auth.oidc }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -20,18 +25,18 @@ data:
   COGITO_TEMPORAL_NAMESPACE: {{ .Values.api.temporal.namespace | quote }}
   COGITO_TEMPORAL_TASK_QUEUE: {{ .Values.api.temporal.taskQueue | quote }}
   COGITO_ALLOWED_GIT_HOSTS: {{ toJson .Values.repositoryPolicy.allowedGitHosts | quote }}
-  COGITO_SUPERVISOR_DATABASE_HOST: {{ .Values.api.supervisorDatabase.host | quote }}
-  COGITO_SUPERVISOR_DATABASE_PORT: {{ .Values.api.supervisorDatabase.port | quote }}
-  COGITO_SUPERVISOR_DATABASE_NAME: {{ .Values.api.supervisorDatabase.name | quote }}
-  COGITO_SUPERVISOR_DATABASE_USER: {{ .Values.api.supervisorDatabase.user | quote }}
-  COGITO_LITELLM_ENDPOINT: {{ .Values.api.planner.endpoint | quote }}
-  COGITO_LITELLM_PLANNER_MODEL: {{ .Values.api.planner.model | quote }}
-  COGITO_LITELLM_PLANNER_TIMEOUT_SECONDS: {{ .Values.api.planner.timeoutSeconds | quote }}
-  COGITO_AUTH_MODE: {{ .Values.api.auth.mode | quote }}
-  COGITO_AUTH_STATIC_SUBJECT: {{ .Values.api.auth.static.subject | quote }}
-  COGITO_AUTH_OIDC_ISSUER: {{ .Values.api.auth.oidc.issuer | quote }}
-  COGITO_AUTH_OIDC_AUDIENCE: {{ .Values.api.auth.oidc.audience | quote }}
-  COGITO_AUTH_OIDC_JWKS_URL: {{ .Values.api.auth.oidc.jwksUrl | quote }}
-  COGITO_AUTH_OIDC_ROLE_CLAIM: {{ .Values.api.auth.oidc.roleClaim | quote }}
-  COGITO_AUTH_OIDC_APPROVAL_ROLE: {{ .Values.api.auth.oidc.approvalRole | quote }}
+  COGITO_SUPERVISOR_DATABASE_HOST: {{ default (printf "%s-postgresql" .Release.Name) $supervisorDatabase.host | quote }}
+  COGITO_SUPERVISOR_DATABASE_PORT: {{ default 5432 $supervisorDatabase.port | quote }}
+  COGITO_SUPERVISOR_DATABASE_NAME: {{ default "cogito" $supervisorDatabase.name | quote }}
+  COGITO_SUPERVISOR_DATABASE_USER: {{ default "postgres" $supervisorDatabase.user | quote }}
+  COGITO_LITELLM_ENDPOINT: {{ default (printf "http://%s-litellm:4000" .Release.Name) $planner.endpoint | quote }}
+  COGITO_LITELLM_PLANNER_MODEL: {{ default "balanced" $planner.model | quote }}
+  COGITO_LITELLM_PLANNER_TIMEOUT_SECONDS: {{ default 60 $planner.timeoutSeconds | quote }}
+  COGITO_AUTH_MODE: {{ default "static" $auth.mode | quote }}
+  COGITO_AUTH_STATIC_SUBJECT: {{ default "local-operator" $staticAuth.subject | quote }}
+  COGITO_AUTH_OIDC_ISSUER: {{ default "" $oidcAuth.issuer | quote }}
+  COGITO_AUTH_OIDC_AUDIENCE: {{ default "" $oidcAuth.audience | quote }}
+  COGITO_AUTH_OIDC_JWKS_URL: {{ default "" $oidcAuth.jwksUrl | quote }}
+  COGITO_AUTH_OIDC_ROLE_CLAIM: {{ default "roles" $oidcAuth.roleClaim | quote }}
+  COGITO_AUTH_OIDC_APPROVAL_ROLE: {{ default "cogito-approver" $oidcAuth.approvalRole | quote }}
 {{- end }}
