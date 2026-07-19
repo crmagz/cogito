@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from cogito_worker.execution import CommandResult
-from cogito_worker.models import ExecutionRequest, ExecutionWorkspace, PhaseExecutionRequest, PhaseResult
+from cogito_worker.models import (
+    BackupExecutionRequest,
+    ExecutionRequest,
+    ExecutionWorkspace,
+    PhaseExecutionRequest,
+    PhaseResult,
+)
 
 
 class InMemoryRunStore:
@@ -68,9 +74,11 @@ class InMemoryExecutionJobClient:
 class InMemoryHarness:
     """Returns preconfigured phase results while recording workflow activity inputs."""
 
-    def __init__(self, result: PhaseResult | None = None) -> None:
+    def __init__(self, result: PhaseResult | None = None, backup_result: PhaseResult | None = None) -> None:
         self.requests: list[PhaseExecutionRequest] = []
+        self.backup_requests: list[BackupExecutionRequest] = []
         self.result = result
+        self.backup_result = backup_result
 
     async def execute_phase(self, request: PhaseExecutionRequest) -> PhaseResult:
         self.requests.append(request)
@@ -86,4 +94,22 @@ class InMemoryHarness:
             commits={"/workspace/repos/example": "a" * 40},
             verification=[],
             summary="completed",
+        )
+
+    async def backup_phase(self, request: BackupExecutionRequest) -> PhaseResult:
+        self.backup_requests.append(request)
+        if self.backup_result is not None:
+            return self.backup_result
+        return PhaseResult(
+            phase_id=request.phase.id,
+            branch_name=f"adp/{request.workspace.run_id}",
+            succeeded=True,
+            turns_used=None,
+            cost_usd=None,
+            changed_files=[],
+            commits={},
+            verification=[],
+            summary="recoverable progress backed up",
+            outcome="stopped_with_backup",
+            ceiling=request.ceiling,
         )

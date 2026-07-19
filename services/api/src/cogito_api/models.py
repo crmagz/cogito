@@ -34,13 +34,26 @@ class PlanConstraints(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_wall_clock_minutes: int = Field(default=60)
-    max_cost_usd: float = Field(default=5.0)
+    max_cost_usd: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     max_review_rounds: int = Field(default=3)
     max_turns_per_phase: int = Field(default=200)
     backup_reserve_turns: int = Field(
         default=25,
-        description="Turns (20-30) reserved to commit and push partial progress before a ceiling forces a stop, so productive work is never lost.",
+        ge=20,
+        le=30,
+        description=(
+            "Turns (20-30) reserved to commit and push partial progress before a ceiling forces a stop, "
+            "so productive work is never lost."
+        ),
     )
+
+    @model_validator(mode="after")
+    def productive_turn_budget_exceeds_reserve(self) -> "PlanConstraints":
+        """Require at least one productive turn after the recovery reserve."""
+
+        if self.max_turns_per_phase <= self.backup_reserve_turns:
+            raise ValueError("max_turns_per_phase must exceed backup_reserve_turns")
+        return self
 
 
 class AiPlan(BaseModel):

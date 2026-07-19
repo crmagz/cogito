@@ -32,11 +32,12 @@ class ExecutionWorkspace:
     workspace_root: str
     repositories: list[str] = field(default_factory=list)
     repository_origins: dict[str, str] = field(default_factory=dict)
+    run_key_secret: str = ""
 
 
 @dataclass(frozen=True)
 class PlanPhase:
-    """A validated single phase from the immutable plan snapshot."""
+    """A validated phase from the immutable plan snapshot."""
 
     id: str
     name: str
@@ -44,6 +45,7 @@ class PlanPhase:
     tasks: list[str]
     acceptance_criteria: list[str]
     verification: list[str]
+    depends_on: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, value: object) -> "PlanPhase":
@@ -62,6 +64,9 @@ class PlanPhase:
             for field in list_fields
         ):
             raise ValueError("plan phase requires non-empty tasks, acceptance criteria, and verification commands")
+        depends_on = value.get("depends_on", [])
+        if not isinstance(depends_on, list) or not all(isinstance(item, str) and item.strip() for item in depends_on):
+            raise ValueError("plan phase dependencies must be a list of non-empty phase IDs")
         return cls(
             id=value["id"],
             name=value["name"],
@@ -69,6 +74,7 @@ class PlanPhase:
             tasks=value["tasks"],
             acceptance_criteria=value["acceptance_criteria"],
             verification=value["verification"],
+            depends_on=depends_on,
         )
 
 
@@ -94,6 +100,8 @@ class PhaseResult:
     commits: dict[str, str]
     verification: list[VerificationResult]
     summary: str
+    outcome: str = "completed"
+    ceiling: str | None = None
 
     def metadata(self) -> dict[str, Any]:
         """Return JSON-compatible metadata safe to persist in the run status."""
@@ -109,6 +117,17 @@ class PhaseExecutionRequest:
     workspace: ExecutionWorkspace
     max_turns: int
     timeout_seconds: int
+    backup_reserve_turns: int = 25
+
+
+@dataclass(frozen=True)
+class BackupExecutionRequest:
+    """Inputs for deterministic, non-productive recovery of one stopped phase."""
+
+    phase: PlanPhase
+    workspace: ExecutionWorkspace
+    ceiling: str
+    timeout_seconds: int
 
 
 @dataclass(frozen=True)
@@ -118,6 +137,9 @@ class ExecutionRequest:
     run_id: str
     spec_ref: str
     target_repos: list[str]
+    execution_timeout_seconds: int = 0
+    max_cost_usd: float = 0.0
+    run_key_secret: str = ""
 
 
 @dataclass(frozen=True)

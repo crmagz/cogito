@@ -8,6 +8,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from .activities import WorkerActivities
+from .budgets import KubernetesLiteLLMRunKeyManager
 from .config import load_settings
 from .execution import ExecutionJobSettings, ExecutionWorkspaceService, KubernetesExecutionJobClient
 from .harness import ClaudeCodeHarness
@@ -63,6 +64,11 @@ async def main() -> None:
     execution_workspaces = ExecutionWorkspaceService(
         execution_settings,
         KubernetesExecutionJobClient(settings.execution_namespace, settings.execution_cleanup_timeout_seconds),
+        KubernetesLiteLLMRunKeyManager(
+            settings.execution_namespace,
+            settings.execution_litellm_endpoint,
+            settings.execution_litellm_management_key,
+        ),
     )
     activities = WorkerActivities(
         store,
@@ -80,6 +86,7 @@ async def main() -> None:
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
+            activities.backup_phase,
         ],
     )
     await worker.run()

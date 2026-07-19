@@ -49,6 +49,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: COGITO_EXECUTION_LITELLM_MANAGEMENT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.worker.execution.keyManagement.existingSecret }}
+                  key: {{ .Values.worker.execution.keyManagement.apiKeyKey }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

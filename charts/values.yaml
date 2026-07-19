@@ -492,11 +492,17 @@ worker:
     namespace: cogito-executions
     createNamespace: true
     workspaceRoot: /workspace
-    idleSeconds: 3600
+    # Must cover api.constraints.maxWallClockMinutes plus the worker's 120-second backup allowance.
+    idleSeconds: 14700
     startupTimeoutSeconds: 30
     cleanupTimeoutSeconds: 90
-    activeDeadlineSeconds: 3900
+    # Operator ceiling for an approved run budget plus its 120-second backup allowance.
+    activeDeadlineSeconds: 14700
     ttlSecondsAfterFinished: 300
+    keyManagement:
+      # An existing LiteLLM management virtual key restricted to run-key create/delete.
+      existingSecret: cogito-developer-key-manager
+      apiKeyKey: api-key
     terminationGracePeriodSeconds: 10
     workspaceSizeLimit: 2Gi
     resources:

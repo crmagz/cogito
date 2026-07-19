@@ -62,17 +62,35 @@ the gateway can calculate spend. The shipped values reflect the current listed
 rates for the configured Bedrock models; operators must update those values for
 their provider, region, and pricing changes before promotion.
 
-Single-phase implementation is available through a pinned Claude Code runtime.
-The worker injects the approved phase, immutable specifications, and workspace
-context; it records the CLI's turn count and gateway-reported cost, changed
-files, verification output, and resulting commit SHA in durable run metadata.
-The feature branch is published only after every approved verification command
-passes. Execution credentials are supplied by pre-existing secrets: a dedicated
-LiteLLM virtual key and a repository-scoped Git credential. The worker's
+Multi-phase implementation is available through a pinned Claude Code runtime.
+The worker validates a stable topological order from each approved phase's
+`depends_on` list and runs every ready phase in the same isolated workspace and
+feature branch. It records the CLI's turn count and gateway-reported cost,
+changed files, verification output, and resulting commit SHA in durable run
+metadata. The feature branch is published only after every approved
+verification command passes.
+
+Execution has hard, explicit stop behavior. `max_wall_clock_minutes` is a
+run-wide productive-work deadline, while `max_turns_per_phase` includes a
+required 20–30-turn recovery reserve. The worker passes only the productive
+portion to Claude Code. On a known turns, local wall-clock, or LiteLLM budget
+ceiling, it does not make another model call: it stages existing work, creates
+a deterministic backup commit if needed, validates the approved branch and
+origin again, and pushes the feature branch before recording
+`stopped_with_backup`. Unknown 429 responses and ordinary failures fail
+closed. A backup that cannot be committed or published is a failed run rather
+than a successful stop. Each execution Job receives that approved wall-clock
+budget plus the bounded recovery allowance; the Job still cannot exceed the
+operator-configured execution deadline.
+
+Before a Job is created, the worker uses its separate, operator-provisioned
+LiteLLM management credential to mint one opaque, short-lived, model-limited
+run key whose `max_budget` equals the immutable plan cost. The key is stored in
+a labelled run Secret and only that Secret (plus the repository-scoped Git
+credential) reaches the execution pod. The management credential never enters
+the Job, Temporal history, prompts, logs, or status metadata. The worker's
 authority is limited to the run-specific workspace lifecycle and command
 channel; execution pods receive no Kubernetes service account token.
-Multi-phase sequencing, hard-ceiling backup behavior, and adversarial review
-remain later roadmap increments.
 
 Delegated A2A sub-agents, semantic tool discovery, MCP tool execution,
 adversarial implementation review, the final implementation gate, and the
