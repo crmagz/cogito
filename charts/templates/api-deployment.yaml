@@ -58,6 +58,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.api.planner.existingSecret }}
                   key: {{ .Values.api.planner.apiKeyKey }}
+            {{- if eq .Values.api.auth.mode "static" }}
+            - name: COGITO_AUTH_STATIC_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.auth.static.existingSecret }}
+                  key: {{ .Values.api.auth.static.tokenKey }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

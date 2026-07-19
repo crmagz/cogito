@@ -18,6 +18,31 @@ _PROVISION_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
 
 @workflow.defn
 class DeveloperRunWorkflow:
+    def __init__(self) -> None:
+        self._awaiting_plan_approval = False
+        self._plan_sha256 = ""
+        self._plan_decision: dict[str, str] | None = None
+        self._processed_decision_ids: set[str] = set()
+
+    @workflow.update
+    async def submit_plan_approval(self, decision: dict[str, str]) -> bool:
+        """Accept one idempotent decision only while the workflow waits for this plan."""
+
+        decision_id = decision.get("decision_id", "")
+        if not decision_id:
+            return False
+        if decision_id in self._processed_decision_ids:
+            return False
+        if not self._awaiting_plan_approval:
+            return False
+        if decision.get("artifact_sha256") != self._plan_sha256:
+            return False
+        if decision.get("decision") not in {"approve", "reject", "request_revision"}:
+            return False
+        self._processed_decision_ids.add(decision_id)
+        self._plan_decision = decision
+        return True
+
     @workflow.run
     async def run(self, envelope: RunEnvelope) -> RunResult:
         try:
@@ -32,6 +57,32 @@ class DeveloperRunWorkflow:
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
             )
             _validate_plan_snapshot(plan, envelope)
+            if envelope.requires_plan_approval:
+                self._plan_sha256 = envelope.plan_sha256
+                self._awaiting_plan_approval = True
+                await workflow.execute_activity(
+                    WorkerActivities.report_status,
+                    args=[envelope.run_id, "awaiting_plan_approval"],
+                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                )
+                await workflow.wait_condition(lambda: self._plan_decision is not None)
+                self._awaiting_plan_approval = False
+                assert self._plan_decision is not None
+                decision = self._plan_decision["decision"]
+                if decision == "reject":
+                    await workflow.execute_activity(
+                        WorkerActivities.report_status,
+                        args=[envelope.run_id, "rejected"],
+                        start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                    )
+                    return RunResult(run_id=envelope.run_id, status="rejected")
+                if decision == "request_revision":
+                    await workflow.execute_activity(
+                        WorkerActivities.report_status,
+                        args=[envelope.run_id, "revision_requested"],
+                        start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                    )
+                    return RunResult(run_id=envelope.run_id, status="revision_requested")
             workspace = await workflow.execute_activity(
                 WorkerActivities.provision_execution_workspace,
                 args=[

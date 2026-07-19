@@ -11,6 +11,8 @@ from .models import RunEnvelope
 class RunStarter(Protocol):
     async def start_run(self, envelope: RunEnvelope) -> None: ...
 
+    async def submit_plan_approval(self, run_id: str, decision: dict[str, str]) -> bool: ...
+
 
 class TemporalRunStarter:
     def __init__(self, host: str, namespace: str, task_queue: str):
@@ -28,6 +30,13 @@ class TemporalRunStarter:
             id=envelope.run_id,
             task_queue=self._task_queue,
         )
+
+    async def submit_plan_approval(self, run_id: str, decision: dict[str, str]) -> bool:
+        """Deliver an idempotent, digest-bound decision through a Temporal Update."""
+
+        client = await self._get_client()
+        handle = client.get_workflow_handle(run_id)
+        return await handle.execute_update("submit_plan_approval", decision)
 
     async def _get_client(self) -> Client:
         if self._client is None:

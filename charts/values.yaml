@@ -411,6 +411,28 @@ api:
     timeoutSeconds: 60
     existingSecret: cogito-planner-key
     apiKeyKey: api-key
+  ## @param api.auth.mode `static` for explicit local-kind test credentials or `oidc` for production JWT validation
+  ## @param api.auth.static.existingSecret Local-only Secret containing the static operator token
+  ## @param api.auth.static.tokenKey Key containing the static operator token
+  ## @param api.auth.static.subject Audit subject used only in local static-auth mode
+  ## @param api.auth.oidc.issuer Expected production OIDC issuer
+  ## @param api.auth.oidc.audience Expected production OIDC audience
+  ## @param api.auth.oidc.jwksUrl JWKS endpoint used to validate production bearer tokens
+  ## @param api.auth.oidc.roleClaim Claim containing operator roles
+  ## @param api.auth.oidc.approvalRole Required role for plan approval
+  ##
+  auth:
+    mode: static
+    static:
+      existingSecret: cogito-operator-auth
+      tokenKey: token
+      subject: local-operator
+    oidc:
+      issuer: ""
+      audience: ""
+      jwksUrl: ""
+      roleClaim: roles
+      approvalRole: cogito-approver
 
 ## @section Worker
 ## Temporal worker: runs DeveloperRunWorkflow and its activities.

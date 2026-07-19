@@ -13,6 +13,7 @@ class RunEnvelope:
     priority: str = "normal"
     submitted_at: str = ""
     submitted_by: str = ""
+    requires_plan_approval: bool = False
 
 
 @dataclass

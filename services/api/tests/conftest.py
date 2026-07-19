@@ -36,6 +36,14 @@ def make_settings(**overrides) -> Settings:
         litellm_planner_model="balanced",
         litellm_planner_api_key="planner-test-key",
         litellm_planner_timeout_seconds=60.0,
+        auth_mode="static",
+        auth_static_token="operator-test-token",
+        auth_static_subject="test-operator",
+        auth_oidc_issuer="",
+        auth_oidc_audience="",
+        auth_oidc_jwks_url="",
+        auth_oidc_role_claim="roles",
+        auth_oidc_approval_role="cogito-approver",
     )
     defaults.update(overrides)
     return Settings(**defaults)

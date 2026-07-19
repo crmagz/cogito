@@ -126,6 +126,14 @@ api:
     timeoutSeconds: 60
     existingSecret: cogito-planner-key
     apiKeyKey: api-key
+  auth:
+    mode: oidc
+    oidc:
+      issuer: "https://issuer.example.com/"
+      audience: cogito-api
+      jwksUrl: "https://issuer.example.com/.well-known/jwks.json"
+      roleClaim: roles
+      approvalRole: cogito-approver
 
 # Production worker settings
 worker:
