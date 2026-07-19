@@ -30,6 +30,7 @@ class PlanningRunRecord:
     plan_artifact: ArtifactReference | None = None
     planner_model: str | None = None
     workflow_id: str | None = None
+    plan_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class ApprovalRecord:
     actor_id: str
     created_at: str
     delivered: bool
+    plan_revision: int
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,7 @@ class SupervisorStore(Protocol):
         plan_artifact: ArtifactReference,
         planner_model: str,
         workflow_id: str,
+        expected_plan_revision: int,
     ) -> PlanningRunRecord: ...
 
     async def record_plan_approval(
@@ -153,7 +156,7 @@ class PostgresSupervisorStore:
                     """
                     SELECT run_id, status, source_artifact_ref, source_artifact_sha256,
                            target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
-                           plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id
+                           plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision
                     FROM supervisor_runs
                     WHERE run_id = :run_id
                     """
@@ -182,6 +185,7 @@ class PostgresSupervisorStore:
             ),
             planner_model=row["planner_model"],
             workflow_id=row["active_workflow_id"],
+            plan_revision=row["plan_revision"],
         )
 
     async def attach_generated_plan(
@@ -190,6 +194,7 @@ class PostgresSupervisorStore:
         plan_artifact: ArtifactReference,
         planner_model: str,
         workflow_id: str,
+        expected_plan_revision: int,
     ) -> PlanningRunRecord:
         async with self._engine.begin() as connection:
             result = await connection.execute(
@@ -200,12 +205,14 @@ class PostgresSupervisorStore:
                         plan_artifact_ref = :plan_artifact_ref,
                         plan_artifact_sha256 = :plan_artifact_sha256,
                         planner_model = :planner_model,
-                        active_workflow_id = :workflow_id
+                        active_workflow_id = :workflow_id,
+                        plan_revision = plan_revision + 1
                     WHERE run_id = :run_id
                       AND status = 'planning'
+                      AND plan_revision = :expected_plan_revision
                     RETURNING run_id, status, source_artifact_ref, source_artifact_sha256,
                               target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
-                              plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id
+                              plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision
                     """
                 ),
                 {
@@ -214,6 +221,7 @@ class PostgresSupervisorStore:
                     "plan_artifact_sha256": plan_artifact.sha256,
                     "planner_model": planner_model,
                     "workflow_id": workflow_id,
+                    "expected_plan_revision": expected_plan_revision,
                 },
             )
             row = result.mappings().one_or_none()
@@ -245,6 +253,7 @@ class PostgresSupervisorStore:
             ),
             planner_model=row["planner_model"],
             workflow_id=row["active_workflow_id"],
+            plan_revision=row["plan_revision"],
         )
 
     async def record_plan_approval(
@@ -258,27 +267,10 @@ class PostgresSupervisorStore:
         request_sha256: str,
     ) -> ApprovalRecord:
         async with self._engine.begin() as connection:
-            existing = await connection.execute(
-                text(
-                    """
-                    SELECT decision_id, run_id, decision, artifact_sha256, actor_id, created_at, delivered_at,
-                           request_sha256
-                    FROM plan_approval_decisions
-                    WHERE run_id = :run_id AND idempotency_key = :idempotency_key
-                    """
-                ),
-                {"run_id": run_id, "idempotency_key": idempotency_key},
-            )
-            existing_row = existing.mappings().one_or_none()
-            if existing_row is not None:
-                if existing_row["request_sha256"] != request_sha256:
-                    raise ApprovalConflictError("idempotency key was reused with a different decision")
-                return _approval_record(existing_row)
-
             run = await connection.execute(
                 text(
                     """
-                    SELECT status, plan_artifact_sha256, active_workflow_id
+                    SELECT status, plan_artifact_sha256, active_workflow_id, plan_revision
                     FROM supervisor_runs
                     WHERE run_id = :run_id
                     FOR UPDATE
@@ -289,6 +281,28 @@ class PostgresSupervisorStore:
             run_row = run.mappings().one_or_none()
             if run_row is None:
                 raise ApprovalConflictError("planning run does not exist")
+            existing = await connection.execute(
+                text(
+                    """
+                    SELECT decision_id, run_id, decision, artifact_sha256, actor_id, created_at, delivered_at,
+                           request_sha256, plan_revision
+                    FROM plan_approval_decisions
+                    WHERE run_id = :run_id
+                      AND plan_revision = :plan_revision
+                      AND idempotency_key = :idempotency_key
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "plan_revision": run_row["plan_revision"],
+                    "idempotency_key": idempotency_key,
+                },
+            )
+            existing_row = existing.mappings().one_or_none()
+            if existing_row is not None:
+                if existing_row["request_sha256"] != request_sha256:
+                    raise ApprovalConflictError("idempotency key was reused with a different decision")
+                return _approval_record(existing_row)
             if run_row["status"] != PlanningRunStatus.AWAITING_PLAN_APPROVAL.value:
                 raise ApprovalConflictError("planning run is not awaiting plan approval")
             if run_row["plan_artifact_sha256"] != artifact_sha256:
@@ -303,10 +317,10 @@ class PostgresSupervisorStore:
                     """
                     INSERT INTO plan_approval_decisions (
                         decision_id, run_id, decision, artifact_sha256, actor_id, comment,
-                        idempotency_key, request_sha256, created_at
+                        idempotency_key, request_sha256, created_at, plan_revision
                     ) VALUES (
                         :decision_id, :run_id, :decision, :artifact_sha256, :actor_id, :comment,
-                        :idempotency_key, :request_sha256, :created_at
+                        :idempotency_key, :request_sha256, :created_at, :plan_revision
                     )
                     """
                 ),
@@ -320,6 +334,7 @@ class PostgresSupervisorStore:
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "created_at": created_at,
+                    "plan_revision": run_row["plan_revision"],
                 },
             )
             await connection.execute(
@@ -351,6 +366,7 @@ class PostgresSupervisorStore:
             actor_id=actor_id,
             created_at=created_at.isoformat(),
             delivered=False,
+            plan_revision=run_row["plan_revision"],
         )
 
     async def mark_plan_approval_delivered(self, decision_id: str) -> None:
@@ -358,7 +374,7 @@ class PostgresSupervisorStore:
             decision = await connection.execute(
                 text(
                     """
-                    SELECT run_id, decision FROM plan_approval_decisions
+                    SELECT run_id, decision, plan_revision FROM plan_approval_decisions
                     WHERE decision_id = :decision_id
                     FOR UPDATE
                     """
@@ -399,11 +415,14 @@ class PostgresSupervisorStore:
                     """
                     UPDATE supervisor_runs
                     SET status = :status,
-                        active_workflow_id = CASE WHEN :status = 'planning' THEN NULL ELSE active_workflow_id END
-                    WHERE run_id = :run_id
+                        active_workflow_id = CASE WHEN :status = 'planning' THEN NULL ELSE active_workflow_id END,
+                        plan_artifact_ref = CASE WHEN :status = 'planning' THEN NULL ELSE plan_artifact_ref END,
+                        plan_artifact_sha256 = CASE WHEN :status = 'planning' THEN NULL ELSE plan_artifact_sha256 END,
+                        planner_model = CASE WHEN :status = 'planning' THEN NULL ELSE planner_model END
+                    WHERE run_id = :run_id AND plan_revision = :plan_revision
                     """
                 ),
-                {"status": status, "run_id": row["run_id"]},
+                {"status": status, "run_id": row["run_id"], "plan_revision": row["plan_revision"]},
             )
 
     async def claim_plan_approval_deliveries(
@@ -495,4 +514,5 @@ def _approval_record(row: object) -> ApprovalRecord:
         actor_id=values["actor_id"],  # type: ignore[index]
         created_at=values["created_at"].isoformat(),  # type: ignore[index]
         delivered=values["delivered_at"] is not None,  # type: ignore[index]
+        plan_revision=values["plan_revision"],  # type: ignore[index]
     )

@@ -52,10 +52,22 @@ def test_planning_plan_uses_a_content_addressed_immutable_revision_key(valid_pla
     client = FakeMinioClient()
     store = MinioPlanStore(client, "plans", "plan-snapshots", plan_snapshot_retention_days=30)
 
-    first = store.put_planning_plan("run-1", AiPlan.model_validate(valid_plan))
-    second = store.put_planning_plan("run-1", AiPlan.model_validate(valid_plan))
+    first = store.put_planning_plan("run-1", 1, AiPlan.model_validate(valid_plan))
+    second = store.put_planning_plan("run-1", 1, AiPlan.model_validate(valid_plan))
 
     assert first == second
     assert "/revisions/" in first.ref
     assert first.sha256 in first.ref
     assert len(client.put_calls) == 1
+
+
+def test_identical_plans_in_different_revisions_have_distinct_artifact_paths(valid_plan: dict) -> None:
+    client = FakeMinioClient()
+    store = MinioPlanStore(client, "plans", "plan-snapshots", plan_snapshot_retention_days=30)
+
+    first = store.put_planning_plan("run-1", 1, AiPlan.model_validate(valid_plan))
+    second = store.put_planning_plan("run-1", 2, AiPlan.model_validate(valid_plan))
+
+    assert first.sha256 == second.sha256
+    assert first.ref != second.ref
+    assert len(client.put_calls) == 2

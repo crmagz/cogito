@@ -222,13 +222,15 @@ def create_app(
                 )
             except PlannerError as error:
                 raise HTTPException(status_code=502, detail="planner failed to produce a valid plan") from error
-            snapshot = store.put_planning_plan(run_id, generated_plan)
-            workflow_id = _planning_workflow_id(run_id, snapshot.sha256)
+            next_plan_revision = record.plan_revision + 1
+            snapshot = store.put_planning_plan(run_id, next_plan_revision, generated_plan)
+            workflow_id = _planning_workflow_id(run_id, next_plan_revision, snapshot.sha256)
             updated = await supervisor_store.attach_generated_plan(
                 run_id,
                 plan_artifact=ArtifactReference(ref=snapshot.ref, sha256=snapshot.sha256),
                 planner_model=settings.litellm_planner_model,
                 workflow_id=workflow_id,
+                expected_plan_revision=record.plan_revision,
             )
         elif record.status is PlanningRunStatus.AWAITING_PLAN_APPROVAL and record.plan_artifact is not None:
             # A start request may have timed out after plan persistence. Retry
@@ -335,10 +337,10 @@ def create_app(
     return app
 
 
-def _planning_workflow_id(run_id: str, plan_sha256: str) -> str:
+def _planning_workflow_id(run_id: str, plan_revision: int, plan_sha256: str) -> str:
     """Bind every plan version to a distinct Temporal workflow execution."""
 
-    return f"{run_id}:plan:{plan_sha256[:16]}"
+    return f"{run_id}:plan:{plan_revision}:{plan_sha256[:16]}"
 
 
 app = create_app()
