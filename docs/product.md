@@ -1,0 +1,82 @@
+# Cogito product overview
+
+Cogito is an agentic-development control plane. A developer submits a plan and
+the repositories and standards that apply to it; Cogito validates the request,
+persists an immutable execution snapshot, and orchestrates its execution in an
+isolated workspace. The intended outcome is a reviewed pull request rather
+than an ungoverned autonomous code change.
+
+## Who it is for
+
+Cogito is for engineering teams that want to use coding agents without losing
+the controls expected of a production delivery system: scoped credentials,
+explicit approvals, durable workflow state, isolated execution, and artifacts
+that can be reviewed after the fact.
+
+## Current capability boundary
+
+Today, Cogito provides the production foundation for that workflow:
+
+- A FastAPI API accepts and validates plan, repository, DAG, and constraint
+  inputs.
+- Plans are persisted to object storage and snapshotted before execution.
+- A Temporal worker coordinates the durable run lifecycle.
+- Each execution uses a short-lived Kubernetes Job in a dedicated execution
+  namespace with a constrained service account and network policy.
+- MinIO is used locally; production deployment is configured for external S3
+  and PostgreSQL.
+- LiteLLM is deployed as the model gateway and is the future control point for
+  model routing, virtual keys, toolsets, MCP servers, A2A registration, and
+  spend tracking.
+
+The agent supervisor, delegated A2A sub-agents, semantic tool discovery, and
+MCP tool execution are deliberately not represented as completed features yet.
+They are the next product layers on top of this execution substrate, not
+implicit behavior hidden in the current worker.
+
+## Target agentic ecosystem
+
+The planned ecosystem keeps policy and execution boundaries explicit:
+
+| Layer | Responsibility |
+|---|---|
+| Supervisor | Custom FastAPI service that owns sessions, budgets, approvals, and delegation through LiteLLM's OpenAI-compatible API. |
+| LiteLLM | Model routing, MCP registry and execution, virtual keys, stable-role toolsets, A2A registry, logging, and spend tracking. |
+| Tool discovery | Stable roles use LiteLLM toolsets; a semantic filter narrows dynamically relevant tools without granting new authority. |
+| Tool runtimes | One MCP server per meaningful security or deployment boundary, with only the access that boundary needs. |
+| Sub-agents | Separate A2A services, each with its own restricted LiteLLM key and toolset for least privilege and separate accounting. |
+
+The Supervisor makes policy decisions. LiteLLM enforces gateway-level model,
+tool, and accounting controls. Workers and sub-agents remain in the execution
+plane, where their credentials and network reach can be narrowly constrained.
+
+## Architecture
+
+```text
+Developer / CI
+     |
+     v
+API -- validates request --> immutable plan snapshot (S3 / MinIO)
+     |                                    |
+     v                                    v
+Temporal workflow <------------------ Cogito worker
+     |
+     v
+isolated Kubernetes Job --> workspace artifacts --> reviewed pull request
+
+LiteLLM sits beside the control plane as the model and tool gateway.
+```
+
+The API owns request validation and the externally visible run lifecycle. The
+worker owns durable orchestration. Runtime Jobs receive only the credentials
+and network access needed for their task. This separation is intentional: an
+agent runtime must not gain control-plane credentials merely because it runs a
+task.
+
+## Deployment posture
+
+Cogito ships as an umbrella Helm chart. The local defaults include PostgreSQL,
+Temporal, and MinIO for an end-to-end developer environment. Production values
+disable the local data services, require external persistence, and require
+immutable image digests. See the [release guide](releases.md) for the artifact
+and promotion model.

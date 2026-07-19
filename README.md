@@ -6,6 +6,11 @@ An agentic development platform. Submit a plan, point it at your repos and codin
 Specifications + Repositories + Plan  →  Reviewed PR
 ```
 
+Cogito is designed to turn a reviewed plan into an isolated, observable execution
+run. Read the [product overview](docs/product.md) for the current capability
+boundary and [release guide](docs/releases.md) for the independently versioned
+API, worker, and Helm chart artifacts.
+
 ## Helm Chart
 
 Cogito deploys as an umbrella Helm chart with the following components:
