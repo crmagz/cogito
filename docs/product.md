@@ -56,6 +56,12 @@ the provisioning layer must map the role's toolset label to an explicit LiteLLM
 MCP-server and per-tool allow-list—semantic discovery may narrow that list but
 must never expand it.
 
+LiteLLM tier definitions also carry explicit positive per-token input and
+output costs. This is essential: a virtual-key budget is meaningful only when
+the gateway can calculate spend. The shipped values reflect the current listed
+rates for the configured Bedrock models; operators must update those values for
+their provider, region, and pricing changes before promotion.
+
 Delegated A2A sub-agents, semantic tool discovery, MCP tool execution,
 adversarial implementation review, the final implementation gate, and the
 operator UI are deliberately not represented as completed features yet. They

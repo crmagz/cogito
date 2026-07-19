@@ -10,12 +10,21 @@ data:
   config.yaml: |
     model_list:
       {{- range $tierName, $tier := .Values.litellm.tiers }}
+      {{- if le (float64 $tier.inputCostPerToken) 0.0 }}
+      {{- fail (printf "litellm.tiers.%s.inputCostPerToken must be positive for spend tracking" $tierName) }}
+      {{- end }}
+      {{- if le (float64 $tier.outputCostPerToken) 0.0 }}
+      {{- fail (printf "litellm.tiers.%s.outputCostPerToken must be positive for spend tracking" $tierName) }}
+      {{- end }}
       - model_name: {{ $tierName }}
         litellm_params:
           model: {{ $tier.provider }}/{{ $tier.model }}
           {{- if ne $tier.provider "bedrock" }}
           api_key: os.environ/{{ $tier.provider | upper }}_API_KEY
           {{- end }}
+        model_info:
+          input_cost_per_token: {{ $tier.inputCostPerToken }}
+          output_cost_per_token: {{ $tier.outputCostPerToken }}
       {{- end }}
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY

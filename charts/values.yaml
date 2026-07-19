@@ -305,18 +305,24 @@ litellm:
     user: postgres
     existingSecret: cogito-postgresql
     secretKey: postgres-password
-  ## @param litellm.tiers Model tiers exposed by the gateway. Each tier is a values-driven {provider, model} pair, so the backing model can be swapped without any template change. `provider` must be a LiteLLM provider prefix (e.g. anthropic, openai, bedrock) whose credential is supplied as `<PROVIDER>_API_KEY` in litellm.existingSecret — except `bedrock`, which uses AWS credentials (IRSA or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_REGION_NAME) instead of an API key.
+  ## @param litellm.tiers Model tiers exposed by the gateway. Each tier is a values-driven `{provider, model, inputCostPerToken, outputCostPerToken}` tuple, so the backing model can be swapped without any template change. Both positive cost values are required for LiteLLM spend tracking and virtual-key budgets; update them when the provider's regional pricing changes. `provider` must be a LiteLLM provider prefix (e.g. anthropic, openai, bedrock) whose credential is supplied as `<PROVIDER>_API_KEY` in litellm.existingSecret — except `bedrock`, which uses AWS credentials (IRSA or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_REGION_NAME) instead of an API key.
   ##
   tiers:
     discovery:
       provider: anthropic
       model: claude-3-5-haiku-20241022
+      inputCostPerToken: 0.0000008
+      outputCostPerToken: 0.000004
     balanced:
       provider: anthropic
       model: claude-sonnet-5
+      inputCostPerToken: 0.000002
+      outputCostPerToken: 0.00001
     complex:
       provider: anthropic
       model: claude-opus-4-8
+      inputCostPerToken: 0.000005
+      outputCostPerToken: 0.000025
   ## @param litellm.rolePolicies Stable-role virtual-key contracts. Each referenced Secret is pre-provisioned by trusted infrastructure with a distinct LiteLLM virtual key restricted to `model`, `maxBudgetUsd`, and `budgetDuration`. `toolset` is an allow-list label: with no MCP servers registered, every role has zero tool authority; when MCP is enabled, provision the key with only that role's explicit tool permissions. The chart deliberately never creates, reads, or combines role-key Secrets.
   ##
   rolePolicies:
