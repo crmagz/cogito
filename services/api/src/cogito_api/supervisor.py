@@ -44,6 +44,16 @@ class ApprovalRecord:
     delivered: bool
 
 
+@dataclass(frozen=True)
+class OutboxDelivery:
+    """A short-lived lease over an immutable plan approval decision."""
+
+    decision_id: str
+    run_id: str
+    payload: dict[str, str]
+    attempt_count: int
+
+
 class ApprovalConflictError(Exception):
     """Raised when a decision cannot safely apply to the current run state."""
 
@@ -74,6 +84,14 @@ class SupervisorStore(Protocol):
     ) -> ApprovalRecord: ...
 
     async def mark_plan_approval_delivered(self, decision_id: str) -> None: ...
+
+    async def claim_plan_approval_deliveries(
+        self, *, limit: int, lease_seconds: int, decision_id: str | None = None
+    ) -> list[OutboxDelivery]: ...
+
+    async def release_plan_approval_delivery(
+        self, decision_id: str, *, retry_seconds: int, error: str
+    ) -> None: ...
 
 
 class PostgresSupervisorStore:
@@ -349,7 +367,13 @@ class PostgresSupervisorStore:
                 {"decision_id": decision_id},
             )
             await connection.execute(
-                text("UPDATE temporal_outbox SET delivered_at = now() WHERE decision_id = :decision_id"),
+                text(
+                    """
+                    UPDATE temporal_outbox
+                    SET delivered_at = now(), lease_until = NULL, last_error = NULL
+                    WHERE decision_id = :decision_id
+                    """
+                ),
                 {"decision_id": decision_id},
             )
             status = {
@@ -360,6 +384,76 @@ class PostgresSupervisorStore:
             await connection.execute(
                 text("UPDATE supervisor_runs SET status = :status WHERE run_id = :run_id"),
                 {"status": status, "run_id": row["run_id"]},
+            )
+
+    async def claim_plan_approval_deliveries(
+        self, *, limit: int, lease_seconds: int, decision_id: str | None = None
+    ) -> list[OutboxDelivery]:
+        """Lease due decisions with SKIP LOCKED so API replicas cannot double-deliver."""
+
+        if limit < 1:
+            return []
+        filter_sql = "AND decision_id = :decision_id" if decision_id else ""
+        parameters: dict[str, object] = {"limit": limit, "lease_seconds": lease_seconds}
+        if decision_id:
+            parameters["decision_id"] = decision_id
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    SELECT decision_id, run_id, payload, attempt_count
+                    FROM temporal_outbox
+                    WHERE delivered_at IS NULL
+                      AND next_attempt_at <= now()
+                      AND (lease_until IS NULL OR lease_until <= now())
+                      {filter_sql}
+                    ORDER BY created_at
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT :limit
+                    """
+                ),
+                parameters,
+            )
+            rows = result.mappings().all()
+            for row in rows:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE temporal_outbox
+                        SET attempt_count = attempt_count + 1,
+                            lease_until = now() + (:lease_seconds * interval '1 second')
+                        WHERE decision_id = :decision_id
+                        """
+                    ),
+                    {"decision_id": row["decision_id"], "lease_seconds": lease_seconds},
+                )
+        return [
+            OutboxDelivery(
+                decision_id=row["decision_id"],
+                run_id=row["run_id"],
+                payload=dict(row["payload"]),
+                attempt_count=int(row["attempt_count"]) + 1,
+            )
+            for row in rows
+        ]
+
+    async def release_plan_approval_delivery(
+        self, decision_id: str, *, retry_seconds: int, error: str
+    ) -> None:
+        """Release a failed lease with a bounded diagnostic and retry schedule."""
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE temporal_outbox
+                    SET lease_until = NULL,
+                        next_attempt_at = now() + (:retry_seconds * interval '1 second'),
+                        last_error = :error
+                    WHERE decision_id = :decision_id AND delivered_at IS NULL
+                    """
+                ),
+                {"decision_id": decision_id, "retry_seconds": retry_seconds, "error": error[:1024]},
             )
 
     async def close(self) -> None:

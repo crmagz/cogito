@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from cogito_api.outbox import PlanApprovalOutboxDispatcher
+
 from .fakes import FakeRunStarter, InMemorySupervisorStore
 from .test_planning_runs import _planning_request
 
@@ -95,3 +97,31 @@ def test_replayed_approval_is_idempotent(client: TestClient, valid_plan: dict, s
     assert second.status_code == 202
     assert second.json()["decision_id"] == first.json()["decision_id"]
     assert len(starter.plan_approvals) == 1
+
+
+async def test_persisted_approval_is_retried_after_temporal_delivery_failure(
+    client: TestClient,
+    valid_plan: dict,
+    starter: FakeRunStarter,
+    supervisor_store: InMemorySupervisorStore,
+) -> None:
+    run_id, digest = _awaiting_plan(client, valid_plan)
+    starter.approval_error = ConnectionError("Temporal temporarily unavailable")
+
+    response = client.post(
+        f"/api/v1/runs/{run_id}/approvals/plan",
+        json={"decision": "approve", "artifact_sha256": digest},
+        headers=_headers(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["delivered"] is False
+    assert len(supervisor_store.outbox) == 1
+    starter.approval_error = None
+    dispatcher = PlanApprovalOutboxDispatcher(supervisor_store, starter)
+
+    delivered = await dispatcher.deliver_once()
+
+    assert delivered == {response.json()["decision_id"]}
+    assert supervisor_store.planning_runs[run_id].status.value == "implementing"
+    assert supervisor_store.outbox == {}
