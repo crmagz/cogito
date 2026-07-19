@@ -5,6 +5,8 @@ import copy
 from fastapi.testclient import TestClient
 
 from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
+from .conftest import make_settings
+from cogito_api.main import create_app
 from cogito_api.models import AiPlan
 
 
@@ -116,6 +118,34 @@ def test_generate_plan_retries_workflow_start_without_regenerating_artifact(
     assert response.status_code == 200
     assert response.json()["plan_artifact"] == first.json()["plan_artifact"]
     assert len(planner.contexts) == 1
+    assert len(starter.started_runs) == 1
+
+
+def test_concurrent_generation_converges_on_the_persisted_plan(
+    valid_plan: dict, planner: FakePlanner, starter: FakeRunStarter
+) -> None:
+    class ConcurrentPlanStore(InMemorySupervisorStore):
+        async def attach_generated_plan(self, *args, **kwargs):
+            await super().attach_generated_plan(*args, **kwargs)
+            raise ValueError("another caller persisted the active plan")
+
+    store = InMemoryPlanStore()
+    supervisor_store = ConcurrentPlanStore()
+    racing_client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(),
+            starter=starter,
+            supervisor_store=supervisor_store,
+            planner=planner,
+        )
+    )
+    submitted = racing_client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+
+    response = racing_client.post(f"/api/v1/planning-runs/{submitted.json()['run_id']}/generate-plan")
+
+    assert response.status_code == 200
+    assert response.json()["plan_artifact"] == supervisor_store.planning_runs[submitted.json()["run_id"]].plan_artifact.model_dump()
     assert len(starter.started_runs) == 1
 
 

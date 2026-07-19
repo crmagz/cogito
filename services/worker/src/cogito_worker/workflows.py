@@ -32,7 +32,10 @@ class DeveloperRunWorkflow:
         if not decision_id:
             return False
         if decision_id in self._processed_decision_ids:
-            return False
+            # The control-plane outbox can retry after Temporal has accepted
+            # the update but before it records delivery. A repeated durable
+            # decision ID is therefore an acknowledgement, never a new vote.
+            return True
         if not self._awaiting_plan_approval:
             return False
         if decision.get("artifact_sha256") != self._plan_sha256:

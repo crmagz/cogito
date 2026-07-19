@@ -225,13 +225,28 @@ def create_app(
             next_plan_revision = record.plan_revision + 1
             snapshot = store.put_planning_plan(run_id, next_plan_revision, generated_plan)
             workflow_id = _planning_workflow_id(run_id, next_plan_revision, snapshot.sha256)
-            updated = await supervisor_store.attach_generated_plan(
-                run_id,
-                plan_artifact=ArtifactReference(ref=snapshot.ref, sha256=snapshot.sha256),
-                planner_model=settings.litellm_planner_model,
-                workflow_id=workflow_id,
-                expected_plan_revision=record.plan_revision,
-            )
+            try:
+                updated = await supervisor_store.attach_generated_plan(
+                    run_id,
+                    plan_artifact=ArtifactReference(ref=snapshot.ref, sha256=snapshot.sha256),
+                    planner_model=settings.litellm_planner_model,
+                    workflow_id=workflow_id,
+                    expected_plan_revision=record.plan_revision,
+                )
+            except ValueError:
+                # A concurrent caller may have persisted the active immutable
+                # plan after this caller read the planning record. Converge on
+                # that authoritative version instead of returning a 500 or
+                # starting a second workflow.
+                latest = await supervisor_store.get_planning_run(run_id)
+                if (
+                    latest is None
+                    or latest.status is not PlanningRunStatus.AWAITING_PLAN_APPROVAL
+                    or latest.plan_artifact is None
+                    or latest.workflow_id is None
+                ):
+                    raise HTTPException(status_code=409, detail="planning run changed while the plan was generated")
+                updated = latest
         elif record.status is PlanningRunStatus.AWAITING_PLAN_APPROVAL and record.plan_artifact is not None:
             # A start request may have timed out after plan persistence. Retry
             # the immutable artifact, never regenerate a second model plan.
