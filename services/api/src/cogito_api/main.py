@@ -209,40 +209,52 @@ def create_app(
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
-        if record.status is not PlanningRunStatus.PLANNING:
+        if record.status is PlanningRunStatus.PLANNING:
+            initial_specification = store.get_source_specification(record.source_artifact.ref)
+            try:
+                generated_plan = await planner.generate(
+                    PlanningContext(
+                        initial_specification=initial_specification,
+                        target_repos=record.target_repos,
+                        spec_set=record.spec_set,
+                        constraints=record.constraints,
+                    )
+                )
+            except PlannerError as error:
+                raise HTTPException(status_code=502, detail="planner failed to produce a valid plan") from error
+            snapshot = store.put_plan(run_id, generated_plan)
+            updated = await supervisor_store.attach_generated_plan(
+                run_id,
+                plan_artifact=ArtifactReference(ref=snapshot.ref, sha256=snapshot.sha256),
+                planner_model=settings.litellm_planner_model,
+            )
+        elif record.status is PlanningRunStatus.AWAITING_PLAN_APPROVAL and record.plan_artifact is not None:
+            # A start request may have timed out after plan persistence. Retry
+            # the immutable artifact, never regenerate a second model plan.
+            updated = record
+        else:
             raise HTTPException(status_code=409, detail="planning run is not eligible for plan generation")
-        initial_specification = store.get_source_specification(record.source_artifact.ref)
+        assert updated.plan_artifact is not None
         try:
-            generated_plan = await planner.generate(
-                PlanningContext(
-                    initial_specification=initial_specification,
-                    target_repos=record.target_repos,
-                    spec_set=record.spec_set,
-                    constraints=record.constraints,
+            await starter.start_run(
+                RunEnvelope(
+                    run_id=updated.run_id,
+                    plan_ref=updated.plan_artifact.ref,
+                    plan_sha256=updated.plan_artifact.sha256,
+                    spec_ref=updated.spec_set,
+                    target_repos=updated.target_repos,
+                    constraints=updated.constraints,
+                    priority=updated.priority,
+                    submitted_at=updated.submitted_at,
+                    submitted_by=updated.submitted_by,
+                    requires_plan_approval=True,
                 )
             )
-        except PlannerError as error:
-            raise HTTPException(status_code=502, detail="planner failed to produce a valid plan") from error
-        snapshot = store.put_plan(run_id, generated_plan)
-        updated = await supervisor_store.attach_generated_plan(
-            run_id,
-            plan_artifact=ArtifactReference(ref=snapshot.ref, sha256=snapshot.sha256),
-            planner_model=settings.litellm_planner_model,
-        )
-        await starter.start_run(
-            RunEnvelope(
-                run_id=updated.run_id,
-                plan_ref=snapshot.ref,
-                plan_sha256=snapshot.sha256,
-                spec_ref=updated.spec_set,
-                target_repos=updated.target_repos,
-                constraints=updated.constraints,
-                priority=updated.priority,
-                submitted_at=updated.submitted_at,
-                submitted_by=updated.submitted_by,
-                requires_plan_approval=True,
-            )
-        )
+        except Exception as error:
+            raise HTTPException(
+                status_code=503,
+                detail="plan was persisted but Temporal is unavailable; retry this request to start its workflow",
+            ) from error
         response = PlanningRunResponse(
             run_id=updated.run_id,
             status=updated.status,
