@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import Enum, StrEnum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ReviewProfile(str, Enum):
@@ -12,6 +12,8 @@ class ReviewProfile(str, Enum):
 
 
 class PlanPhase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(description="Unique phase identifier (e.g., 'phase-1')")
     name: str = Field(description="Human-readable phase name")
     description: str = Field(description="What this phase accomplishes")
@@ -29,6 +31,8 @@ class PlanPhase(BaseModel):
 
 
 class PlanConstraints(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     max_wall_clock_minutes: int = Field(default=60)
     max_cost_usd: float = Field(default=5.0)
     max_review_rounds: int = Field(default=3)
@@ -40,6 +44,8 @@ class PlanConstraints(BaseModel):
 
 
 class AiPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = Field(description="Brief title of the work")
     summary: str = Field(description="What problem this plan solves and why")
     target_repos: list[str] = Field(

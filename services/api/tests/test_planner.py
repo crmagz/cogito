@@ -36,6 +36,7 @@ async def test_litellm_planner_requests_json_with_dedicated_bearer_key(valid_pla
     assert captured["authorization"] == "Bearer planner-test-key"
     assert captured["body"]["model"] == "balanced"  # type: ignore[index]
     assert captured["body"]["response_format"] == {"type": "json_object"}  # type: ignore[index]
+    assert '"title"' in captured["body"]["messages"][0]["content"]  # type: ignore[index]
 
 
 async def test_litellm_planner_rejects_model_output_that_changes_target_repositories(valid_plan: dict) -> None:
@@ -55,3 +56,27 @@ async def test_litellm_planner_rejects_model_output_that_changes_target_reposito
                 constraints=AiPlan.model_validate(valid_plan).constraints,
             )
         )
+
+
+async def test_litellm_planner_accepts_a_single_fenced_json_object(valid_plan: dict) -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": f"```json\\n{json.dumps(valid_plan)}\\n```"}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
+    plan = await planner.generate(
+        PlanningContext(
+            initial_specification="Add a rate limiter.",
+            target_repos=valid_plan["target_repos"],
+            spec_set=valid_plan["spec_set"],
+            constraints=AiPlan.model_validate(valid_plan).constraints,
+        )
+    )
+
+    assert plan.title == valid_plan["title"]
+
+
+def test_ai_plan_rejects_undeclared_output_fields(valid_plan: dict) -> None:
+    invalid = {**valid_plan, "untrusted_execution_mode": "bypass"}
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        AiPlan.model_validate(invalid)
