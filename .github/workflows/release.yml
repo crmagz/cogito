@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: cogito-release-main
+  cancel-in-progress: false
+
+jobs:
+  api-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      previous-tag: ${{ steps.version.outputs.previous-tag }}
+      release-required: ${{ steps.version.outputs.release-required }}
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+        with:
+          fetch-depth: 0
+      - id: version
+        uses: crmagz/forge/.github/actions/semantic-version@releases/v1
+        with:
+          tag-prefix: api/
+          pathspecs: |
+            services/api
+            .python-version
+
+  api-publish:
+    needs: api-version
+    if: needs.api-version.outputs.release-required == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca
+      - name: Build and publish API image
+        run: |
+          docker buildx build services/api \
+            --file services/api/Dockerfile \
+            --platform linux/amd64,linux/arm64 \
+            --tag ghcr.io/${{ github.repository_owner }}/cogito-api:v${{ needs.api-version.outputs.version }} \
+            --tag ghcr.io/${{ github.repository_owner }}/cogito-api:latest \
+            --build-arg VERSION=${{ needs.api-version.outputs.version }} \
+            --build-arg REVISION=${{ github.sha }} \
+            --build-arg SOURCE=https://github.com/${{ github.repository }} \
+            --cache-from type=registry,ref=ghcr.io/${{ github.repository_owner }}/cogito-api:buildcache \
+            --cache-to type=registry,ref=ghcr.io/${{ github.repository_owner }}/cogito-api:buildcache,mode=max \
+            --provenance mode=max \
+            --sbom=true \
+            --push
+
+  api-release:
+    needs: [api-version, api-publish]
+    if: needs.api-version.outputs.release-required == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+        with:
+          fetch-depth: 0
+      - uses: crmagz/forge/.github/actions/release@releases/v1
+        with:
+          version: ${{ needs.api-version.outputs.version }}
+          tag-prefix: api/
+          previous-tag: ${{ needs.api-version.outputs.previous-tag }}
+          pathspecs: |
+            services/api
+            .python-version
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  worker-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      previous-tag: ${{ steps.version.outputs.previous-tag }}
+      release-required: ${{ steps.version.outputs.release-required }}
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+        with:
+          fetch-depth: 0
+      - id: version
+        uses: crmagz/forge/.github/actions/semantic-version@releases/v1
+        with:
+          tag-prefix: worker/
+          pathspecs: |
+            services/worker
+            .python-version
+
+  worker-publish:
+    needs: worker-version
+    if: needs.worker-version.outputs.release-required == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca
+      - name: Build and publish worker image
+        run: |
+          docker buildx build services/worker \
+            --file services/worker/Dockerfile \
+            --platform linux/amd64,linux/arm64 \
+            --tag ghcr.io/${{ github.repository_owner }}/cogito-worker:v${{ needs.worker-version.outputs.version }} \
+            --tag ghcr.io/${{ github.repository_owner }}/cogito-worker:latest \
+            --build-arg VERSION=${{ needs.worker-version.outputs.version }} \
+            --build-arg REVISION=${{ github.sha }} \
+            --build-arg SOURCE=https://github.com/${{ github.repository }} \
+            --cache-from type=registry,ref=ghcr.io/${{ github.repository_owner }}/cogito-worker:buildcache \
+            --cache-to type=registry,ref=ghcr.io/${{ github.repository_owner }}/cogito-worker:buildcache,mode=max \
+            --provenance mode=max \
+            --sbom=true \
+            --push
+
+  worker-release:
+    needs: [worker-version, worker-publish]
+    if: needs.worker-version.outputs.release-required == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+        with:
+          fetch-depth: 0
+      - uses: crmagz/forge/.github/actions/release@releases/v1
+        with:
+          version: ${{ needs.worker-version.outputs.version }}
+          tag-prefix: worker/
+          previous-tag: ${{ needs.worker-version.outputs.previous-tag }}
+          pathspecs: |
+            services/worker
+            .python-version
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  chart-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      previous-tag: ${{ steps.version.outputs.previous-tag }}
+      release-required: ${{ steps.version.outputs.release-required }}
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+        with:
+          fetch-depth: 0
+      - id: version
+        uses: crmagz/forge/.github/actions/semantic-version@releases/v1
+        with:
+          tag-prefix: chart/
+          pathspecs: |
+            charts
+
+  chart-publish:
+    needs: chart-version
+    if: needs.chart-version.outputs.release-required == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Package and publish chart
+        env:
+          VERSION: ${{ needs.chart-version.outputs.version }}
+        run: |
+          helm dependency build charts
+          mkdir -p .release
+          helm package charts --destination .release --version "$VERSION" --app-version "$VERSION"
+          helm push ".release/cogito-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+
+  chart-release:
+    needs: [chart-version, chart-publish]
+    if: needs.chart-version.outputs.release-required == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+        with:
+          fetch-depth: 0
+      - uses: crmagz/forge/.github/actions/release@releases/v1
+        with:
+          version: ${{ needs.chart-version.outputs.version }}
+          tag-prefix: chart/
+          previous-tag: ${{ needs.chart-version.outputs.previous-tag }}
+          pathspecs: |
+            charts
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,43 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, worker]
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - name: Install locked dependencies
+        working-directory: services/${{ matrix.service }}
+        run: uv sync --frozen --all-extras
+      - name: Run tests
+        working-directory: services/${{ matrix.service }}
+        run: uv run pytest
+
+  chart:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1a275c3b69536ee54be43f2070a358922e12c8d4
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
+      - name: Lint chart
+        run: helm lint charts
+      - name: Render default values
+        run: helm template cogito charts > /dev/null
+      - name: Render production values
+        run: |
+          helm template cogito charts -f charts/values-production.yaml \
+            --set api.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set worker.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            --set litellm.image.digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+            > /dev/null
