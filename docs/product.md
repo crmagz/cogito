@@ -29,10 +29,19 @@ Today, Cogito provides the production foundation for that workflow:
   model routing, virtual keys, toolsets, MCP servers, A2A registration, and
   spend tracking.
 
-The agent supervisor, delegated A2A sub-agents, semantic tool discovery, and
-MCP tool execution are deliberately not represented as completed features yet.
-They are the next product layers on top of this execution substrate, not
-implicit behavior hidden in the current worker.
+The first governed planning path is now present: an initial work specification
+is stored as an immutable artifact, the Supervisor can generate a normalized
+plan through an API-only LiteLLM virtual key, and Temporal waits at a
+digest-bound human plan-approval gate before it provisions an execution
+workspace. Approval decisions are authenticated, idempotent, and retained as
+audit records. Local kind uses an explicit development credential; production
+requires OIDC bearer-token validation.
+
+Delegated A2A sub-agents, semantic tool discovery, MCP tool execution,
+adversarial implementation review, the final implementation gate, and the
+operator UI are deliberately not represented as completed features yet. They
+are the next product layers on top of this execution substrate, not implicit
+behavior hidden in the current worker.
 
 ## Target agentic ecosystem
 

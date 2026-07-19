@@ -24,6 +24,7 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    "pytest-bdd==8.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]
