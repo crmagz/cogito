@@ -1,19 +1,22 @@
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
-ENV VIRTUAL_ENV=/opt/venv \
-    PATH="/opt/venv/bin:$PATH" \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /uvx /bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
 WORKDIR /build
 
-RUN python -m venv "$VIRTUAL_ENV"
+COPY pyproject.toml uv.lock ./
 
-COPY pyproject.toml ./
+RUN uv sync --frozen --no-dev --no-install-project
+
 COPY src ./src
 
-RUN pip install --no-cache-dir --no-compile .
+RUN uv sync --frozen --no-dev --no-editable
 
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH" \
