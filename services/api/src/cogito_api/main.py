@@ -40,7 +40,7 @@ class PlanValidationError(Exception):
 
 def _violation_response(violations: list[Violation]) -> JSONResponse:
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content={"error": "validation_failed", "violations": [v.model_dump() for v in violations]},
     )
 

@@ -34,8 +34,11 @@ is stored as an immutable artifact, the Supervisor can generate a normalized
 plan through an API-only LiteLLM virtual key, and Temporal waits at a
 digest-bound human plan-approval gate before it provisions an execution
 workspace. Approval decisions are authenticated, idempotent, and retained as
-audit records. Local kind uses an explicit development credential; production
-requires OIDC bearer-token validation.
+audit records. They are placed in a leased, retrying transactional outbox
+before delivery to Temporal, so a transient control-plane failure cannot turn
+an approval into a lost instruction. A persisted plan's workflow start is also
+safe to retry without regenerating the plan. Local kind uses an explicit
+development credential; production requires OIDC bearer-token validation.
 
 Delegated A2A sub-agents, semantic tool discovery, MCP tool execution,
 adversarial implementation review, the final implementation gate, and the
