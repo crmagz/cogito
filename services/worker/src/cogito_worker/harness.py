@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from .execution import CommandResult, ExecutionWorkspaceService, _sanitize_diagnostics
 from .execution_prepare import feature_branch_name
-from .models import PhaseExecutionRequest, PhaseResult, VerificationResult
+from .models import BackupExecutionRequest, PhaseExecutionRequest, PhaseResult, VerificationResult
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class _AgentResult:
     cost_usd: float | None
     summary: str
     succeeded: bool
+    ceiling: str | None = None
 
 
 class ClaudeCodeHarness:
@@ -45,6 +46,8 @@ class ClaudeCodeHarness:
                 commits={},
                 verification=[],
                 summary=agent.summary,
+                outcome="ceiling_reached" if agent.ceiling else "failed",
+                ceiling=agent.ceiling,
             )
 
         commits = await self._head_commits(request)
@@ -61,6 +64,7 @@ class ClaudeCodeHarness:
                 commits=commits,
                 verification=[],
                 summary="agent completed without a committed change on the feature branch",
+                outcome="failed",
             )
 
         dirty_repositories = await self._dirty_repositories(request)
@@ -75,6 +79,7 @@ class ClaudeCodeHarness:
                 commits=commits,
                 verification=[],
                 summary=f"agent left uncommitted changes in {', '.join(dirty_repositories)}",
+                outcome="failed",
             )
 
         verification = await self._verify(request)
@@ -89,6 +94,7 @@ class ClaudeCodeHarness:
                 commits=commits,
                 verification=verification,
                 summary="one or more approved verification commands failed",
+                outcome="failed",
             )
 
         dirty_repositories = await self._dirty_repositories(request)
@@ -103,6 +109,7 @@ class ClaudeCodeHarness:
                 commits=commits,
                 verification=verification,
                 summary=f"verification left uncommitted changes in {', '.join(dirty_repositories)}",
+                outcome="failed",
             )
 
         push_failure = await self._push_feature_branch(request, branch_name)
@@ -117,6 +124,7 @@ class ClaudeCodeHarness:
                 commits=commits,
                 verification=verification,
                 summary=push_failure,
+                outcome="failed",
             )
 
         return PhaseResult(
@@ -129,6 +137,75 @@ class ClaudeCodeHarness:
             commits=commits,
             verification=verification,
             summary=agent.summary,
+        )
+
+    async def backup_phase(self, request: BackupExecutionRequest) -> PhaseResult:
+        """Commit and push existing work without invoking a productive model command."""
+
+        if not request.workspace.repositories:
+            raise ValueError("backup requires at least one target repository")
+        branch_name = feature_branch_name(request.workspace.run_id)
+        execution_request = PhaseExecutionRequest(
+            phase=request.phase,
+            workspace=request.workspace,
+            max_turns=1,
+            timeout_seconds=request.timeout_seconds,
+        )
+        await self._assert_expected_repositories(execution_request, branch_name)
+        before_commits = await self._head_commits(execution_request)
+        for repository in request.workspace.repositories:
+            staged = await self._workspaces.execute(
+                request.workspace,
+                ["git", "-C", repository, "add", "-A"],
+                timeout_seconds=request.timeout_seconds,
+            )
+            if staged.exit_code != 0:
+                return _backup_failure(
+                    request,
+                    branch_name,
+                    f"could not stage recovery changes: {_command_error(staged)}",
+                )
+            staged_changes = await self._workspaces.execute(
+                request.workspace,
+                ["git", "-C", repository, "diff", "--cached", "--quiet"],
+                timeout_seconds=request.timeout_seconds,
+            )
+            if staged_changes.exit_code not in {0, 1}:
+                return _backup_failure(
+                    request,
+                    branch_name,
+                    f"could not inspect staged recovery changes: {_command_error(staged_changes)}",
+                )
+            if staged_changes.exit_code == 1:
+                committed = await self._workspaces.execute(
+                    request.workspace,
+                    ["git", "-C", repository, "commit", "-m", f"cogito backup: {request.phase.id} ({request.ceiling})"],
+                    timeout_seconds=request.timeout_seconds,
+                )
+                if committed.exit_code != 0:
+                    return _backup_failure(
+                        request,
+                        branch_name,
+                        f"could not commit recovery changes: {_command_error(committed)}",
+                    )
+        commits = await self._head_commits(execution_request)
+        await self._assert_expected_repositories(execution_request, branch_name)
+        changed_files = await self._changed_files(execution_request, before_commits, commits)
+        push_failure = await self._push_feature_branch(execution_request, branch_name)
+        if push_failure is not None:
+            return _backup_failure(request, branch_name, push_failure, commits=commits, changed_files=changed_files)
+        return PhaseResult(
+            phase_id=request.phase.id,
+            branch_name=branch_name,
+            succeeded=True,
+            turns_used=None,
+            cost_usd=None,
+            changed_files=changed_files,
+            commits=commits,
+            verification=[],
+            summary=f"progress preserved after {request.ceiling} ceiling",
+            outcome="stopped_with_backup",
+            ceiling=request.ceiling,
         )
 
     async def _run_agent(self, request: PhaseExecutionRequest) -> _AgentResult:
@@ -146,7 +223,7 @@ class ClaudeCodeHarness:
             stdin=_assemble_prompt(request),
             timeout_seconds=request.timeout_seconds,
         )
-        return _parse_agent_result(result)
+        return _parse_agent_result(result, request.max_turns)
 
     async def _head_commits(self, request: PhaseExecutionRequest) -> dict[str, str]:
         commits: dict[str, str] = {}
@@ -282,7 +359,7 @@ and leave every repository clean. In your final response, summarize the implemen
 """
 
 
-def _parse_agent_result(result: CommandResult) -> _AgentResult:
+def _parse_agent_result(result: CommandResult, max_turns: int) -> _AgentResult:
     """Parse Claude Code's structured result without trusting an unbounded subprocess response."""
 
     try:
@@ -293,20 +370,36 @@ def _parse_agent_result(result: CommandResult) -> _AgentResult:
             cost_usd=None,
             summary=f"Claude Code did not produce a structured result: {_command_error(result)}",
             succeeded=False,
+            ceiling=_ceiling_from_command_result(result),
         )
     if not isinstance(payload, dict):
-        return _AgentResult(None, None, "Claude Code returned an invalid result payload", False)
+        return _AgentResult(
+            None,
+            None,
+            "Claude Code returned an invalid result payload",
+            False,
+            _ceiling_from_command_result(result),
+        )
     turns = payload.get("num_turns")
     cost = payload.get("total_cost_usd")
     summary = payload.get("result")
-    summary_text = _sanitize_diagnostics(summary) if isinstance(summary, str) and summary.strip() else "Claude Code completed"
+    summary_text = (
+        _sanitize_diagnostics(summary)
+        if isinstance(summary, str) and summary.strip()
+        else "Claude Code completed"
+    )
+    succeeded = result.exit_code == 0 and payload.get("is_error") is False
+    ceiling = None if succeeded else _ceiling_from_command_result(result)
+    if ceiling is None and not succeeded and isinstance(turns, int) and not isinstance(turns, bool) and turns >= max_turns:
+        ceiling = "turns"
     return _AgentResult(
         turns_used=turns if isinstance(turns, int) and not isinstance(turns, bool) and turns >= 0 else None,
         cost_usd=float(cost)
         if isinstance(cost, int | float) and not isinstance(cost, bool) and cost >= 0
         else None,
         summary=summary_text,
-        succeeded=result.exit_code == 0 and payload.get("is_error") is False,
+        succeeded=succeeded,
+        ceiling=ceiling,
     )
 
 
@@ -320,3 +413,41 @@ def _command_output(result: CommandResult) -> str:
     """Return bounded output suitable for durable verification evidence."""
 
     return _sanitize_diagnostics("\n".join(value for value in (result.stdout.strip(), result.stderr.strip()) if value))
+
+
+def _ceiling_from_command_result(result: CommandResult) -> str | None:
+    """Classify only known local timeout and pinned gateway budget signals."""
+
+    if result.exit_code == 124:
+        return "wall_clock"
+    output = "\n".join((result.stdout, result.stderr)).lower()
+    if result.exit_code != 0 and "429" in output and (
+        "max budget limit reached" in output or "budget has been exceeded" in output
+    ):
+        return "cost"
+    return None
+
+
+def _backup_failure(
+    request: BackupExecutionRequest,
+    branch_name: str,
+    summary: str,
+    *,
+    commits: dict[str, str] | None = None,
+    changed_files: list[str] | None = None,
+) -> PhaseResult:
+    """Return a terminal failed result when recoverable progress cannot be published."""
+
+    return PhaseResult(
+        phase_id=request.phase.id,
+        branch_name=branch_name,
+        succeeded=False,
+        turns_used=None,
+        cost_usd=None,
+        changed_files=changed_files or [],
+        commits=commits or {},
+        verification=[],
+        summary=summary,
+        outcome="failed",
+        ceiling=request.ceiling,
+    )

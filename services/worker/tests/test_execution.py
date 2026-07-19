@@ -13,6 +13,7 @@ from cogito_worker.execution import (
     execution_job_name,
     _sanitize_diagnostics,
 )
+from cogito_worker.budgets import RunBudget
 from cogito_worker.models import ExecutionRequest
 
 from .fakes import InMemoryExecutionJobClient
@@ -89,10 +90,47 @@ def test_execution_job_template_uses_an_isolated_emptydir_workspace() -> None:
     execution_secret_env = {env["name"]: env["valueFrom"] for env in container["env"] if "valueFrom" in env}
     assert execution_secret_env["ANTHROPIC_AUTH_TOKEN"]["secretKeyRef"]["name"] == "cogito-developer-key"
     assert execution_secret_env["COGITO_GIT_HTTPS_TOKEN"]["secretKeyRef"]["name"] == "cogito-developer-git"
-    assert next(env["value"] for env in container["env"] if env["name"] == "ANTHROPIC_BASE_URL") == "http://cogito-litellm:4000"
+    assert (
+        next(env["value"] for env in container["env"] if env["name"] == "ANTHROPIC_BASE_URL")
+        == "http://cogito-litellm:4000"
+    )
     assert json.loads(next(env["value"] for env in init_container["env"] if env["name"] == "COGITO_TARGET_REPOS")) == [
         "https://github.com/acme/api-gateway.git#0123456789abcdef0123456789abcdef01234567"
     ]
+
+
+def test_execution_job_uses_the_approved_budget_without_exceeding_operator_ceiling() -> None:
+    settings = execution_settings()
+    job = build_execution_job(
+        request=ExecutionRequest(
+            run_id="run-1",
+            spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            target_repos=[],
+            execution_timeout_seconds=120,
+        ),
+        job_name=execution_job_name("run-1"),
+        settings=settings,
+    )
+
+    pod_spec = job["spec"]["template"]["spec"]
+    container = pod_spec["containers"][0]
+    assert pod_spec["activeDeadlineSeconds"] == 120
+    assert (
+        next(env["value"] for env in container["env"] if env["name"] == "COGITO_EXECUTION_IDLE_SECONDS")
+        == "120"
+    )
+
+    with pytest.raises(ValueError, match="operator-configured Job deadline"):
+        build_execution_job(
+            request=ExecutionRequest(
+                run_id="run-1",
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+                target_repos=[],
+                execution_timeout_seconds=3901,
+            ),
+            job_name=execution_job_name("run-1"),
+            settings=settings,
+        )
 
 
 async def test_provisioning_removes_a_job_when_its_pod_never_becomes_active() -> None:
@@ -113,6 +151,41 @@ async def test_provisioning_removes_a_job_when_its_pod_never_becomes_active() ->
         await service.provision(ExecutionRequest(run_id="run-1", spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64, target_repos=[]))
 
     assert jobs.deleted == [execution_job_name("run-1")]
+
+
+async def test_provisioned_run_key_is_scoped_to_one_budget_and_execution_pod() -> None:
+    class RecordingRunKeys:
+        def __init__(self) -> None:
+            self.budgets: list[RunBudget] = []
+            self.cleaned: list[tuple[str, str]] = []
+
+        async def provision(self, budget: RunBudget) -> str:
+            self.budgets.append(budget)
+            return "cogito-run-key-abc"
+
+        async def cleanup(self, run_id: str, secret_name: str) -> None:
+            self.cleaned.append((run_id, secret_name))
+
+    jobs = InMemoryExecutionJobClient()
+    run_keys = RecordingRunKeys()
+    service = ExecutionWorkspaceService(execution_settings(), jobs, run_keys)
+    request = ExecutionRequest(
+        run_id="run-1",
+        spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+        target_repos=[],
+        execution_timeout_seconds=120,
+        max_cost_usd=2.5,
+    )
+
+    workspace = await service.provision(request)
+    await service.cleanup(workspace)
+
+    assert run_keys.budgets == [RunBudget("run-1", 2.5, "complex", 120)]
+    assert workspace.run_key_secret == "cogito-run-key-abc"
+    pod_container = jobs.created[0][1]["spec"]["template"]["spec"]["containers"][0]
+    key_ref = next(env["valueFrom"] for env in pod_container["env"] if env["name"] == "ANTHROPIC_AUTH_TOKEN")
+    assert key_ref["secretKeyRef"]["name"] == "cogito-run-key-abc"
+    assert run_keys.cleaned == [("run-1", "cogito-run-key-abc")]
 
 
 def test_execution_failure_diagnostics_redact_sensitive_values() -> None:

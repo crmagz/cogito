@@ -6,7 +6,13 @@ from temporalio import activity
 
 from .execution import ExecutionWorkspaceService
 from .harness import ClaudeCodeHarness
-from .models import ExecutionRequest, ExecutionWorkspace, PhaseExecutionRequest, PhaseResult
+from .models import (
+    BackupExecutionRequest,
+    ExecutionRequest,
+    ExecutionWorkspace,
+    PhaseExecutionRequest,
+    PhaseResult,
+)
 from .storage import RunStore, now_iso
 
 
@@ -70,3 +76,17 @@ class WorkerActivities:
             extra={"run_id": request.workspace.run_id, "phase_id": request.phase.id},
         )
         return await self._harness.execute_phase(request)
+
+    @activity.defn
+    async def backup_phase(self, request: BackupExecutionRequest) -> PhaseResult:
+        """Commit and push recoverable progress after a known execution ceiling."""
+
+        activity.logger.info(
+            "backing up stopped plan phase",
+            extra={
+                "run_id": request.workspace.run_id,
+                "phase_id": request.phase.id,
+                "ceiling": request.ceiling,
+            },
+        )
+        return await self._harness.backup_phase(request)

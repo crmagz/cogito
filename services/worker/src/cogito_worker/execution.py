@@ -6,11 +6,12 @@ import hashlib
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from .execution_prepare import feature_branch_name, repository_clone_url, repository_directory_name
 from .models import ExecutionRequest, ExecutionWorkspace
+from .budgets import RunBudget, RunKeyManager
 
 _EXECUTION_JOB_PREFIX = "cogito-execution-"
 _RUN_HASH_LABEL = "cogito.dev/run-hash"
@@ -107,6 +108,11 @@ def build_execution_job(
         "app.kubernetes.io/component": "run-workspace",
         _RUN_HASH_LABEL: run_hash,
     }
+    active_deadline_seconds = request.execution_timeout_seconds or settings.active_deadline_seconds
+    if active_deadline_seconds > settings.active_deadline_seconds:
+        raise ValueError("approved execution timeout exceeds the operator-configured Job deadline")
+    if active_deadline_seconds < 1:
+        raise ValueError("approved execution timeout must be positive")
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -125,7 +131,7 @@ def build_execution_job(
                         "fsGroup": 10001,
                         "seccompProfile": {"type": "RuntimeDefault"},
                     },
-                    "activeDeadlineSeconds": settings.active_deadline_seconds,
+                    "activeDeadlineSeconds": active_deadline_seconds,
                     "ttlSecondsAfterFinished": settings.ttl_seconds_after_finished,
                     "terminationGracePeriodSeconds": settings.termination_grace_period_seconds,
                     "initContainers": [
@@ -209,7 +215,7 @@ def build_execution_job(
                                 },
                                 {
                                     "name": "COGITO_EXECUTION_IDLE_SECONDS",
-                                    "value": str(settings.idle_seconds),
+                                    "value": str(min(settings.idle_seconds, active_deadline_seconds)),
                                 },
                                 {"name": "ANTHROPIC_BASE_URL", "value": settings.litellm_endpoint},
                                 {"name": "ANTHROPIC_MODEL", "value": settings.litellm_model},
@@ -224,8 +230,8 @@ def build_execution_job(
                                     "name": "ANTHROPIC_AUTH_TOKEN",
                                     "valueFrom": {
                                         "secretKeyRef": {
-                                            "name": settings.litellm_key_secret,
-                                            "key": settings.litellm_key_secret_key,
+                                    "name": request.run_key_secret or settings.litellm_key_secret,
+                                    "key": settings.litellm_key_secret_key,
                                         }
                                     },
                                 },
@@ -494,20 +500,44 @@ class KubernetesExecutionJobClient:
 class ExecutionWorkspaceService:
     """Owns the lifecycle of a run's pod-local execution workspace."""
 
-    def __init__(self, settings: ExecutionJobSettings, jobs: ExecutionJobClient):
+    def __init__(
+        self,
+        settings: ExecutionJobSettings,
+        jobs: ExecutionJobClient,
+        run_keys: RunKeyManager | None = None,
+    ):
         self._settings = settings
         self._jobs = jobs
+        self._run_keys = run_keys
 
     async def provision(self, request: ExecutionRequest) -> ExecutionWorkspace:
         """Create the execution Job and return its non-secret descriptor."""
 
         job_name = execution_job_name(request.run_id)
-        body = build_execution_job(request=request, job_name=job_name, settings=self._settings)
-        await self._jobs.create_job(job_name, body)
+        run_key_secret = request.run_key_secret
+        if self._run_keys is not None:
+            run_key_secret = await self._run_keys.provision(
+                RunBudget(
+                    run_id=request.run_id,
+                    max_cost_usd=request.max_cost_usd,
+                    model=self._settings.litellm_model,
+                    expires_in_seconds=request.execution_timeout_seconds,
+                )
+            )
+        job_request = replace(request, run_key_secret=run_key_secret)
+        body = build_execution_job(request=job_request, job_name=job_name, settings=self._settings)
+        try:
+            await self._jobs.create_job(job_name, body)
+        except Exception:
+            if self._run_keys is not None:
+                await self._run_keys.cleanup(request.run_id, run_key_secret)
+            raise
         try:
             await self._jobs.wait_until_ready(job_name, self._settings.startup_timeout_seconds)
         except Exception:
             await self._jobs.delete_job(job_name)
+            if self._run_keys is not None:
+                await self._run_keys.cleanup(request.run_id, run_key_secret)
             raise
         return ExecutionWorkspace(
             run_id=request.run_id,
@@ -525,12 +555,15 @@ class ExecutionWorkspaceService:
                 )
                 for repository in request.target_repos
             },
+            run_key_secret=run_key_secret,
         )
 
     async def cleanup(self, workspace: ExecutionWorkspace) -> None:
         """Remove the execution Job and its `emptyDir` workspace."""
 
         await self._jobs.delete_job(workspace.job_name)
+        if self._run_keys is not None:
+            await self._run_keys.cleanup(workspace.run_id, workspace.run_key_secret)
 
     async def execute(
         self,

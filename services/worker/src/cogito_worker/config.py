@@ -42,6 +42,7 @@ class Settings:
     execution_litellm_model: str
     execution_litellm_key_secret: str
     execution_litellm_key_secret_key: str
+    execution_litellm_management_key: str
     execution_git_credentials_secret: str
     execution_git_credentials_secret_key: str
     execution_git_author_name: str
@@ -86,10 +87,10 @@ def load_settings() -> Settings:
         execution_image=os.environ.get("COGITO_EXECUTION_IMAGE", "cogito-worker:local"),
         execution_image_pull_policy=os.environ.get("COGITO_EXECUTION_IMAGE_PULL_POLICY", "IfNotPresent"),
         execution_workspace_root=os.environ.get("COGITO_EXECUTION_WORKSPACE_ROOT", "/workspace"),
-        execution_idle_seconds=int(os.environ.get("COGITO_EXECUTION_IDLE_SECONDS", "3600")),
+        execution_idle_seconds=int(os.environ.get("COGITO_EXECUTION_IDLE_SECONDS", "14700")),
         execution_startup_timeout_seconds=int(os.environ.get("COGITO_EXECUTION_STARTUP_TIMEOUT_SECONDS", "30")),
         execution_cleanup_timeout_seconds=int(os.environ.get("COGITO_EXECUTION_CLEANUP_TIMEOUT_SECONDS", "90")),
-        execution_active_deadline_seconds=int(os.environ.get("COGITO_EXECUTION_ACTIVE_DEADLINE_SECONDS", "3900")),
+        execution_active_deadline_seconds=int(os.environ.get("COGITO_EXECUTION_ACTIVE_DEADLINE_SECONDS", "14700")),
         execution_ttl_seconds_after_finished=int(
             os.environ.get("COGITO_EXECUTION_TTL_SECONDS_AFTER_FINISHED", "300")
         ),
@@ -118,6 +119,7 @@ def load_settings() -> Settings:
         execution_litellm_key_secret_key=os.environ.get(
             "COGITO_EXECUTION_LITELLM_KEY_SECRET_KEY", "api-key"
         ),
+        execution_litellm_management_key=os.environ.get("COGITO_EXECUTION_LITELLM_MANAGEMENT_KEY", ""),
         execution_git_credentials_secret=os.environ.get(
             "COGITO_EXECUTION_GIT_CREDENTIALS_SECRET", "cogito-developer-git"
         ),

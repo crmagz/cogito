@@ -4,7 +4,7 @@ import json
 
 from cogito_worker.execution import CommandResult
 from cogito_worker.harness import ClaudeCodeHarness
-from cogito_worker.models import ExecutionWorkspace, PhaseExecutionRequest, PlanPhase
+from cogito_worker.models import BackupExecutionRequest, ExecutionWorkspace, PhaseExecutionRequest, PlanPhase
 
 
 class ScriptedWorkspaces:
@@ -15,8 +15,11 @@ class ScriptedWorkspaces:
         *,
         verification_exit_code: int = 0,
         agent_stdout: str | None = None,
+        agent_exit_code: int = 0,
+        agent_stderr: str = "",
         origin: str = "https://github.com/acme/example.git",
         dirty_after_verification: bool = False,
+        staged_changes: bool = False,
     ) -> None:
         self.calls: list[tuple[list[str], str]] = []
         self._head_calls = 0
@@ -27,6 +30,9 @@ class ScriptedWorkspaces:
         self._agent_stdout = agent_stdout or json.dumps(
             {"is_error": False, "num_turns": 4, "total_cost_usd": 0.12, "result": "implemented feature"}
         )
+        self._agent_exit_code = agent_exit_code
+        self._agent_stderr = agent_stderr
+        self._staged_changes = staged_changes
 
     async def execute(
         self,
@@ -37,7 +43,7 @@ class ScriptedWorkspaces:
     ) -> CommandResult:
         self.calls.append((command, stdin))
         if command[0] == "claude":
-            return CommandResult(0, self._agent_stdout, "")
+            return CommandResult(self._agent_exit_code, self._agent_stdout, self._agent_stderr)
         if command[-2:] == ["branch", "--show-current"]:
             return CommandResult(0, "adp/run-1\n", "")
         if command[-3:] == ["remote", "get-url", "origin"]:
@@ -45,8 +51,12 @@ class ScriptedWorkspaces:
         if command[-2:] == ["rev-parse", "HEAD"]:
             self._head_calls += 1
             return CommandResult(0, "before\n" if self._head_calls == 1 else "after\n", "")
+        if command[-3:] == ["diff", "--cached", "--quiet"]:
+            return CommandResult(1 if self._staged_changes else 0, "", "")
         if "diff" in command:
             return CommandResult(0, "src/feature.py\n", "")
+        if command[-2:] == ["add", "-A"] or "commit" in command:
+            return CommandResult(0, "", "")
         if command[-2:] == ["status", "--porcelain=v1"]:
             self._status_calls += 1
             if self._dirty_after_verification and self._status_calls == 2:
@@ -172,3 +182,48 @@ async def test_harness_does_not_publish_when_verification_dirties_the_repository
     assert result.succeeded is False
     assert "verification left uncommitted changes" in result.summary
     assert all("push" not in command for command, _ in workspaces.calls)
+
+
+async def test_harness_classifies_only_known_gateway_budget_429_as_cost_ceiling() -> None:
+    workspaces = ScriptedWorkspaces(
+        agent_stdout=json.dumps({"is_error": True, "num_turns": 1, "result": "gateway rejected request"}),
+        agent_exit_code=1,
+        agent_stderr="HTTP 429: Max budget limit reached.",
+    )
+
+    result = await ClaudeCodeHarness(workspaces).execute_phase(_request())  # type: ignore[arg-type]
+
+    assert result.outcome == "ceiling_reached"
+    assert result.ceiling == "cost"
+
+
+async def test_harness_fails_closed_for_an_unrecognized_429() -> None:
+    workspaces = ScriptedWorkspaces(
+        agent_stdout=json.dumps({"is_error": True, "num_turns": 1, "result": "gateway rejected request"}),
+        agent_exit_code=1,
+        agent_stderr="HTTP 429: rate limit exceeded",
+    )
+
+    result = await ClaudeCodeHarness(workspaces).execute_phase(_request())  # type: ignore[arg-type]
+
+    assert result.outcome == "failed"
+    assert result.ceiling is None
+
+
+async def test_harness_commits_and_publishes_without_calling_the_agent_during_backup() -> None:
+    workspaces = ScriptedWorkspaces(staged_changes=True)
+    phase_request = _request()
+    backup = BackupExecutionRequest(
+        phase=phase_request.phase,
+        workspace=phase_request.workspace,
+        ceiling="turns",
+        timeout_seconds=60,
+    )
+
+    result = await ClaudeCodeHarness(workspaces).backup_phase(backup)  # type: ignore[arg-type]
+
+    assert result.outcome == "stopped_with_backup"
+    assert result.succeeded is True
+    assert any("commit" in command for command, _ in workspaces.calls)
+    assert any("push" in command for command, _ in workspaces.calls)
+    assert all(command[0] != "claude" for command, _ in workspaces.calls)

@@ -160,6 +160,9 @@ worker:
     prefix: specs
   execution:
     createNamespace: true
+    keyManagement:
+      existingSecret: cogito-developer-key-manager
+      apiKeyKey: api-key
     specStore:
       endpoint: "s3.us-east-1.amazonaws.com"
       secure: true
