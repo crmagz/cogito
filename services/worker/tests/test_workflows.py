@@ -172,6 +172,17 @@ async def test_workflow_rejects_stale_plan_approval(env: WorkflowEnvironment):
         assert workspaces.provisioned == []
 
 
+async def test_duplicate_plan_approval_is_an_idempotent_acknowledgement() -> None:
+    workflow_instance = DeveloperRunWorkflow()
+    workflow_instance._awaiting_plan_approval = True
+    workflow_instance._plan_sha256 = "a" * 64
+    decision = {"decision_id": "decision-1", "artifact_sha256": "a" * 64, "decision": "approve"}
+
+    assert await workflow_instance.submit_plan_approval(decision) is True
+    assert await workflow_instance.submit_plan_approval(decision) is True
+    assert workflow_instance._plan_decision == decision
+
+
 def test_plan_snapshot_validation_rejects_a_mutated_plan() -> None:
     plan = {
         "title": "Test plan",
