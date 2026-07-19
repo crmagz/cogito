@@ -32,7 +32,7 @@ class PlanApprovalOutboxDispatcher:
         )
         for item in pending:
             try:
-                accepted = await self._starter.submit_plan_approval(item.run_id, item.payload)
+                accepted = await self._starter.submit_plan_approval(item.workflow_id, item.payload)
             except Exception as error:
                 await self._store.release_plan_approval_delivery(
                     item.decision_id,

@@ -23,6 +23,16 @@ class InMemoryPlanStore:
             sha256=sha256(plan_snapshot_bytes(plan)).hexdigest(),
         )
 
+    def put_planning_plan(self, run_id: str, plan: AiPlan) -> PlanSnapshot:
+        from hashlib import sha256
+
+        self.plans[run_id] = plan
+        digest = sha256(plan_snapshot_bytes(plan)).hexdigest()
+        return PlanSnapshot(
+            ref=f"s3://plans/plans/{run_id}/revisions/{digest}/plan.json",
+            sha256=digest,
+        )
+
     def put_status(self, run_id: str, status: dict) -> None:
         self.statuses[run_id] = status
 
@@ -62,6 +72,7 @@ class InMemorySupervisorStore:
         run_id: str,
         plan_artifact: ArtifactReference,
         planner_model: str,
+        workflow_id: str,
     ) -> PlanningRunRecord:
         record = self.planning_runs[run_id]
         if record.status.value != "planning":
@@ -78,6 +89,7 @@ class InMemorySupervisorStore:
             submitted_by=record.submitted_by,
             plan_artifact=plan_artifact,
             planner_model=planner_model,
+            workflow_id=workflow_id,
         )
         self.planning_runs[run_id] = updated
         return updated
@@ -116,6 +128,7 @@ class InMemorySupervisorStore:
         self.outbox[record.decision_id] = OutboxDelivery(
             decision_id=record.decision_id,
             run_id=record.run_id,
+            workflow_id=run.workflow_id or "",
             payload={
                 "decision_id": record.decision_id,
                 "artifact_sha256": record.artifact_sha256,
@@ -141,7 +154,7 @@ class InMemorySupervisorStore:
                 status = {
                     PlanApprovalDecision.APPROVE: PlanningRunStatus.IMPLEMENTING,
                     PlanApprovalDecision.REJECT: PlanningRunStatus.REJECTED,
-                    PlanApprovalDecision.REQUEST_REVISION: PlanningRunStatus.REVISION_REQUESTED,
+                    PlanApprovalDecision.REQUEST_REVISION: PlanningRunStatus.PLANNING,
                 }[record.decision]
                 self.planning_runs[record.run_id] = PlanningRunRecord(
                     run_id=run.run_id,
@@ -155,6 +168,7 @@ class InMemorySupervisorStore:
                     submitted_by=run.submitted_by,
                     plan_artifact=run.plan_artifact,
                     planner_model=run.planner_model,
+                    workflow_id=None if status is PlanningRunStatus.PLANNING else run.workflow_id,
                 )
                 self.outbox.pop(decision_id, None)
                 self.leased_decision_ids.discard(decision_id)
@@ -174,6 +188,7 @@ class InMemorySupervisorStore:
             updated = OutboxDelivery(
                 decision_id=item.decision_id,
                 run_id=item.run_id,
+                workflow_id=item.workflow_id,
                 payload=item.payload,
                 attempt_count=item.attempt_count + 1,
             )
@@ -211,12 +226,12 @@ class FakeRunStarter:
     async def start_run(self, envelope: RunEnvelope) -> None:
         if self.start_error is not None:
             raise self.start_error
-        if any(run.run_id == envelope.run_id for run in self.started_runs):
+        if any((run.workflow_id or run.run_id) == (envelope.workflow_id or envelope.run_id) for run in self.started_runs):
             return
         self.started_runs.append(envelope)
 
-    async def submit_plan_approval(self, run_id: str, decision: dict[str, str]) -> bool:
-        self.plan_approvals.append((run_id, decision))
+    async def submit_plan_approval(self, workflow_id: str, decision: dict[str, str]) -> bool:
+        self.plan_approvals.append((workflow_id, decision))
         if self.approval_error is not None:
             raise self.approval_error
         return self.approval_result

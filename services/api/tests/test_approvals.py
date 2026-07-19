@@ -52,7 +52,7 @@ def test_matching_approval_is_audited_and_delivered_to_temporal(
     assert body["delivered"] is True
     assert starter.plan_approvals == [
         (
-            run_id,
+                starter.started_runs[0].workflow_id,
             {"decision_id": body["decision_id"], "artifact_sha256": digest, "decision": "approve"},
         )
     ]

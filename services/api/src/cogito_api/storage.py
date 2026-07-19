@@ -18,6 +18,8 @@ from .models import AiPlan, ArtifactReference
 class PlanStore(Protocol):
     def put_plan(self, run_id: str, plan: AiPlan) -> "PlanSnapshot": ...
 
+    def put_planning_plan(self, run_id: str, plan: AiPlan) -> "PlanSnapshot": ...
+
     def put_status(self, run_id: str, status: dict) -> None: ...
 
     def get_status(self, run_id: str) -> dict | None: ...
@@ -77,6 +79,15 @@ class MinioPlanStore:
             sha256=sha256(data).hexdigest(),
         )
 
+    def put_planning_plan(self, run_id: str, plan: AiPlan) -> PlanSnapshot:
+        """Store a generated plan under its content digest so revisions never overwrite it."""
+
+        data = plan_snapshot_bytes(plan)
+        digest = sha256(data).hexdigest()
+        object_name = f"plans/{run_id}/revisions/{digest}/plan.json"
+        self._put_snapshot(object_name, data)
+        return PlanSnapshot(ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=digest)
+
     def put_source_specification(self, run_id: str, initial_specification: str) -> ArtifactReference:
         data = source_specification_bytes(initial_specification)
         self._put_snapshot(f"runs/{run_id}/source-spec.json", data)
@@ -121,6 +132,15 @@ class MinioPlanStore:
 
     def _put_snapshot(self, object_name: str, data: bytes) -> None:
         """Persist a compliance-retained, content-addressed plan snapshot."""
+
+        try:
+            self._client.stat_object(self._plan_snapshots_bucket, object_name)
+            # A content-addressed object already exists only for the same
+            # canonical artifact and must never be overwritten under retention.
+            return
+        except S3Error as error:
+            if error.code not in {"NoSuchKey", "NoSuchObject"}:
+                raise
 
         retention = Retention(
             COMPLIANCE,
