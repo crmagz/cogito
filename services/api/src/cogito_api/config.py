@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from urllib.parse import quote
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,31 @@ class Settings:
     temporal_namespace: str
     temporal_task_queue: str
     allowed_git_hosts: tuple[str, ...]
+    supervisor_database_host: str
+    supervisor_database_port: int
+    supervisor_database_name: str
+    supervisor_database_user: str
+    supervisor_database_password: str
+
+    @property
+    def supervisor_database_url(self) -> str:
+        """Return a SQLAlchemy async URL without exposing password composition to callers."""
+
+        return (
+            "postgresql+psycopg://"
+            f"{quote(self.supervisor_database_user, safe='')}:{quote(self.supervisor_database_password, safe='')}"
+            f"@{self.supervisor_database_host}:{self.supervisor_database_port}/{self.supervisor_database_name}"
+        )
+
+    @property
+    def supervisor_database_sync_url(self) -> str:
+        """Return a psycopg connection URL for migration/bootstrap commands."""
+
+        return (
+            "postgresql://"
+            f"{quote(self.supervisor_database_user, safe='')}:{quote(self.supervisor_database_password, safe='')}"
+            f"@{self.supervisor_database_host}:{self.supervisor_database_port}/{self.supervisor_database_name}"
+        )
 
 
 def load_settings() -> Settings:
@@ -48,4 +74,9 @@ def load_settings() -> Settings:
         temporal_namespace=os.environ.get("COGITO_TEMPORAL_NAMESPACE", "default"),
         temporal_task_queue=os.environ.get("COGITO_TEMPORAL_TASK_QUEUE", "developer-tasks"),
         allowed_git_hosts=tuple(allowed_hosts),
+        supervisor_database_host=os.environ.get("COGITO_SUPERVISOR_DATABASE_HOST", "cogito-postgresql"),
+        supervisor_database_port=int(os.environ.get("COGITO_SUPERVISOR_DATABASE_PORT", "5432")),
+        supervisor_database_name=os.environ.get("COGITO_SUPERVISOR_DATABASE_NAME", "cogito"),
+        supervisor_database_user=os.environ.get("COGITO_SUPERVISOR_DATABASE_USER", "postgres"),
+        supervisor_database_password=os.environ.get("COGITO_SUPERVISOR_DATABASE_PASSWORD", "cogito"),
     )

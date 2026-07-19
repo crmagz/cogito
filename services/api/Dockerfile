@@ -17,6 +17,8 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 
 RUN uv sync --frozen --no-dev --no-editable
 
@@ -43,6 +45,8 @@ RUN groupadd --system --gid 10001 cogito \
 WORKDIR /app
 
 COPY --from=builder --chown=cogito:cogito /opt/venv /opt/venv
+COPY --from=builder --chown=cogito:cogito /build/alembic /app/alembic
+COPY --from=builder --chown=cogito:cogito /build/alembic.ini /app/alembic.ini
 
 USER cogito
 

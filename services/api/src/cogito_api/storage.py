@@ -11,7 +11,7 @@ from minio import Minio
 from minio.error import S3Error
 from minio.retention import COMPLIANCE, Retention
 
-from .models import AiPlan
+from .models import AiPlan, ArtifactReference
 
 
 class PlanStore(Protocol):
@@ -20,6 +20,8 @@ class PlanStore(Protocol):
     def put_status(self, run_id: str, status: dict) -> None: ...
 
     def get_status(self, run_id: str) -> dict | None: ...
+
+    def put_source_specification(self, run_id: str, initial_specification: str) -> ArtifactReference: ...
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,17 @@ def plan_snapshot_bytes(plan: AiPlan) -> bytes:
 
     return json.dumps(
         plan.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+
+
+def source_specification_bytes(initial_specification: str) -> bytes:
+    """Serialize untrusted source text canonically before compliance-retained storage."""
+
+    return json.dumps(
+        {"initial_specification": initial_specification},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
     ).encode()
 
 
@@ -58,6 +71,14 @@ class MinioPlanStore:
         self._put_snapshot(f"plans/{run_id}/plan.json", data)
         return PlanSnapshot(
             ref=f"s3://{self._plan_snapshots_bucket}/plans/{run_id}/plan.json",
+            sha256=sha256(data).hexdigest(),
+        )
+
+    def put_source_specification(self, run_id: str, initial_specification: str) -> ArtifactReference:
+        data = source_specification_bytes(initial_specification)
+        self._put_snapshot(f"runs/{run_id}/source-spec.json", data)
+        return ArtifactReference(
+            ref=f"s3://{self._plan_snapshots_bucket}/runs/{run_id}/source-spec.json",
             sha256=sha256(data).hexdigest(),
         )
 
