@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from psycopg import OperationalError
 from psycopg.errors import InvalidCatalogName
 
 from cogito_api.database_bootstrap import ensure_supervisor_database
@@ -62,7 +63,9 @@ def test_missing_supervisor_database_is_created_from_postgres_database(
     def connect(url: str, **_: object) -> _Connection:
         calls.append(url)
         if len(calls) == 1:
-            raise InvalidCatalogName()
+            error = OperationalError("database does not exist")
+            error.sqlstate = InvalidCatalogName.sqlstate
+            raise error
         return admin_connection
 
     monkeypatch.setattr("cogito_api.database_bootstrap.psycopg.connect", connect)
@@ -72,6 +75,15 @@ def test_missing_supervisor_database_is_created_from_postgres_database(
     assert calls[0].endswith("/cogito")
     assert calls[1].endswith("/postgres")
     assert admin_connection.cursor_instance.executed is True
+
+
+def test_connection_error_other_than_missing_database_is_not_masked(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = OperationalError("password authentication failed")
+    error.sqlstate = "28P01"
+    monkeypatch.setattr("cogito_api.database_bootstrap.psycopg.connect", lambda *_args, **_kwargs: (_ for _ in ()).throw(error))
+
+    with pytest.raises(OperationalError, match="password authentication failed"):
+        ensure_supervisor_database(make_settings())
 
 
 def test_invalid_database_name_is_rejected_before_connection(monkeypatch: pytest.MonkeyPatch) -> None:

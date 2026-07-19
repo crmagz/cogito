@@ -7,6 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
 from psycopg import sql
+from psycopg import OperationalError
 from psycopg.errors import InvalidCatalogName
 
 from .config import Settings, load_settings
@@ -22,8 +23,13 @@ def ensure_supervisor_database(settings: Settings) -> None:
     try:
         with psycopg.connect(settings.supervisor_database_sync_url):
             return
-    except InvalidCatalogName:
-        pass
+    except OperationalError as error:
+        # psycopg raises OperationalError (rather than InvalidCatalogName) while
+        # establishing a connection to a database that PostgreSQL reports as
+        # missing. Never treat authentication, TLS, or network errors as a
+        # reason to create a database.
+        if error.sqlstate != InvalidCatalogName.sqlstate:
+            raise
 
     target = urlsplit(settings.supervisor_database_sync_url)
     admin_url = urlunsplit((target.scheme, target.netloc, "/postgres", target.query, target.fragment))
