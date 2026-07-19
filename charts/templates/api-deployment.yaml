@@ -1,4 +1,8 @@
 {{- if .Values.api.enabled }}
+{{- $supervisorDatabase := default (dict) .Values.api.supervisorDatabase }}
+{{- $planner := default (dict) .Values.api.planner }}
+{{- $auth := default (dict) .Values.api.auth }}
+{{- $staticAuth := default (dict) $auth.static }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -51,19 +55,19 @@ spec:
             - name: COGITO_SUPERVISOR_DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.api.supervisorDatabase.existingSecret }}
-                  key: {{ .Values.api.supervisorDatabase.passwordKey }}
+                  name: {{ default "cogito-postgresql" $supervisorDatabase.existingSecret }}
+                  key: {{ default "postgres-password" $supervisorDatabase.passwordKey }}
             - name: COGITO_LITELLM_PLANNER_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.api.planner.existingSecret }}
-                  key: {{ .Values.api.planner.apiKeyKey }}
-            {{- if eq .Values.api.auth.mode "static" }}
+                  name: {{ default "cogito-planner-key" $planner.existingSecret }}
+                  key: {{ default "api-key" $planner.apiKeyKey }}
+            {{- if eq (default "static" $auth.mode) "static" }}
             - name: COGITO_AUTH_STATIC_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.api.auth.static.existingSecret }}
-                  key: {{ .Values.api.auth.static.tokenKey }}
+                  name: {{ default "cogito-operator-auth" $staticAuth.existingSecret }}
+                  key: {{ default "token" $staticAuth.tokenKey }}
             {{- end }}
           livenessProbe:
             httpGet:

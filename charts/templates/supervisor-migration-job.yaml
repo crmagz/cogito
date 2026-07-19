@@ -1,4 +1,5 @@
 {{- if .Values.api.enabled }}
+{{- $supervisorDatabase := default (dict) .Values.api.supervisorDatabase }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -36,18 +37,18 @@ spec:
           command: ["/bin/sh", "-ec", "python -m cogito_api.database_bootstrap && alembic upgrade head"]
           env:
             - name: COGITO_SUPERVISOR_DATABASE_HOST
-              value: {{ .Values.api.supervisorDatabase.host | quote }}
+              value: {{ default (printf "%s-postgresql" .Release.Name) $supervisorDatabase.host | quote }}
             - name: COGITO_SUPERVISOR_DATABASE_PORT
-              value: {{ .Values.api.supervisorDatabase.port | quote }}
+              value: {{ default 5432 $supervisorDatabase.port | quote }}
             - name: COGITO_SUPERVISOR_DATABASE_NAME
-              value: {{ .Values.api.supervisorDatabase.name | quote }}
+              value: {{ default "cogito" $supervisorDatabase.name | quote }}
             - name: COGITO_SUPERVISOR_DATABASE_USER
-              value: {{ .Values.api.supervisorDatabase.user | quote }}
+              value: {{ default "postgres" $supervisorDatabase.user | quote }}
             - name: COGITO_SUPERVISOR_DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.api.supervisorDatabase.existingSecret }}
-                  key: {{ .Values.api.supervisorDatabase.passwordKey }}
+                  name: {{ default "cogito-postgresql" $supervisorDatabase.existingSecret }}
+                  key: {{ default "postgres-password" $supervisorDatabase.passwordKey }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
