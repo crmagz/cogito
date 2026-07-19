@@ -9,13 +9,15 @@ import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .execution_prepare import feature_branch_name, repository_clone_url, repository_directory_name
 from .models import ExecutionRequest, ExecutionWorkspace
 
 _EXECUTION_JOB_PREFIX = "cogito-execution-"
 _RUN_HASH_LABEL = "cogito.dev/run-hash"
 _SENSITIVE_DIAGNOSTIC_PATTERN = re.compile(
-    r"(?i)(access[_ -]?key|secret(?:[_ -]?key)?|token|password)=\S+"
+    r"(?i)(access[_ -]?key|secret(?:[_ -]?key)?|token|password|api[_ -]?key)[\"']?\s*[:=]\s*[\"']?[^\s,}\]\"']+"
 )
+_BEARER_TOKEN_PATTERN = re.compile(r"(?i)bearer\s+\S+")
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,24 @@ class ExecutionJobSettings:
     object_store_secret: str
     object_store_access_key_secret_key: str
     object_store_secret_key_secret_key: str
+    litellm_endpoint: str
+    litellm_model: str
+    litellm_key_secret: str
+    litellm_key_secret_key: str
+    git_credentials_secret: str
+    git_credentials_secret_key: str
+    git_author_name: str
+    git_author_email: str
+    command_output_limit_bytes: int
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Bounded stdout and stderr from a command in an execution workspace."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
 
 
 class ExecutionJobClient(Protocol):
@@ -57,6 +77,16 @@ class ExecutionJobClient(Protocol):
 
     async def wait_until_ready(self, job_name: str, timeout_seconds: int) -> None:
         """Wait until the execution container starts after workspace preparation."""
+
+    async def execute(
+        self,
+        job_name: str,
+        command: list[str],
+        stdin: str,
+        timeout_seconds: int,
+        output_limit_bytes: int,
+    ) -> CommandResult:
+        """Run one command inside the ready execution container."""
 
 
 def execution_job_name(run_id: str) -> str:
@@ -112,6 +142,9 @@ def build_execution_job(
                                     "name": "COGITO_EXECUTION_WORKSPACE_ROOT",
                                     "value": settings.workspace_root,
                                 },
+                                {"name": "COGITO_FEATURE_BRANCH", "value": feature_branch_name(request.run_id)},
+                                {"name": "COGITO_GIT_AUTHOR_NAME", "value": settings.git_author_name},
+                                {"name": "COGITO_GIT_AUTHOR_EMAIL", "value": settings.git_author_email},
                                 {"name": "MINIO_ENDPOINT", "value": settings.minio_endpoint},
                                 {"name": "MINIO_SECURE", "value": str(settings.minio_secure).lower()},
                                 {"name": "MINIO_SPECS_BUCKET", "value": settings.specs_bucket},
@@ -142,6 +175,15 @@ def build_execution_job(
                                         }
                                     },
                                 },
+                                {
+                                    "name": "COGITO_GIT_HTTPS_TOKEN",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": settings.git_credentials_secret,
+                                            "key": settings.git_credentials_secret_key,
+                                        }
+                                    },
+                                },
                             ],
                             "securityContext": {
                                 "allowPrivilegeEscalation": False,
@@ -169,6 +211,33 @@ def build_execution_job(
                                     "name": "COGITO_EXECUTION_IDLE_SECONDS",
                                     "value": str(settings.idle_seconds),
                                 },
+                                {"name": "ANTHROPIC_BASE_URL", "value": settings.litellm_endpoint},
+                                {"name": "ANTHROPIC_MODEL", "value": settings.litellm_model},
+                                {"name": "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "value": "1"},
+                                {"name": "DISABLE_AUTOUPDATER", "value": "1"},
+                                {"name": "GIT_TERMINAL_PROMPT", "value": "0"},
+                                {
+                                    "name": "GIT_ASKPASS",
+                                    "value": f"{settings.workspace_root}/.cogito/git-askpass",
+                                },
+                                {
+                                    "name": "ANTHROPIC_AUTH_TOKEN",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": settings.litellm_key_secret,
+                                            "key": settings.litellm_key_secret_key,
+                                        }
+                                    },
+                                },
+                                {
+                                    "name": "COGITO_GIT_HTTPS_TOKEN",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": settings.git_credentials_secret,
+                                            "key": settings.git_credentials_secret_key,
+                                        }
+                                    },
+                                },
                             ],
                             "volumeMounts": [
                                 {"name": "workspace", "mountPath": settings.workspace_root}
@@ -194,6 +263,7 @@ class KubernetesExecutionJobClient:
         try:
             from kubernetes import client, config
             from kubernetes.client.exceptions import ApiException
+            from kubernetes.stream import stream
         except ImportError as error:
             message = "Kubernetes execution requires the worker's kubernetes dependency"
             raise RuntimeError(message) from error
@@ -204,6 +274,7 @@ class KubernetesExecutionJobClient:
         self._batch_api = client.BatchV1Api()
         self._core_api = client.CoreV1Api()
         self._api_exception: type[Exception] = ApiException
+        self._stream = stream
         self._foreground_delete_options = client.V1DeleteOptions(propagation_policy="Foreground")
 
     async def create_job(self, job_name: str, body: dict[str, object]) -> None:
@@ -310,6 +381,95 @@ class KubernetesExecutionJobClient:
             await asyncio.sleep(0.25)
         raise TimeoutError(f"execution Job {job_name} did not become ready within {timeout_seconds} seconds")
 
+    async def execute(
+        self,
+        job_name: str,
+        command: list[str],
+        stdin: str,
+        timeout_seconds: int,
+        output_limit_bytes: int,
+    ) -> CommandResult:
+        """Run a command through the Kubernetes exec subresource for this run only."""
+
+        pod_name = await self._running_pod_name(job_name)
+        return await asyncio.to_thread(
+            self._execute_in_pod,
+            pod_name,
+            command,
+            stdin,
+            timeout_seconds,
+            output_limit_bytes,
+        )
+
+    async def _running_pod_name(self, job_name: str) -> str:
+        run_hash = job_name.removeprefix(_EXECUTION_JOB_PREFIX)
+        pods = await asyncio.to_thread(
+            self._core_api.list_namespaced_pod,
+            self._namespace,
+            label_selector=f"{_RUN_HASH_LABEL}={run_hash}",
+        )
+        for pod in pods.items:
+            status = getattr(pod, "status", None)
+            metadata = getattr(pod, "metadata", None)
+            name = getattr(metadata, "name", None)
+            if getattr(status, "phase", None) == "Running" and name:
+                return name
+        raise RuntimeError(f"execution Job {job_name} has no running execution pod")
+
+    def _execute_in_pod(
+        self,
+        pod_name: str,
+        command: list[str],
+        stdin: str,
+        timeout_seconds: int,
+        output_limit_bytes: int,
+    ) -> CommandResult:
+        response = self._stream(
+            self._core_api.connect_get_namespaced_pod_exec,
+            pod_name,
+            self._namespace,
+            command=command,
+            container="execution",
+            stderr=True,
+            stdin=True,
+            stdout=True,
+            tty=False,
+            _preload_content=False,
+        )
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        stdout_bytes = 0
+        stderr_bytes = 0
+        stdout_truncated = False
+        stderr_truncated = False
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            if stdin:
+                response.write_stdin(stdin)
+            response.close_stdin()
+            while response.is_open():
+                if time.monotonic() >= deadline:
+                    response.close()
+                    return CommandResult(
+                        exit_code=124,
+                        stdout=_bounded_output(stdout_parts, output_limit_bytes),
+                        stderr="command timed out",
+                    )
+                response.update(timeout=1)
+                stdout_bytes, stdout_truncated = _append_bounded_output(
+                    stdout_parts, response.read_stdout(), stdout_bytes, output_limit_bytes, stdout_truncated
+                )
+                stderr_bytes, stderr_truncated = _append_bounded_output(
+                    stderr_parts, response.read_stderr(), stderr_bytes, output_limit_bytes, stderr_truncated
+                )
+            return CommandResult(
+                exit_code=response.returncode or 0,
+                stdout=_bounded_output(stdout_parts, output_limit_bytes, stdout_truncated),
+                stderr=_bounded_output(stderr_parts, output_limit_bytes, stderr_truncated),
+            )
+        finally:
+            response.close()
+
     async def _prepare_failure_diagnostics(self, pod: object) -> str:
         """Return a bounded, sanitized init-container failure summary for durable run status."""
 
@@ -353,12 +513,43 @@ class ExecutionWorkspaceService:
             run_id=request.run_id,
             job_name=job_name,
             workspace_root=self._settings.workspace_root,
+            repositories=[
+                f"{self._settings.workspace_root}/repos/"
+                f"{repository_directory_name(repository, self._settings.allowed_git_hosts)}"
+                for repository in request.target_repos
+            ],
+            repository_origins={
+                f"{self._settings.workspace_root}/repos/"
+                f"{repository_directory_name(repository, self._settings.allowed_git_hosts)}": repository_clone_url(
+                    repository, self._settings.allowed_git_hosts
+                )
+                for repository in request.target_repos
+            },
         )
 
     async def cleanup(self, workspace: ExecutionWorkspace) -> None:
         """Remove the execution Job and its `emptyDir` workspace."""
 
         await self._jobs.delete_job(workspace.job_name)
+
+    async def execute(
+        self,
+        workspace: ExecutionWorkspace,
+        command: list[str],
+        stdin: str = "",
+        timeout_seconds: int = 60,
+    ) -> CommandResult:
+        """Execute a command only in the run-specific workspace pod."""
+
+        if workspace.run_id == "" or not workspace.job_name.startswith(_EXECUTION_JOB_PREFIX):
+            raise ValueError("execution workspace descriptor is invalid")
+        return await self._jobs.execute(
+            workspace.job_name,
+            command,
+            stdin,
+            timeout_seconds,
+            self._settings.command_output_limit_bytes,
+        )
 
 
 def _sanitize_diagnostics(value: str | bytes) -> str:
@@ -373,5 +564,35 @@ def _sanitize_diagnostics(value: str | bytes) -> str:
         if isinstance(encoded_value, bytes):
             text = encoded_value.decode("utf-8", errors="replace")
     normalized = " ".join(line.strip() for line in text.splitlines()[-10:] if line.strip())[:4096]
-    redacted = _SENSITIVE_DIAGNOSTIC_PATTERN.sub(r"\1=[REDACTED]", normalized)
+    redacted = _SENSITIVE_DIAGNOSTIC_PATTERN.sub("[REDACTED]", normalized)
+    redacted = _BEARER_TOKEN_PATTERN.sub("Bearer [REDACTED]", redacted)
     return redacted or "prepare-workspace exited without diagnostic output"
+
+
+def _append_bounded_output(
+    parts: list[str], value: str, current_bytes: int, limit_bytes: int, truncated: bool
+) -> tuple[int, bool]:
+    """Append only the remaining output budget so a command cannot exhaust worker memory."""
+
+    if truncated:
+        return current_bytes, True
+    encoded = value.encode("utf-8")
+    remaining = limit_bytes - current_bytes
+    if remaining <= 0:
+        return current_bytes, True
+    if len(encoded) <= remaining:
+        parts.append(value)
+        return current_bytes + len(encoded), False
+    parts.append(encoded[:remaining].decode("utf-8", errors="ignore"))
+    return limit_bytes, True
+
+
+def _bounded_output(parts: list[str], limit_bytes: int, truncated: bool = False) -> str:
+    """Return bounded, redacted command output without splitting UTF-8 code points."""
+
+    output = "".join(parts)
+    if len(output.encode("utf-8")) > limit_bytes:
+        output = output.encode("utf-8")[:limit_bytes].decode("utf-8", errors="ignore") + "\n[output truncated]"
+    elif truncated:
+        output += "\n[output truncated]"
+    return output

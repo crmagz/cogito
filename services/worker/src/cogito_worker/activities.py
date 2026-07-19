@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 from temporalio import activity
 
 from .execution import ExecutionWorkspaceService
-from .models import ExecutionRequest, ExecutionWorkspace
+from .harness import ClaudeCodeHarness
+from .models import ExecutionRequest, ExecutionWorkspace, PhaseExecutionRequest, PhaseResult
 from .storage import RunStore, now_iso
 
 
@@ -12,9 +15,11 @@ class WorkerActivities:
         self,
         store: RunStore,
         execution_workspaces: ExecutionWorkspaceService,
+        harness: ClaudeCodeHarness,
     ):
         self._store = store
         self._execution_workspaces = execution_workspaces
+        self._harness = harness
 
     @activity.defn
     async def load_plan(self, plan_ref: str) -> dict:
@@ -22,13 +27,21 @@ class WorkerActivities:
         return self._store.get_plan(plan_ref)
 
     @activity.defn
-    async def report_status(self, run_id: str, status: str, failure_detail: str | None = None) -> None:
+    async def report_status(
+        self,
+        run_id: str,
+        status: str,
+        failure_detail: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         activity.logger.info("reporting status", extra={"run_id": run_id, "status": status})
         record = self._store.get_status(run_id) or {"run_id": run_id}
         record["status"] = status
         record["updated_at"] = now_iso()
         if failure_detail is not None:
             record["failure_detail"] = failure_detail
+        if metadata is not None:
+            record.update(metadata)
         self._store.put_status(run_id, record)
 
     @activity.defn
@@ -47,3 +60,13 @@ class WorkerActivities:
             extra={"run_id": workspace.run_id, "job_name": workspace.job_name},
         )
         await self._execution_workspaces.cleanup(workspace)
+
+    @activity.defn
+    async def run_phase(self, request: PhaseExecutionRequest) -> PhaseResult:
+        """Run a single approved phase and return durable execution evidence."""
+
+        activity.logger.info(
+            "running approved plan phase",
+            extra={"run_id": request.workspace.run_id, "phase_id": request.phase.id},
+        )
+        return await self._harness.execute_phase(request)

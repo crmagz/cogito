@@ -38,6 +38,15 @@ class Settings:
     execution_object_store_secret: str
     execution_object_store_access_key_secret_key: str
     execution_object_store_secret_key_secret_key: str
+    execution_litellm_endpoint: str
+    execution_litellm_model: str
+    execution_litellm_key_secret: str
+    execution_litellm_key_secret_key: str
+    execution_git_credentials_secret: str
+    execution_git_credentials_secret_key: str
+    execution_git_author_name: str
+    execution_git_author_email: str
+    execution_command_output_limit_bytes: int
 
 
 def load_settings() -> Settings:
@@ -102,5 +111,22 @@ def load_settings() -> Settings:
         ),
         execution_object_store_secret_key_secret_key=os.environ.get(
             "COGITO_EXECUTION_OBJECT_STORE_SECRET_KEY_SECRET_KEY", "rootPassword"
+        ),
+        execution_litellm_endpoint=os.environ.get("COGITO_EXECUTION_LITELLM_ENDPOINT", "http://cogito-litellm:4000"),
+        execution_litellm_model=os.environ.get("COGITO_EXECUTION_LITELLM_MODEL", "complex"),
+        execution_litellm_key_secret=os.environ.get("COGITO_EXECUTION_LITELLM_KEY_SECRET", "cogito-developer-key"),
+        execution_litellm_key_secret_key=os.environ.get(
+            "COGITO_EXECUTION_LITELLM_KEY_SECRET_KEY", "api-key"
+        ),
+        execution_git_credentials_secret=os.environ.get(
+            "COGITO_EXECUTION_GIT_CREDENTIALS_SECRET", "cogito-developer-git"
+        ),
+        execution_git_credentials_secret_key=os.environ.get(
+            "COGITO_EXECUTION_GIT_CREDENTIALS_SECRET_KEY", "token"
+        ),
+        execution_git_author_name=os.environ.get("COGITO_EXECUTION_GIT_AUTHOR_NAME", "Cogito Agent"),
+        execution_git_author_email=os.environ.get("COGITO_EXECUTION_GIT_AUTHOR_EMAIL", "cogito@local.invalid"),
+        execution_command_output_limit_bytes=int(
+            os.environ.get("COGITO_EXECUTION_COMMAND_OUTPUT_LIMIT_BYTES", str(256 * 1024))
         ),
     )

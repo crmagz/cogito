@@ -26,6 +26,7 @@ class WorkspacePreparationError(ValueError):
 
 
 _COMMIT_PATTERN = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?")
+_RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})")
 
 
 def validate_https_repository_url(repository: str, allowed_hosts: tuple[str, ...]) -> tuple[SplitResult, str]:
@@ -64,7 +65,29 @@ def repository_directory_name(repository: str, allowed_hosts: tuple[str, ...]) -
     return f"{name}-{digest}"
 
 
-def clone_repositories(repositories: list[str], workspace_root: Path, allowed_hosts: tuple[str, ...]) -> list[Path]:
+def repository_clone_url(repository: str, allowed_hosts: tuple[str, ...]) -> str:
+    """Return the credential-free origin URL for a validated repository reference."""
+
+    parsed, _ = validate_https_repository_url(repository, allowed_hosts)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def feature_branch_name(run_id: str) -> str:
+    """Return a safe, stable feature-branch name for one run."""
+
+    if not _RUN_ID_PATTERN.fullmatch(run_id):
+        raise WorkspacePreparationError("run ID is not safe for a feature branch")
+    return f"adp/{run_id}"
+
+
+def clone_repositories(
+    repositories: list[str],
+    workspace_root: Path,
+    allowed_hosts: tuple[str, ...],
+    feature_branch: str,
+    author_name: str = "Cogito Agent",
+    author_email: str = "cogito@local.invalid",
+) -> list[Path]:
     """Clone validated HTTPS repositories under the workspace without shell invocation."""
 
     destinations: list[tuple[str, str, Path]] = []
@@ -76,7 +99,7 @@ def clone_repositories(repositories: list[str], workspace_root: Path, allowed_ho
         if destination in seen_destinations:
             raise WorkspacePreparationError("repository list contains a duplicate URL")
         seen_destinations.add(destination)
-        clone_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        clone_url = repository_clone_url(repository, allowed_hosts)
         destinations.append((clone_url, commit, destination))
 
     repositories_root.mkdir(parents=True, exist_ok=True)
@@ -91,6 +114,14 @@ def clone_repositories(repositories: list[str], workspace_root: Path, allowed_ho
         "HOME": str(workspace_root),
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
     }
+    git_token = os.environ.get("COGITO_GIT_HTTPS_TOKEN")
+    if git_token:
+        command_environment.update(
+            {
+                "COGITO_GIT_HTTPS_TOKEN": git_token,
+                "GIT_ASKPASS": str(workspace_root / ".cogito" / "git-askpass"),
+            }
+        )
     for repository, commit, destination in destinations:
         subprocess.run(
             ["git", "clone", "--no-checkout", "--depth", "1", "--no-tags", "--", repository, str(destination)],
@@ -116,6 +147,21 @@ def clone_repositories(repositories: list[str], workspace_root: Path, allowed_ho
         ).stdout.strip().lower()
         if checked_out_commit != commit:
             raise WorkspacePreparationError("repository checkout does not match the requested commit SHA")
+        subprocess.run(
+            ["git", "-C", str(destination), "checkout", "-b", feature_branch],
+            check=True,
+            env=command_environment,
+        )
+        subprocess.run(
+            ["git", "-C", str(destination), "config", "user.name", author_name],
+            check=True,
+            env=command_environment,
+        )
+        subprocess.run(
+            ["git", "-C", str(destination), "config", "user.email", author_email],
+            check=True,
+            env=command_environment,
+        )
     return [destination for _, _, destination in destinations]
 
 
@@ -137,6 +183,33 @@ def materialize_generic_specs(spec_ref: str, resolver: SpecSetResolver, workspac
         destination.write_text(spec_file.content, encoding="utf-8")
         destination.chmod(0o444)
     return destination_root
+
+
+def create_git_askpass_helper(workspace_root: Path) -> Path:
+    """Create a token-free askpass helper for the repository-scoped Git credential."""
+
+    helper = workspace_root / ".cogito" / "git-askpass"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  *Username*) printf '%s\\n' x-access-token ;;\n"
+        "  *Password*) printf '%s\\n' \"$COGITO_GIT_HTTPS_TOKEN\" ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o500)
+    return helper
+
+
+def load_feature_branch() -> str:
+    """Load and validate the run feature branch supplied by the trusted Job manifest."""
+
+    feature_branch_value = os.environ["COGITO_FEATURE_BRANCH"]
+    if not feature_branch_value.startswith("adp/"):
+        raise WorkspacePreparationError("execution feature branch must use the adp/ prefix")
+    return feature_branch_name(feature_branch_value.removeprefix("adp/"))
 
 
 def _load_repositories() -> list[str]:
@@ -205,7 +278,16 @@ def main() -> None:
     repositories = _load_repositories()
     allowed_hosts = _load_allowed_hosts()
     materialize_generic_specs(spec_ref, resolver, workspace_root)
-    clone_repositories(repositories, workspace_root, allowed_hosts)
+    create_git_askpass_helper(workspace_root)
+    feature_branch = load_feature_branch()
+    clone_repositories(
+        repositories,
+        workspace_root,
+        allowed_hosts,
+        feature_branch,
+        os.environ.get("COGITO_GIT_AUTHOR_NAME", "Cogito Agent"),
+        os.environ.get("COGITO_GIT_AUTHOR_EMAIL", "cogito@local.invalid"),
+    )
     _LOGGER.info("execution workspace prepared", extra={"repository_count": len(repositories), "spec_ref": spec_ref})
 
 

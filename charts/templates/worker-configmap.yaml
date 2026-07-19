@@ -36,4 +36,13 @@ data:
   COGITO_EXECUTION_OBJECT_STORE_SECRET: {{ .Values.worker.execution.specStore.existingSecret | quote }}
   COGITO_EXECUTION_OBJECT_STORE_ACCESS_KEY_SECRET_KEY: {{ .Values.worker.execution.specStore.accessKeySecretKey | quote }}
   COGITO_EXECUTION_OBJECT_STORE_SECRET_KEY_SECRET_KEY: {{ .Values.worker.execution.specStore.secretKeySecretKey | quote }}
+  COGITO_EXECUTION_LITELLM_ENDPOINT: {{ default (printf "http://%s-litellm.%s.svc:4000" .Release.Name .Release.Namespace) .Values.worker.execution.harness.litellmEndpoint | quote }}
+  COGITO_EXECUTION_LITELLM_MODEL: {{ .Values.worker.execution.harness.model | quote }}
+  COGITO_EXECUTION_LITELLM_KEY_SECRET: {{ .Values.worker.execution.harness.existingSecret | quote }}
+  COGITO_EXECUTION_LITELLM_KEY_SECRET_KEY: {{ .Values.worker.execution.harness.apiKeyKey | quote }}
+  COGITO_EXECUTION_GIT_CREDENTIALS_SECRET: {{ .Values.worker.execution.harness.gitCredentialsSecret | quote }}
+  COGITO_EXECUTION_GIT_CREDENTIALS_SECRET_KEY: {{ .Values.worker.execution.harness.gitCredentialsKey | quote }}
+  COGITO_EXECUTION_GIT_AUTHOR_NAME: {{ .Values.worker.execution.harness.gitAuthorName | quote }}
+  COGITO_EXECUTION_GIT_AUTHOR_EMAIL: {{ .Values.worker.execution.harness.gitAuthorEmail | quote }}
+  COGITO_EXECUTION_COMMAND_OUTPUT_LIMIT_BYTES: {{ .Values.worker.execution.harness.commandOutputLimitBytes | quote }}
 {{- end }}

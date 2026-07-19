@@ -7,6 +7,8 @@ import pytest
 from cogito_worker.execution import (
     ExecutionJobSettings,
     ExecutionWorkspaceService,
+    _append_bounded_output,
+    _bounded_output,
     build_execution_job,
     execution_job_name,
     _sanitize_diagnostics,
@@ -40,6 +42,15 @@ def execution_settings() -> ExecutionJobSettings:
         object_store_secret="cogito-minio",
         object_store_access_key_secret_key="rootUser",
         object_store_secret_key_secret_key="rootPassword",
+        litellm_endpoint="http://cogito-litellm:4000",
+        litellm_model="complex",
+        litellm_key_secret="cogito-developer-key",
+        litellm_key_secret_key="api-key",
+        git_credentials_secret="cogito-developer-git",
+        git_credentials_secret_key="token",
+        git_author_name="Cogito Agent",
+        git_author_email="cogito@local.invalid",
+        command_output_limit_bytes=262144,
     )
 
 
@@ -74,6 +85,11 @@ def test_execution_job_template_uses_an_isolated_emptydir_workspace() -> None:
     assert all(env["name"] not in {"MINIO_ACCESS_KEY", "MINIO_SECRET_KEY"} for env in container["env"])
     secret_env = {env["name"]: env["valueFrom"] for env in init_container["env"] if "valueFrom" in env}
     assert secret_env["MINIO_ACCESS_KEY"]["secretKeyRef"]["name"] == "cogito-minio"
+    assert secret_env["COGITO_GIT_HTTPS_TOKEN"]["secretKeyRef"]["name"] == "cogito-developer-git"
+    execution_secret_env = {env["name"]: env["valueFrom"] for env in container["env"] if "valueFrom" in env}
+    assert execution_secret_env["ANTHROPIC_AUTH_TOKEN"]["secretKeyRef"]["name"] == "cogito-developer-key"
+    assert execution_secret_env["COGITO_GIT_HTTPS_TOKEN"]["secretKeyRef"]["name"] == "cogito-developer-git"
+    assert next(env["value"] for env in container["env"] if env["name"] == "ANTHROPIC_BASE_URL") == "http://cogito-litellm:4000"
     assert json.loads(next(env["value"] for env in init_container["env"] if env["name"] == "COGITO_TARGET_REPOS")) == [
         "https://github.com/acme/api-gateway.git#0123456789abcdef0123456789abcdef01234567"
     ]
@@ -100,8 +116,23 @@ async def test_provisioning_removes_a_job_when_its_pod_never_becomes_active() ->
 
 
 def test_execution_failure_diagnostics_redact_sensitive_values() -> None:
-    output = _sanitize_diagnostics("b'MINIO_SECRET_KEY=super-secret token=abc123\\nworkspace failed'")
+    output = _sanitize_diagnostics(
+        "b'MINIO_SECRET_KEY=super-secret token=abc123 {\\\"ANTHROPIC_AUTH_TOKEN\\\":\\\"gateway-key\\\"} "
+        "Authorization: Bearer bearer-key\\nworkspace failed'"
+    )
 
     assert "super-secret" not in output
     assert "abc123" not in output
+    assert "gateway-key" not in output
+    assert "bearer-key" not in output
     assert "[REDACTED]" in output
+
+
+def test_streamed_command_output_stays_within_its_memory_budget() -> None:
+    parts: list[str] = []
+    size, truncated = _append_bounded_output(parts, "x" * 10, 0, 4, False)
+    size, truncated = _append_bounded_output(parts, "more", size, 4, truncated)
+
+    assert size == 4
+    assert truncated is True
+    assert _bounded_output(parts, 4, truncated) == "xxxx\n[output truncated]"

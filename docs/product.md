@@ -62,6 +62,18 @@ the gateway can calculate spend. The shipped values reflect the current listed
 rates for the configured Bedrock models; operators must update those values for
 their provider, region, and pricing changes before promotion.
 
+Single-phase implementation is available through a pinned Claude Code runtime.
+The worker injects the approved phase, immutable specifications, and workspace
+context; it records the CLI's turn count and gateway-reported cost, changed
+files, verification output, and resulting commit SHA in durable run metadata.
+The feature branch is published only after every approved verification command
+passes. Execution credentials are supplied by pre-existing secrets: a dedicated
+LiteLLM virtual key and a repository-scoped Git credential. The worker's
+authority is limited to the run-specific workspace lifecycle and command
+channel; execution pods receive no Kubernetes service account token.
+Multi-phase sequencing, hard-ceiling backup behavior, and adversarial review
+remain later roadmap increments.
+
 Delegated A2A sub-agents, semantic tool discovery, MCP tool execution,
 adversarial implementation review, the final implementation gate, and the
 operator UI are deliberately not represented as completed features yet. They

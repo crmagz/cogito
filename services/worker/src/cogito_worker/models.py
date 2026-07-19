@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -29,6 +30,85 @@ class ExecutionWorkspace:
     run_id: str
     job_name: str
     workspace_root: str
+    repositories: list[str] = field(default_factory=list)
+    repository_origins: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PlanPhase:
+    """A validated single phase from the immutable plan snapshot."""
+
+    id: str
+    name: str
+    description: str
+    tasks: list[str]
+    acceptance_criteria: list[str]
+    verification: list[str]
+
+    @classmethod
+    def from_dict(cls, value: object) -> "PlanPhase":
+        """Parse the fields needed by the worker without trusting plan JSON."""
+
+        if not isinstance(value, dict):
+            raise ValueError("plan phase must be an object")
+        required_strings = ("id", "name", "description")
+        if not all(isinstance(value.get(field), str) and value[field].strip() for field in required_strings):
+            raise ValueError("plan phase is missing a required string field")
+        list_fields = ("tasks", "acceptance_criteria", "verification")
+        if not all(
+            isinstance(value.get(field), list)
+            and value[field]
+            and all(isinstance(item, str) and item.strip() for item in value[field])
+            for field in list_fields
+        ):
+            raise ValueError("plan phase requires non-empty tasks, acceptance criteria, and verification commands")
+        return cls(
+            id=value["id"],
+            name=value["name"],
+            description=value["description"],
+            tasks=value["tasks"],
+            acceptance_criteria=value["acceptance_criteria"],
+            verification=value["verification"],
+        )
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    """Bounded evidence from one approved verification command."""
+
+    command: str
+    passed: bool
+    output: str
+
+
+@dataclass(frozen=True)
+class PhaseResult:
+    """Durable execution evidence for one phase."""
+
+    phase_id: str
+    branch_name: str
+    succeeded: bool
+    turns_used: int | None
+    cost_usd: float | None
+    changed_files: list[str]
+    commits: dict[str, str]
+    verification: list[VerificationResult]
+    summary: str
+
+    def metadata(self) -> dict[str, Any]:
+        """Return JSON-compatible metadata safe to persist in the run status."""
+
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PhaseExecutionRequest:
+    """Inputs required to run one approved phase in an isolated workspace."""
+
+    phase: PlanPhase
+    workspace: ExecutionWorkspace
+    max_turns: int
+    timeout_seconds: int
 
 
 @dataclass(frozen=True)

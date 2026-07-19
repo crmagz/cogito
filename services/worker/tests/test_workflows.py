@@ -11,9 +11,14 @@ from temporalio.worker import Worker
 
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.models import RunEnvelope, RunResult
-from cogito_worker.workflows import DeveloperRunWorkflow, _failure_detail, _validate_plan_snapshot
+from cogito_worker.workflows import (
+    DeveloperRunWorkflow,
+    _failure_detail,
+    _single_phase_execution_limits,
+    _validate_plan_snapshot,
+)
 
-from .fakes import InMemoryExecutionWorkspaces, InMemoryRunStore
+from .fakes import InMemoryExecutionWorkspaces, InMemoryHarness, InMemoryRunStore
 
 
 async def _wait_for_status(store: InMemoryRunStore, run_id: str, expected: str) -> None:
@@ -24,6 +29,25 @@ async def _wait_for_status(store: InMemoryRunStore, run_id: str, expected: str) 
     raise AssertionError(f"run {run_id} did not reach {expected}")
 
 
+def _single_phase_plan(spec_ref: str, target_repos: list[str]) -> dict:
+    return {
+        "title": "Test plan",
+        "spec_set": spec_ref,
+        "target_repos": target_repos,
+        "phases": [
+            {
+                "id": "phase-1",
+                "name": "Implement test change",
+                "description": "Exercise the harness workflow path.",
+                "tasks": ["Update the implementation."],
+                "acceptance_criteria": ["The change is committed."],
+                "verification": ["true"],
+            }
+        ],
+        "constraints": {"max_turns_per_phase": 5, "max_wall_clock_minutes": 1},
+    }
+
+
 @pytest.fixture
 async def env():
     async with await WorkflowEnvironment.start_time_skipping() as env:
@@ -32,16 +56,15 @@ async def env():
 
 async def test_workflow_runs_activities_and_reports_completion(env: WorkflowEnvironment):
     store = InMemoryRunStore()
-    store.plans["s3://plans/plans/run-1/plan.json"] = {
-        "title": "Test plan",
-        "spec_set": "typescript-backend@v2.1#sha256=" + "a" * 64,
-        "target_repos": [],
-    }
+    store.plans["s3://plans/plans/run-1/plan.json"] = _single_phase_plan(
+        "typescript-backend@v2.1#sha256=" + "a" * 64, []
+    )
     plan_sha256 = hashlib.sha256(
         json.dumps(store.plans["s3://plans/plans/run-1/plan.json"], sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     workspaces = InMemoryExecutionWorkspaces()
-    activities = WorkerActivities(store, workspaces)
+    harness = InMemoryHarness()
+    activities = WorkerActivities(store, workspaces, harness)
     task_queue = f"test-queue-{uuid.uuid4()}"
 
     async with Worker(
@@ -53,6 +76,7 @@ async def test_workflow_runs_activities_and_reports_completion(env: WorkflowEnvi
             activities.report_status,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
+            activities.run_phase,
         ],
     ):
         result = await env.client.execute_workflow(
@@ -71,22 +95,22 @@ async def test_workflow_runs_activities_and_reports_completion(env: WorkflowEnvi
     assert store.statuses["run-1"]["status"] == "completed"
     assert workspaces.provisioned == ["run-1"]
     assert [workspace.run_id for workspace in workspaces.cleaned] == ["run-1"]
+    assert harness.requests[0].max_turns == 5
+    assert store.statuses["run-1"]["phase_result"]["turns_used"] == 3
 
 
 async def test_workflow_waits_for_matching_plan_approval_before_provisioning(env: WorkflowEnvironment):
     store = InMemoryRunStore()
-    store.plans["s3://plans/plans/run-approval/plan.json"] = {
-        "title": "Test plan",
-        "spec_set": "typescript-backend@v2.1#sha256=" + "a" * 64,
-        "target_repos": [],
-    }
+    store.plans["s3://plans/plans/run-approval/plan.json"] = _single_phase_plan(
+        "typescript-backend@v2.1#sha256=" + "a" * 64, []
+    )
     plan_sha256 = hashlib.sha256(
         json.dumps(
             store.plans["s3://plans/plans/run-approval/plan.json"], sort_keys=True, separators=(",", ":")
         ).encode()
     ).hexdigest()
     workspaces = InMemoryExecutionWorkspaces()
-    activities = WorkerActivities(store, workspaces)
+    activities = WorkerActivities(store, workspaces, InMemoryHarness())
     task_queue = f"test-queue-{uuid.uuid4()}"
 
     async with Worker(
@@ -98,6 +122,7 @@ async def test_workflow_waits_for_matching_plan_approval_before_provisioning(env
             activities.report_status,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
+            activities.run_phase,
         ],
     ):
         handle = await env.client.start_workflow(
@@ -128,16 +153,14 @@ async def test_workflow_waits_for_matching_plan_approval_before_provisioning(env
 
 async def test_workflow_rejects_stale_plan_approval(env: WorkflowEnvironment):
     store = InMemoryRunStore()
-    store.plans["s3://plans/plans/run-stale/plan.json"] = {
-        "title": "Test plan",
-        "spec_set": "typescript-backend@v2.1#sha256=" + "a" * 64,
-        "target_repos": [],
-    }
+    store.plans["s3://plans/plans/run-stale/plan.json"] = _single_phase_plan(
+        "typescript-backend@v2.1#sha256=" + "a" * 64, []
+    )
     plan_sha256 = hashlib.sha256(
         json.dumps(store.plans["s3://plans/plans/run-stale/plan.json"], sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     workspaces = InMemoryExecutionWorkspaces()
-    activities = WorkerActivities(store, workspaces)
+    activities = WorkerActivities(store, workspaces, InMemoryHarness())
     task_queue = f"test-queue-{uuid.uuid4()}"
 
     async with Worker(
@@ -149,6 +172,7 @@ async def test_workflow_rejects_stale_plan_approval(env: WorkflowEnvironment):
             activities.report_status,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
+            activities.run_phase,
         ],
     ):
         handle = await env.client.start_workflow(
@@ -199,6 +223,22 @@ def test_plan_snapshot_validation_rejects_a_mutated_plan() -> None:
 
     with pytest.raises(ValueError, match="digest"):
         _validate_plan_snapshot(plan, envelope)
+
+
+def test_single_phase_execution_rejects_multi_phase_plans() -> None:
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    plan["phases"].append(plan["phases"][0])
+
+    with pytest.raises(ValueError, match="exactly one"):
+        _single_phase_execution_limits(plan)
+
+
+def test_single_phase_execution_requires_an_approved_verification_command() -> None:
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    plan["phases"][0]["verification"] = []
+
+    with pytest.raises(ValueError, match="non-empty tasks"):
+        _single_phase_execution_limits(plan)
 
 
 def test_failure_detail_includes_nested_activity_cause() -> None:

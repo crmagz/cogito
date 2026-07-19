@@ -37,6 +37,16 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.minio.service.port | int }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: litellm
+      ports:
+        - protocol: TCP
+          port: {{ .Values.litellm.service.port | int }}
     {{- with .Values.worker.execution.networkPolicy.gitEgress }}
     - to:
         {{- toYaml . | nindent 8 }}

@@ -1,6 +1,14 @@
 ARG VERSION=dev
 ARG REVISION=unknown
 ARG SOURCE=https://github.com/crmagz/cogito
+ARG CLAUDE_CODE_VERSION=2.1.215
+
+FROM node:22.14.0-bookworm-slim AS claude-code
+
+ARG CLAUDE_CODE_VERSION
+
+RUN npm install --global --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force
 
 FROM python:3.14-slim AS builder
 
@@ -25,6 +33,7 @@ FROM python:3.14-slim AS runtime
 ARG VERSION
 ARG REVISION
 ARG SOURCE
+ARG CLAUDE_CODE_VERSION
 
 LABEL org.opencontainers.image.title="Cogito Worker" \
       org.opencontainers.image.description="Cogito Temporal workflow worker" \
@@ -46,6 +55,9 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder --chown=cogito:cogito /opt/venv /opt/venv
+COPY --from=claude-code /usr/local/bin/node /usr/local/bin/node
+COPY --from=claude-code /usr/local/bin/claude /usr/local/bin/claude
+COPY --from=claude-code /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 USER cogito
 
