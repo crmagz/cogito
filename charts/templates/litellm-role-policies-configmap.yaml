@@ -1,0 +1,45 @@
+{{- if .Values.litellm.enabled }}
+{{- $rolePolicies := required "litellm.rolePolicies must define planner, developer, and reviewer policies" .Values.litellm.rolePolicies }}
+{{- range $role := list "planner" "developer" "reviewer" }}
+{{- $policy := required (printf "litellm.rolePolicies.%s is required" $role) (index $rolePolicies $role) }}
+{{- $model := required (printf "litellm.rolePolicies.%s.model is required" $role) $policy.model }}
+{{- if not (hasKey $.Values.litellm.tiers $model) }}
+{{- fail (printf "litellm.rolePolicies.%s.model must reference a configured litellm.tiers alias" $role) }}
+{{- end }}
+{{- if le (float64 $policy.maxBudgetUsd) 0.0 }}
+{{- fail (printf "litellm.rolePolicies.%s.maxBudgetUsd must be positive" $role) }}
+{{- end }}
+{{- if not $policy.budgetDuration }}
+{{- fail (printf "litellm.rolePolicies.%s.budgetDuration is required" $role) }}
+{{- end }}
+{{- if not $policy.toolset }}
+{{- fail (printf "litellm.rolePolicies.%s.toolset is required" $role) }}
+{{- end }}
+{{- if not $policy.existingSecret }}
+{{- fail (printf "litellm.rolePolicies.%s.existingSecret is required" $role) }}
+{{- end }}
+{{- if not $policy.apiKeyKey }}
+{{- fail (printf "litellm.rolePolicies.%s.apiKeyKey is required" $role) }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-litellm-role-policies
+  labels:
+    app.kubernetes.io/name: litellm
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  role-policies.yaml: |
+    # Desired virtual-key policy. Trusted infrastructure provisions the keys.
+    # No MCP servers are registered in this release; every role has zero tools.
+    roles:
+      {{- range $role := list "planner" "developer" "reviewer" }}
+      {{- $policy := index $rolePolicies $role }}
+      {{ $role }}:
+        model: {{ $policy.model | quote }}
+        maxBudgetUsd: {{ $policy.maxBudgetUsd }}
+        budgetDuration: {{ $policy.budgetDuration | quote }}
+        toolset: {{ $policy.toolset | quote }}
+      {{- end }}
+{{- end }}

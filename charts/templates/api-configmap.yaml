@@ -1,6 +1,8 @@
 {{- if .Values.api.enabled }}
 {{- $supervisorDatabase := default (dict) .Values.api.supervisorDatabase }}
 {{- $planner := default (dict) .Values.api.planner }}
+{{- $rolePolicies := required "litellm.rolePolicies must define planner, developer, and reviewer policies" .Values.litellm.rolePolicies }}
+{{- $plannerRole := required "litellm.rolePolicies.planner is required" $rolePolicies.planner }}
 {{- $auth := default (dict) .Values.api.auth }}
 {{- $staticAuth := default (dict) $auth.static }}
 {{- $oidcAuth := default (dict) $auth.oidc }}
@@ -31,7 +33,7 @@ data:
   COGITO_SUPERVISOR_DATABASE_NAME: {{ default "cogito" $supervisorDatabase.name | quote }}
   COGITO_SUPERVISOR_DATABASE_USER: {{ default "postgres" $supervisorDatabase.user | quote }}
   COGITO_LITELLM_ENDPOINT: {{ default (printf "http://%s-litellm:4000" .Release.Name) $planner.endpoint | quote }}
-  COGITO_LITELLM_PLANNER_MODEL: {{ default "balanced" $planner.model | quote }}
+  COGITO_LITELLM_PLANNER_MODEL: {{ required "litellm.rolePolicies.planner.model is required" $plannerRole.model | quote }}
   COGITO_LITELLM_PLANNER_TIMEOUT_SECONDS: {{ default 60 $planner.timeoutSeconds | quote }}
   COGITO_AUTH_MODE: {{ default "static" $auth.mode | quote }}
   COGITO_AUTH_STATIC_SUBJECT: {{ default "local-operator" $staticAuth.subject | quote }}
