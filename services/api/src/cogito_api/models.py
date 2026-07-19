@@ -187,6 +187,10 @@ class RunEnvelope(BaseModel):
     priority: str = Field(default="normal")
     submitted_at: str = Field(description="ISO 8601 timestamp")
     submitted_by: str = Field(description="Identity of the submitter")
+    workflow_id: str | None = Field(
+        default=None,
+        description="Temporal workflow identity; differs from run_id for revised plans",
+    )
     requires_plan_approval: bool = Field(
         default=False,
         description="Whether the workflow must wait for a digest-bound plan decision before execution",

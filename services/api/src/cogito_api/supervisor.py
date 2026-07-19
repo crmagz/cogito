@@ -29,6 +29,7 @@ class PlanningRunRecord:
     submitted_by: str
     plan_artifact: ArtifactReference | None = None
     planner_model: str | None = None
+    workflow_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class OutboxDelivery:
 
     decision_id: str
     run_id: str
+    workflow_id: str
     payload: dict[str, str]
     attempt_count: int
 
@@ -70,6 +72,7 @@ class SupervisorStore(Protocol):
         run_id: str,
         plan_artifact: ArtifactReference,
         planner_model: str,
+        workflow_id: str,
     ) -> PlanningRunRecord: ...
 
     async def record_plan_approval(
@@ -150,7 +153,7 @@ class PostgresSupervisorStore:
                     """
                     SELECT run_id, status, source_artifact_ref, source_artifact_sha256,
                            target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
-                           plan_artifact_ref, plan_artifact_sha256, planner_model
+                           plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id
                     FROM supervisor_runs
                     WHERE run_id = :run_id
                     """
@@ -178,6 +181,7 @@ class PostgresSupervisorStore:
                 else None
             ),
             planner_model=row["planner_model"],
+            workflow_id=row["active_workflow_id"],
         )
 
     async def attach_generated_plan(
@@ -185,6 +189,7 @@ class PostgresSupervisorStore:
         run_id: str,
         plan_artifact: ArtifactReference,
         planner_model: str,
+        workflow_id: str,
     ) -> PlanningRunRecord:
         async with self._engine.begin() as connection:
             result = await connection.execute(
@@ -194,12 +199,13 @@ class PostgresSupervisorStore:
                     SET status = 'awaiting_plan_approval',
                         plan_artifact_ref = :plan_artifact_ref,
                         plan_artifact_sha256 = :plan_artifact_sha256,
-                        planner_model = :planner_model
+                        planner_model = :planner_model,
+                        active_workflow_id = :workflow_id
                     WHERE run_id = :run_id
                       AND status = 'planning'
                     RETURNING run_id, status, source_artifact_ref, source_artifact_sha256,
                               target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
-                              plan_artifact_ref, plan_artifact_sha256, planner_model
+                              plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id
                     """
                 ),
                 {
@@ -207,6 +213,7 @@ class PostgresSupervisorStore:
                     "plan_artifact_ref": plan_artifact.ref,
                     "plan_artifact_sha256": plan_artifact.sha256,
                     "planner_model": planner_model,
+                    "workflow_id": workflow_id,
                 },
             )
             row = result.mappings().one_or_none()
@@ -237,6 +244,7 @@ class PostgresSupervisorStore:
                 ref=row["plan_artifact_ref"], sha256=row["plan_artifact_sha256"]
             ),
             planner_model=row["planner_model"],
+            workflow_id=row["active_workflow_id"],
         )
 
     async def record_plan_approval(
@@ -270,7 +278,7 @@ class PostgresSupervisorStore:
             run = await connection.execute(
                 text(
                     """
-                    SELECT status, plan_artifact_sha256
+                    SELECT status, plan_artifact_sha256, active_workflow_id
                     FROM supervisor_runs
                     WHERE run_id = :run_id
                     FOR UPDATE
@@ -285,6 +293,8 @@ class PostgresSupervisorStore:
                 raise ApprovalConflictError("planning run is not awaiting plan approval")
             if run_row["plan_artifact_sha256"] != artifact_sha256:
                 raise ApprovalConflictError("plan approval artifact digest is stale")
+            if not run_row["active_workflow_id"]:
+                raise ApprovalConflictError("planning workflow is not available for approval")
 
             decision_id = str(uuid.uuid4())
             created_at = datetime.now().astimezone()
@@ -315,13 +325,14 @@ class PostgresSupervisorStore:
             await connection.execute(
                 text(
                     """
-                    INSERT INTO temporal_outbox (decision_id, run_id, payload, created_at)
-                    VALUES (:decision_id, :run_id, CAST(:payload AS jsonb), :created_at)
+                    INSERT INTO temporal_outbox (decision_id, run_id, workflow_id, payload, created_at)
+                    VALUES (:decision_id, :run_id, :workflow_id, CAST(:payload AS jsonb), :created_at)
                     """
                 ),
                 {
                     "decision_id": decision_id,
                     "run_id": run_id,
+                    "workflow_id": run_row["active_workflow_id"],
                     "payload": json.dumps(
                         {
                             "decision_id": decision_id,
@@ -379,10 +390,19 @@ class PostgresSupervisorStore:
             status = {
                 "approve": PlanningRunStatus.IMPLEMENTING.value,
                 "reject": PlanningRunStatus.REJECTED.value,
-                "request_revision": PlanningRunStatus.REVISION_REQUESTED.value,
+                # A revision decision preserves its immutable audit row, then
+                # reopens the run for a replacement plan artifact.
+                "request_revision": PlanningRunStatus.PLANNING.value,
             }[row["decision"]]
             await connection.execute(
-                text("UPDATE supervisor_runs SET status = :status WHERE run_id = :run_id"),
+                text(
+                    """
+                    UPDATE supervisor_runs
+                    SET status = :status,
+                        active_workflow_id = CASE WHEN :status = 'planning' THEN NULL ELSE active_workflow_id END
+                    WHERE run_id = :run_id
+                    """
+                ),
                 {"status": status, "run_id": row["run_id"]},
             )
 
@@ -401,7 +421,7 @@ class PostgresSupervisorStore:
             result = await connection.execute(
                 text(
                     f"""
-                    SELECT decision_id, run_id, payload, attempt_count
+                    SELECT decision_id, run_id, workflow_id, payload, attempt_count
                     FROM temporal_outbox
                     WHERE delivered_at IS NULL
                       AND next_attempt_at <= now()
@@ -431,6 +451,7 @@ class PostgresSupervisorStore:
             OutboxDelivery(
                 decision_id=row["decision_id"],
                 run_id=row["run_id"],
+                workflow_id=row["workflow_id"],
                 payload=dict(row["payload"]),
                 attempt_count=int(row["attempt_count"]) + 1,
             )
