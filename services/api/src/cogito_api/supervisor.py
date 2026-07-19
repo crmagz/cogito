@@ -410,19 +410,25 @@ class PostgresSupervisorStore:
                 # reopens the run for a replacement plan artifact.
                 "request_revision": PlanningRunStatus.PLANNING.value,
             }[row["decision"]]
+            clear_current_plan = row["decision"] == "request_revision"
             await connection.execute(
                 text(
                     """
                     UPDATE supervisor_runs
                     SET status = :status,
-                        active_workflow_id = CASE WHEN :status = 'planning' THEN NULL ELSE active_workflow_id END,
-                        plan_artifact_ref = CASE WHEN :status = 'planning' THEN NULL ELSE plan_artifact_ref END,
-                        plan_artifact_sha256 = CASE WHEN :status = 'planning' THEN NULL ELSE plan_artifact_sha256 END,
-                        planner_model = CASE WHEN :status = 'planning' THEN NULL ELSE planner_model END
+                        active_workflow_id = CASE WHEN :clear_current_plan THEN NULL ELSE active_workflow_id END,
+                        plan_artifact_ref = CASE WHEN :clear_current_plan THEN NULL ELSE plan_artifact_ref END,
+                        plan_artifact_sha256 = CASE WHEN :clear_current_plan THEN NULL ELSE plan_artifact_sha256 END,
+                        planner_model = CASE WHEN :clear_current_plan THEN NULL ELSE planner_model END
                     WHERE run_id = :run_id AND plan_revision = :plan_revision
                     """
                 ),
-                {"status": status, "run_id": row["run_id"], "plan_revision": row["plan_revision"]},
+                {
+                    "status": status,
+                    "clear_current_plan": clear_current_plan,
+                    "run_id": row["run_id"],
+                    "plan_revision": row["plan_revision"],
+                },
             )
 
     async def claim_plan_approval_deliveries(
