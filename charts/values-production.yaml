@@ -100,8 +100,8 @@ api:
   # Publish immutable release images before applying this file. These values must
   # never inherit the local-development image names from values.yaml.
   image:
-    repository: ghcr.io/bluewizard/cogito-api
-    tag: "0.1.0"
+    repository: ghcr.io/crmagz/cogito-api
+    tag: "v0.1.0"
     digest: ""
     pullPolicy: IfNotPresent
   objectStore:
@@ -118,8 +118,8 @@ api:
 worker:
   replicaCount: 2
   image:
-    repository: ghcr.io/bluewizard/cogito-worker
-    tag: "0.1.0"
+    repository: ghcr.io/crmagz/cogito-worker
+    tag: "v0.1.0"
     digest: ""
     pullPolicy: IfNotPresent
   objectStore:

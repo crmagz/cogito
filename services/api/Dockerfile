@@ -1,3 +1,7 @@
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG SOURCE=https://github.com/crmagz/cogito
+
 FROM python:3.14-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /uvx /bin/
@@ -17,6 +21,16 @@ COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.14-slim AS runtime
+
+ARG VERSION
+ARG REVISION
+ARG SOURCE
+
+LABEL org.opencontainers.image.title="Cogito API" \
+      org.opencontainers.image.description="Cogito plan submission API" \
+      org.opencontainers.image.source="${SOURCE}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.version="${VERSION}"
 
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH" \
