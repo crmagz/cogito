@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from cogito_api.models import AiPlan, ArtifactReference, PlanApprovalDecision, PlanningRunStatus, RunEnvelope
 from cogito_api.planner import PlanningContext
 from cogito_api.storage import PlanSnapshot, plan_snapshot_bytes, source_specification_bytes
-from cogito_api.supervisor import ApprovalConflictError, ApprovalRecord, PlanningRunRecord
+from cogito_api.supervisor import ApprovalConflictError, ApprovalRecord, OutboxDelivery, PlanningRunRecord
 
 
 class InMemoryPlanStore:
@@ -47,6 +47,8 @@ class InMemorySupervisorStore:
     def __init__(self) -> None:
         self.planning_runs: dict[str, PlanningRunRecord] = {}
         self.approvals: dict[tuple[str, str], ApprovalRecord] = {}
+        self.outbox: dict[str, OutboxDelivery] = {}
+        self.leased_decision_ids: set[str] = set()
 
     async def create_planning_run(self, record: PlanningRunRecord) -> None:
         self.planning_runs[record.run_id] = record
@@ -107,6 +109,16 @@ class InMemorySupervisorStore:
             delivered=False,
         )
         self.approvals[(run_id, idempotency_key)] = record
+        self.outbox[record.decision_id] = OutboxDelivery(
+            decision_id=record.decision_id,
+            run_id=record.run_id,
+            payload={
+                "decision_id": record.decision_id,
+                "artifact_sha256": record.artifact_sha256,
+                "decision": record.decision.value,
+            },
+            attempt_count=0,
+        )
         return record
 
     async def mark_plan_approval_delivered(self, decision_id: str) -> None:
@@ -140,7 +152,38 @@ class InMemorySupervisorStore:
                     plan_artifact=run.plan_artifact,
                     planner_model=run.planner_model,
                 )
+                self.outbox.pop(decision_id, None)
+                self.leased_decision_ids.discard(decision_id)
                 return
+
+    async def claim_plan_approval_deliveries(
+        self, *, limit: int, lease_seconds: int, decision_id: str | None = None
+    ) -> list[OutboxDelivery]:
+        del lease_seconds
+        claimed: list[OutboxDelivery] = []
+        for item in self.outbox.values():
+            if decision_id and item.decision_id != decision_id:
+                continue
+            if item.decision_id in self.leased_decision_ids:
+                continue
+            self.leased_decision_ids.add(item.decision_id)
+            updated = OutboxDelivery(
+                decision_id=item.decision_id,
+                run_id=item.run_id,
+                payload=item.payload,
+                attempt_count=item.attempt_count + 1,
+            )
+            self.outbox[item.decision_id] = updated
+            claimed.append(updated)
+            if len(claimed) == limit:
+                break
+        return claimed
+
+    async def release_plan_approval_delivery(
+        self, decision_id: str, *, retry_seconds: int, error: str
+    ) -> None:
+        del retry_seconds, error
+        self.leased_decision_ids.discard(decision_id)
 
 
 class FakePlanner:
@@ -157,10 +200,14 @@ class FakeRunStarter:
     def __init__(self) -> None:
         self.started_runs: list[RunEnvelope] = []
         self.plan_approvals: list[tuple[str, dict[str, str]]] = []
+        self.approval_error: Exception | None = None
+        self.approval_result = True
 
     async def start_run(self, envelope: RunEnvelope) -> None:
         self.started_runs.append(envelope)
 
     async def submit_plan_approval(self, run_id: str, decision: dict[str, str]) -> bool:
         self.plan_approvals.append((run_id, decision))
-        return True
+        if self.approval_error is not None:
+            raise self.approval_error
+        return self.approval_result

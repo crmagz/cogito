@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import uuid
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
 
@@ -24,6 +26,7 @@ from .models import (
     RunSubmission,
     Violation,
 )
+from .outbox import PlanApprovalOutboxDispatcher, stop_dispatcher
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
 from .storage import MinioPlanStore, PlanStore
 from .supervisor import ApprovalConflictError, PlanningRunRecord, PostgresSupervisorStore, SupervisorStore
@@ -76,7 +79,20 @@ def create_app(
     planner = planner or LiteLLMPlanner(settings)
     authenticator = ApprovalAuthenticator(settings)
 
-    app = FastAPI(title="Cogito API")
+    dispatcher = PlanApprovalOutboxDispatcher(supervisor_store, starter)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        delivery_task = asyncio.create_task(dispatcher.run())
+        try:
+            yield
+        finally:
+            await stop_dispatcher(delivery_task)
+            close = getattr(supervisor_store, "close", None)
+            if close is not None:
+                await close()
+
+    app = FastAPI(title="Cogito API", lifespan=lifespan)
 
     @app.exception_handler(RequestValidationError)
     async def handle_schema_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -263,18 +279,10 @@ def create_app(
             )
         except ApprovalConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        delivered = recorded.delivered
-        if not delivered:
-            delivered = await starter.submit_plan_approval(
-                run_id,
-                {
-                    "decision_id": recorded.decision_id,
-                    "artifact_sha256": recorded.artifact_sha256,
-                    "decision": recorded.decision.value,
-                },
-            )
-            if delivered:
-                await supervisor_store.mark_plan_approval_delivered(recorded.decision_id)
+        delivered = recorded.delivered or recorded.decision_id in await dispatcher.deliver_once(
+            decision_id=recorded.decision_id,
+            limit=1,
+        )
         response = PlanApprovalResponse(
             decision_id=recorded.decision_id,
             run_id=recorded.run_id,
