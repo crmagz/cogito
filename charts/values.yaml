@@ -399,6 +399,18 @@ api:
     user: postgres
     existingSecret: cogito-postgresql
     passwordKey: postgres-password
+  ## @param api.planner.endpoint LiteLLM OpenAI-compatible endpoint used only by the Supervisor API
+  ## @param api.planner.model LiteLLM model alias allowed to the planner virtual key
+  ## @param api.planner.timeoutSeconds Bounded LiteLLM request timeout for plan generation
+  ## @param api.planner.existingSecret Secret containing a pre-provisioned, restricted LiteLLM virtual key
+  ## @param api.planner.apiKeyKey Key within api.planner.existingSecret holding the LiteLLM virtual key
+  ##
+  planner:
+    endpoint: http://cogito-litellm:4000
+    model: balanced
+    timeoutSeconds: 60
+    existingSecret: cogito-planner-key
+    apiKeyKey: api-key
 
 ## @section Worker
 ## Temporal worker: runs DeveloperRunWorkflow and its activities.

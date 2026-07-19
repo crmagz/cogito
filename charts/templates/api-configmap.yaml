@@ -24,4 +24,7 @@ data:
   COGITO_SUPERVISOR_DATABASE_PORT: {{ .Values.api.supervisorDatabase.port | quote }}
   COGITO_SUPERVISOR_DATABASE_NAME: {{ .Values.api.supervisorDatabase.name | quote }}
   COGITO_SUPERVISOR_DATABASE_USER: {{ .Values.api.supervisorDatabase.user | quote }}
+  COGITO_LITELLM_ENDPOINT: {{ .Values.api.planner.endpoint | quote }}
+  COGITO_LITELLM_PLANNER_MODEL: {{ .Values.api.planner.model | quote }}
+  COGITO_LITELLM_PLANNER_TIMEOUT_SECONDS: {{ .Values.api.planner.timeoutSeconds | quote }}
 {{- end }}

@@ -28,6 +28,10 @@ class Settings:
     supervisor_database_name: str
     supervisor_database_user: str
     supervisor_database_password: str
+    litellm_endpoint: str
+    litellm_planner_model: str
+    litellm_planner_api_key: str
+    litellm_planner_timeout_seconds: float
 
     @property
     def supervisor_database_url(self) -> str:
@@ -79,4 +83,10 @@ def load_settings() -> Settings:
         supervisor_database_name=os.environ.get("COGITO_SUPERVISOR_DATABASE_NAME", "cogito"),
         supervisor_database_user=os.environ.get("COGITO_SUPERVISOR_DATABASE_USER", "postgres"),
         supervisor_database_password=os.environ.get("COGITO_SUPERVISOR_DATABASE_PASSWORD", "cogito"),
+        litellm_endpoint=os.environ.get("COGITO_LITELLM_ENDPOINT", "http://cogito-litellm:4000"),
+        litellm_planner_model=os.environ.get("COGITO_LITELLM_PLANNER_MODEL", "balanced"),
+        litellm_planner_api_key=os.environ.get("COGITO_LITELLM_PLANNER_API_KEY", ""),
+        litellm_planner_timeout_seconds=float(
+            os.environ.get("COGITO_LITELLM_PLANNER_TIMEOUT_SECONDS", "60")
+        ),
     )

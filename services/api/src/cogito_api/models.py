@@ -119,6 +119,9 @@ class PlanningRunResponse(BaseModel):
     run_id: str = Field(description="Stable planning run identifier")
     status: PlanningRunStatus = Field(description="Authoritative initial lifecycle state")
     source_artifact: ArtifactReference = Field(description="Immutable submitted specification")
+    plan_artifact: ArtifactReference | None = Field(
+        default=None, description="Immutable generated plan when planning has completed"
+    )
     submitted_at: str = Field(description="ISO 8601 submission timestamp")
 
 

@@ -53,6 +53,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.api.supervisorDatabase.existingSecret }}
                   key: {{ .Values.api.supervisorDatabase.passwordKey }}
+            - name: COGITO_LITELLM_PLANNER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.planner.existingSecret }}
+                  key: {{ .Values.api.planner.apiKeyKey }}
           livenessProbe:
             httpGet:
               path: /healthz

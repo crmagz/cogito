@@ -80,6 +80,38 @@ def test_get_planning_run_returns_authoritative_supervisor_record(
     assert response.json() == submitted.json()
 
 
+def test_generate_plan_persists_validated_artifact_and_enters_approval_state(
+    client: TestClient,
+    valid_plan: dict,
+    store: InMemoryPlanStore,
+    supervisor_store: InMemorySupervisorStore,
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+
+    response = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "awaiting_plan_approval"
+    assert body["plan_artifact"]["ref"].endswith(f"plans/{run_id}/plan.json")
+    assert len(body["plan_artifact"]["sha256"]) == 64
+    assert store.plans[run_id].title == valid_plan["title"]
+    assert supervisor_store.planning_runs[run_id].plan_artifact is not None
+
+
+def test_generate_plan_rejects_repeated_generation_after_immutable_artifact_exists(
+    client: TestClient, valid_plan: dict
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+    client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+
+    response = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+
+    assert response.status_code == 409
+
+
 def test_existing_direct_plan_submission_contract_remains_compatible(
     client: TestClient, valid_plan: dict
 ) -> None:

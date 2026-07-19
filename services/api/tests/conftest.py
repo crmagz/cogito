@@ -4,9 +4,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cogito_api.config import Settings
+from cogito_api.models import AiPlan
 from cogito_api.main import create_app
 
-from .fakes import FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
+from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
 
 
 def make_settings(**overrides) -> Settings:
@@ -31,6 +32,10 @@ def make_settings(**overrides) -> Settings:
         supervisor_database_name="cogito",
         supervisor_database_user="cogito",
         supervisor_database_password="cogito",
+        litellm_endpoint="http://litellm.test:4000",
+        litellm_planner_model="balanced",
+        litellm_planner_api_key="planner-test-key",
+        litellm_planner_timeout_seconds=60.0,
     )
     defaults.update(overrides)
     return Settings(**defaults)
@@ -52,16 +57,23 @@ def supervisor_store() -> InMemorySupervisorStore:
 
 
 @pytest.fixture
+def planner(valid_plan: dict) -> FakePlanner:
+    return FakePlanner(AiPlan.model_validate(valid_plan))
+
+
+@pytest.fixture
 def client(
     store: InMemoryPlanStore,
     starter: FakeRunStarter,
     supervisor_store: InMemorySupervisorStore,
+    planner: FakePlanner,
 ) -> TestClient:
     app = create_app(
         store=store,
         settings=make_settings(),
         starter=starter,
         supervisor_store=supervisor_store,
+        planner=planner,
     )
     return TestClient(app)
 

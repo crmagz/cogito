@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from io import BytesIO
 from typing import Protocol
+from urllib.parse import urlparse
 
 from minio import Minio
 from minio.error import S3Error
@@ -22,6 +23,8 @@ class PlanStore(Protocol):
     def get_status(self, run_id: str) -> dict | None: ...
 
     def put_source_specification(self, run_id: str, initial_specification: str) -> ArtifactReference: ...
+
+    def get_source_specification(self, source_artifact_ref: str) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,23 @@ class MinioPlanStore:
             ref=f"s3://{self._plan_snapshots_bucket}/runs/{run_id}/source-spec.json",
             sha256=sha256(data).hexdigest(),
         )
+
+    def get_source_specification(self, source_artifact_ref: str) -> str:
+        """Load and validate a source artifact from the configured immutable bucket."""
+
+        parsed = urlparse(source_artifact_ref)
+        if parsed.scheme != "s3" or parsed.netloc != self._plan_snapshots_bucket:
+            raise ValueError("source artifact does not target the configured immutable snapshot bucket")
+        response = self._client.get_object(self._plan_snapshots_bucket, parsed.path.lstrip("/"))
+        try:
+            body = json.loads(response.read())
+        finally:
+            response.close()
+            response.release_conn()
+        initial_specification = body.get("initial_specification")
+        if not isinstance(initial_specification, str):
+            raise ValueError("source artifact is not a valid initial specification")
+        return initial_specification
 
     def put_status(self, run_id: str, status: dict) -> None:
         data = json.dumps(status).encode()

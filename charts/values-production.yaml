@@ -120,6 +120,12 @@ api:
     user: cogito
     existingSecret: cogito-rds-credentials
     passwordKey: password
+  planner:
+    endpoint: http://cogito-litellm:4000
+    model: balanced
+    timeoutSeconds: 60
+    existingSecret: cogito-planner-key
+    apiKeyKey: api-key
 
 # Production worker settings
 worker:

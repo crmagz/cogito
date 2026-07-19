@@ -26,6 +26,8 @@ class PlanningRunRecord:
     priority: str
     submitted_at: str
     submitted_by: str
+    plan_artifact: ArtifactReference | None = None
+    planner_model: str | None = None
 
 
 class SupervisorStore(Protocol):
@@ -34,6 +36,13 @@ class SupervisorStore(Protocol):
     async def create_planning_run(self, record: PlanningRunRecord) -> None: ...
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None: ...
+
+    async def attach_generated_plan(
+        self,
+        run_id: str,
+        plan_artifact: ArtifactReference,
+        planner_model: str,
+    ) -> PlanningRunRecord: ...
 
 
 class PostgresSupervisorStore:
@@ -91,7 +100,8 @@ class PostgresSupervisorStore:
                 text(
                     """
                     SELECT run_id, status, source_artifact_ref, source_artifact_sha256,
-                           target_repos, spec_set, constraints, priority, submitted_at, submitted_by
+                           target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
+                           plan_artifact_ref, plan_artifact_sha256, planner_model
                     FROM supervisor_runs
                     WHERE run_id = :run_id
                     """
@@ -113,6 +123,71 @@ class PostgresSupervisorStore:
             priority=row["priority"],
             submitted_at=row["submitted_at"].isoformat(),
             submitted_by=row["submitted_by"],
+            plan_artifact=(
+                ArtifactReference(ref=row["plan_artifact_ref"], sha256=row["plan_artifact_sha256"])
+                if row["plan_artifact_ref"] is not None
+                else None
+            ),
+            planner_model=row["planner_model"],
+        )
+
+    async def attach_generated_plan(
+        self,
+        run_id: str,
+        plan_artifact: ArtifactReference,
+        planner_model: str,
+    ) -> PlanningRunRecord:
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs
+                    SET status = 'awaiting_plan_approval',
+                        plan_artifact_ref = :plan_artifact_ref,
+                        plan_artifact_sha256 = :plan_artifact_sha256,
+                        planner_model = :planner_model
+                    WHERE run_id = :run_id
+                      AND status = 'planning'
+                    RETURNING run_id, status, source_artifact_ref, source_artifact_sha256,
+                              target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
+                              plan_artifact_ref, plan_artifact_sha256, planner_model
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "plan_artifact_ref": plan_artifact.ref,
+                    "plan_artifact_sha256": plan_artifact.sha256,
+                    "planner_model": planner_model,
+                },
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                raise ValueError("planning run is not eligible to accept a generated plan")
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO supervisor_artifacts (run_id, artifact_type, ref, sha256, created_at)
+                    VALUES (:run_id, 'plan', :ref, :sha256, now())
+                    """
+                ),
+                {"run_id": run_id, "ref": plan_artifact.ref, "sha256": plan_artifact.sha256},
+            )
+        return PlanningRunRecord(
+            run_id=row["run_id"],
+            status=PlanningRunStatus(row["status"]),
+            source_artifact=ArtifactReference(
+                ref=row["source_artifact_ref"], sha256=row["source_artifact_sha256"]
+            ),
+            target_repos=list(row["target_repos"]),
+            spec_set=row["spec_set"],
+            constraints=PlanConstraints.model_validate(row["constraints"]),
+            priority=row["priority"],
+            submitted_at=row["submitted_at"].isoformat(),
+            submitted_by=row["submitted_by"],
+            plan_artifact=ArtifactReference(
+                ref=row["plan_artifact_ref"], sha256=row["plan_artifact_sha256"]
+            ),
+            planner_model=row["planner_model"],
         )
 
     async def close(self) -> None:
