@@ -202,7 +202,10 @@ class DeveloperRunWorkflow:
                 args=[envelope.run_id, "failed", _failure_detail(error)],
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
             )
-            raise
+            # A failed run is a durable terminal business outcome. Returning
+            # prevents Temporal from replaying this workflow task indefinitely
+            # after the status has already been recorded as failed.
+            return RunResult(run_id=envelope.run_id, status="failed")
 
 
 def _validate_plan_snapshot(plan: dict, envelope: RunEnvelope) -> None:

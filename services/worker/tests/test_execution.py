@@ -7,6 +7,7 @@ import pytest
 from cogito_worker.execution import (
     ExecutionJobSettings,
     ExecutionWorkspaceService,
+    KubernetesExecutionJobClient,
     _append_bounded_output,
     _bounded_output,
     build_execution_job,
@@ -188,6 +189,27 @@ async def test_provisioned_run_key_is_scoped_to_one_budget_and_execution_pod() -
     assert run_keys.cleaned == [("run-1", "cogito-run-key-abc")]
 
 
+async def test_kubernetes_exec_pipes_stdin_so_the_remote_command_receives_eof() -> None:
+    client = object.__new__(KubernetesExecutionJobClient)
+    captured: dict[str, object] = {}
+
+    async def running_pod_name(job_name: str) -> str:
+        assert job_name == "job-1"
+        return "pod-1"
+
+    def execute_in_pod(pod_name: str, command: list[str], stdin: str, timeout: int, limit: int):
+        captured.update(pod_name=pod_name, command=command, stdin=stdin, timeout=timeout, limit=limit)
+        return type("Result", (), {"exit_code": 0, "stdout": "", "stderr": ""})()
+
+    client._running_pod_name = running_pod_name
+    client._execute_in_pod = execute_in_pod
+
+    await client.execute("job-1", ["claude", "--print"], "approved prompt", 30, 1024)
+
+    assert captured["stdin"] == ""
+    assert captured["command"] == ["/bin/sh", "-lc", "printf '%s' 'approved prompt' | exec claude --print"]
+
+
 def test_execution_failure_diagnostics_redact_sensitive_values() -> None:
     output = _sanitize_diagnostics(
         "b'MINIO_SECRET_KEY=super-secret token=abc123 {\\\"ANTHROPIC_AUTH_TOKEN\\\":\\\"gateway-key\\\"} "
@@ -209,3 +231,42 @@ def test_streamed_command_output_stays_within_its_memory_budget() -> None:
     assert size == 4
     assert truncated is True
     assert _bounded_output(parts, 4, truncated) == "xxxx\n[output truncated]"
+
+
+def test_kubernetes_exec_stream_does_not_require_a_nonexistent_close_stdin_method() -> None:
+    class Response:
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.written: list[str] = []
+            self.open = True
+
+        def write_stdin(self, value: str) -> None:
+            self.written.append(value)
+
+        def is_open(self) -> bool:
+            return self.open
+
+        def update(self, timeout: int) -> None:
+            self.open = False
+
+        def read_stdout(self) -> str:
+            return "ok"
+
+        def read_stderr(self) -> str:
+            return ""
+
+        def close(self) -> None:
+            pass
+
+    response = Response()
+    client = object.__new__(KubernetesExecutionJobClient)
+    client._core_api = type("CoreApi", (), {"connect_get_namespaced_pod_exec": object()})()
+    client._namespace = "cogito-executions"
+    client._stream = lambda *args, **kwargs: response
+
+    result = client._execute_in_pod("test-pod", ["echo", "ok"], "prompt", 5, 1024)
+
+    assert response.written == ["prompt"]
+    assert result.exit_code == 0
+    assert result.stdout == "ok"

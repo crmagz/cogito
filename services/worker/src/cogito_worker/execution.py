@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shlex
 import time
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
@@ -398,6 +399,12 @@ class KubernetesExecutionJobClient:
         """Run a command through the Kubernetes exec subresource for this run only."""
 
         pod_name = await self._running_pod_name(job_name)
+        if stdin:
+            # The pinned Kubernetes WebSocket client cannot half-close stdin.
+            # Feed trusted command input through the remote shell instead, so
+            # the child process receives EOF without closing stdout/stderr.
+            command = ["/bin/sh", "-lc", f"printf '%s' {shlex.quote(stdin)} | exec {shlex.join(command)}"]
+            stdin = ""
         return await asyncio.to_thread(
             self._execute_in_pod,
             pod_name,
@@ -452,7 +459,6 @@ class KubernetesExecutionJobClient:
         try:
             if stdin:
                 response.write_stdin(stdin)
-            response.close_stdin()
             while response.is_open():
                 if time.monotonic() >= deadline:
                     response.close()

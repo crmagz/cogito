@@ -19,7 +19,8 @@ rules:
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods/exec"]
-    verbs: ["create"]
+    # The Kubernetes exec client performs the WebSocket upgrade with GET.
+    verbs: ["get", "create"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "delete"]
