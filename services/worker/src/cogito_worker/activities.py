@@ -13,6 +13,8 @@ from .models import (
     PhaseExecutionRequest,
     PhaseResult,
 )
+from .observability import WorkerTelemetry
+from .run_state import NullRunStateReporter, RunStateReporter
 from .storage import RunStore, now_iso
 
 
@@ -22,10 +24,14 @@ class WorkerActivities:
         store: RunStore,
         execution_workspaces: ExecutionWorkspaceService,
         harness: ClaudeCodeHarness,
+        telemetry: WorkerTelemetry | None = None,
+        run_state: RunStateReporter | None = None,
     ):
         self._store = store
         self._execution_workspaces = execution_workspaces
         self._harness = harness
+        self._telemetry = telemetry or WorkerTelemetry()
+        self._run_state = run_state or NullRunStateReporter()
 
     @activity.defn
     async def load_plan(self, plan_ref: str) -> dict:
@@ -49,6 +55,7 @@ class WorkerActivities:
         if metadata is not None:
             record.update(metadata)
         self._store.put_status(run_id, record)
+        await self._run_state.report(run_id, status, failure_detail, metadata)
 
     @activity.defn
     async def provision_execution_workspace(self, request: ExecutionRequest) -> ExecutionWorkspace:
@@ -75,7 +82,8 @@ class WorkerActivities:
             "running approved plan phase",
             extra={"run_id": request.workspace.run_id, "phase_id": request.phase.id},
         )
-        return await self._harness.execute_phase(request)
+        with self._telemetry.span("cogito.worker.phase", request.traceparent, request.tracestate):
+            return await self._harness.execute_phase(request)
 
     @activity.defn
     async def backup_phase(self, request: BackupExecutionRequest) -> PhaseResult:

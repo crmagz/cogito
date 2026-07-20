@@ -11,7 +11,7 @@ from typing import Protocol
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from .models import ArtifactReference, PlanApprovalDecision, PlanConstraints, PlanningRunStatus
+from .models import AgentRunStatus, ArtifactReference, PlanApprovalDecision, PlanConstraints, PlanningRunStatus
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,22 @@ class OutboxDelivery:
     attempt_count: int
 
 
+@dataclass(frozen=True)
+class AgentRunRecord:
+    run_id: str
+    root_run_id: str
+    parent_run_id: str | None
+    agent_name: str
+    status: AgentRunStatus
+    trace_id: str
+    created_at: str
+    updated_at: str
+    last_heartbeat_at: str | None = None
+    worker_id: str | None = None
+    result_artifact_uri: str | None = None
+    error_summary: str | None = None
+
+
 class ApprovalConflictError(Exception):
     """Raised when a decision cannot safely apply to the current run state."""
 
@@ -98,6 +114,10 @@ class SupervisorStore(Protocol):
     async def release_plan_approval_delivery(
         self, decision_id: str, *, retry_seconds: int, error: str
     ) -> None: ...
+
+    async def create_agent_run(self, record: AgentRunRecord) -> None: ...
+
+    async def get_agent_run(self, run_id: str) -> AgentRunRecord | None: ...
 
 
 class PostgresSupervisorStore:
@@ -148,6 +168,60 @@ class PostgresSupervisorStore:
                     "created_at": datetime.fromisoformat(record.submitted_at),
                 },
             )
+
+    async def create_agent_run(self, record: AgentRunRecord) -> None:
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_runs (
+                        run_id, root_run_id, parent_run_id, agent_name, status, trace_id, created_at, updated_at
+                    ) VALUES (
+                        :run_id, :root_run_id, :parent_run_id, :agent_name, :status, :trace_id,
+                        :created_at, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "run_id": record.run_id,
+                    "root_run_id": record.root_run_id,
+                    "parent_run_id": record.parent_run_id,
+                    "agent_name": record.agent_name,
+                    "status": record.status.value,
+                    "trace_id": record.trace_id,
+                    "created_at": datetime.fromisoformat(record.created_at),
+                    "updated_at": datetime.fromisoformat(record.updated_at),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_run_events (event_id, run_id, event_type, from_status, to_status, occurred_at, metadata)
+                    VALUES (:event_id, :run_id, 'run_created', NULL, :status, :occurred_at, CAST('{}' AS jsonb))
+                    """
+                ),
+                {
+                    "event_id": str(uuid.uuid4()),
+                    "run_id": record.run_id,
+                    "status": record.status.value,
+                    "occurred_at": datetime.fromisoformat(record.created_at),
+                },
+            )
+
+    async def get_agent_run(self, run_id: str) -> AgentRunRecord | None:
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT run_id, root_run_id, parent_run_id, agent_name, status, trace_id, created_at, updated_at,
+                           last_heartbeat_at, worker_id, result_artifact_uri, error_summary
+                    FROM agent_runs WHERE run_id = :run_id
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            row = result.mappings().one_or_none()
+        return _agent_run_record(row) if row is not None else None
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         async with self._engine.connect() as connection:
@@ -521,4 +595,22 @@ def _approval_record(row: object) -> ApprovalRecord:
         created_at=values["created_at"].isoformat(),  # type: ignore[index]
         delivered=values["delivered_at"] is not None,  # type: ignore[index]
         plan_revision=values["plan_revision"],  # type: ignore[index]
+    )
+
+
+def _agent_run_record(row: object) -> AgentRunRecord:
+    values = row
+    return AgentRunRecord(
+        run_id=values["run_id"],  # type: ignore[index]
+        root_run_id=values["root_run_id"],  # type: ignore[index]
+        parent_run_id=values["parent_run_id"],  # type: ignore[index]
+        agent_name=values["agent_name"],  # type: ignore[index]
+        status=AgentRunStatus(values["status"]),  # type: ignore[index]
+        trace_id=values["trace_id"],  # type: ignore[index]
+        created_at=values["created_at"].isoformat(),  # type: ignore[index]
+        updated_at=values["updated_at"].isoformat(),  # type: ignore[index]
+        last_heartbeat_at=values["last_heartbeat_at"].isoformat() if values["last_heartbeat_at"] else None,  # type: ignore[index]
+        worker_id=values["worker_id"],  # type: ignore[index]
+        result_artifact_uri=values["result_artifact_uri"],  # type: ignore[index]
+        error_summary=values["error_summary"],  # type: ignore[index]
     )

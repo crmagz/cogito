@@ -152,6 +152,8 @@ def test_get_status_for_existing_run_returns_queued(client: TestClient, valid_pl
 
     assert response.status_code == 200
     assert response.json()["status"] == "queued"
+    assert response.json()["lifecycle_status"] == "QUEUED"
+    assert len(response.json()["trace_id"]) == 32
 
 
 def test_get_status_for_unknown_run_returns_404(client: TestClient):

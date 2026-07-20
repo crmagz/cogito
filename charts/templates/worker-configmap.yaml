@@ -1,4 +1,9 @@
 {{- if .Values.worker.enabled }}
+{{- $supervisorDatabase := default (dict) .Values.worker.supervisorDatabase }}
+{{- $telemetryEnabled := or .Values.observability.traces.enabled .Values.observability.metrics.enabled }}
+{{- if and $telemetryEnabled (not .Values.observability.otlp.endpoint) }}
+{{- fail "observability.otlp.endpoint is required when traces or metrics are enabled" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -45,4 +50,13 @@ data:
   COGITO_EXECUTION_GIT_AUTHOR_NAME: {{ .Values.worker.execution.harness.gitAuthorName | quote }}
   COGITO_EXECUTION_GIT_AUTHOR_EMAIL: {{ .Values.worker.execution.harness.gitAuthorEmail | quote }}
   COGITO_EXECUTION_COMMAND_OUTPUT_LIMIT_BYTES: {{ .Values.worker.execution.harness.commandOutputLimitBytes | quote }}
+  COGITO_TELEMETRY_TRACES_ENABLED: {{ .Values.observability.traces.enabled | quote }}
+  COGITO_TELEMETRY_OTLP_ENDPOINT: {{ .Values.observability.otlp.endpoint | quote }}
+  COGITO_TELEMETRY_OTLP_PROTOCOL: {{ .Values.observability.otlp.protocol | quote }}
+  COGITO_TELEMETRY_OTLP_INSECURE: {{ .Values.observability.otlp.insecure | quote }}
+  COGITO_DEPLOYMENT_MODE: {{ ternary "production" "development" .Values.global.production | quote }}
+  COGITO_SUPERVISOR_DATABASE_HOST: {{ default (printf "%s-postgresql" .Release.Name) $supervisorDatabase.host | quote }}
+  COGITO_SUPERVISOR_DATABASE_PORT: {{ default 5432 $supervisorDatabase.port | quote }}
+  COGITO_SUPERVISOR_DATABASE_NAME: {{ default "cogito" $supervisorDatabase.name | quote }}
+  COGITO_SUPERVISOR_DATABASE_USER: {{ default "postgres" $supervisorDatabase.user | quote }}
 {{- end }}

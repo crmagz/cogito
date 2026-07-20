@@ -6,6 +6,7 @@ from temporalio.testing import ActivityEnvironment
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.execution import ExecutionJobSettings, ExecutionWorkspaceService
 from cogito_worker.models import ExecutionRequest
+from cogito_worker.run_state import RunStateReporter
 
 from .fakes import (
     InMemoryExecutionJobClient,
@@ -59,6 +60,21 @@ async def test_report_status_preserves_existing_fields(
 
     assert store.statuses["run-1"]["status"] == "completed"
     assert store.statuses["run-1"]["plan_ref"] == "s3://plans/plans/run-1/plan.json"
+
+
+async def test_report_status_forwards_only_bounded_transition_metadata(env: ActivityEnvironment, store: InMemoryRunStore):
+    class RecordingRunStateReporter:
+        calls: list[tuple[str, str, str | None, dict | None]] = []
+
+        async def report(self, run_id: str, status: str, failure_detail: str | None, metadata: dict | None) -> None:
+            self.calls.append((run_id, status, failure_detail, metadata))
+
+    reporter: RunStateReporter = RecordingRunStateReporter()
+    activities = WorkerActivities(store, InMemoryExecutionWorkspaces(), InMemoryHarness(), run_state=reporter)
+
+    await env.run(activities.report_status, "run-1", "completed", None, {"phase_result": {"summary": "secret"}})
+
+    assert reporter.calls == [("run-1", "completed", None, {"phase_result": {"summary": "secret"}})]
 
 
 async def test_execution_workspace_activities_manage_only_the_current_run(

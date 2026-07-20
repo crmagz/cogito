@@ -18,6 +18,9 @@ dependencies = [
     "psycopg[binary]==3.3.4",
     "httpx==0.28.1",
     "PyJWT[crypto]==2.13.0",
+    "opentelemetry-sdk==1.43.0",
+    "opentelemetry-exporter-otlp-proto-http==1.43.0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.43.0",
 ]
 
 [project.optional-dependencies]

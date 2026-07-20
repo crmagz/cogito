@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from urllib.parse import quote
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,19 @@ class Settings:
     execution_git_author_name: str
     execution_git_author_email: str
     execution_command_output_limit_bytes: int
+    supervisor_database_host: str
+    supervisor_database_port: int
+    supervisor_database_name: str
+    supervisor_database_user: str
+    supervisor_database_password: str
+
+    @property
+    def supervisor_database_url(self) -> str:
+        return (
+            "postgresql+psycopg://"
+            f"{quote(self.supervisor_database_user, safe='')}:{quote(self.supervisor_database_password, safe='')}"
+            f"@{self.supervisor_database_host}:{self.supervisor_database_port}/{self.supervisor_database_name}"
+        )
 
 
 def load_settings() -> Settings:
@@ -133,4 +147,9 @@ def load_settings() -> Settings:
         execution_command_output_limit_bytes=int(
             os.environ.get("COGITO_EXECUTION_COMMAND_OUTPUT_LIMIT_BYTES", str(256 * 1024))
         ),
+        supervisor_database_host=os.environ.get("COGITO_SUPERVISOR_DATABASE_HOST", "cogito-postgresql"),
+        supervisor_database_port=int(os.environ.get("COGITO_SUPERVISOR_DATABASE_PORT", "5432")),
+        supervisor_database_name=os.environ.get("COGITO_SUPERVISOR_DATABASE_NAME", "cogito"),
+        supervisor_database_user=os.environ.get("COGITO_SUPERVISOR_DATABASE_USER", "postgres"),
+        supervisor_database_password=os.environ.get("COGITO_SUPERVISOR_DATABASE_PASSWORD", "cogito"),
     )

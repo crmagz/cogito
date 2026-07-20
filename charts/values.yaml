@@ -141,6 +141,24 @@ repositoryPolicy:
   allowedGitHosts:
     - github.com
 
+## @section Observability
+## Cogito exports OTLP only. It never deploys a collector, backend, scraper, profiler, or log agent.
+observability:
+  traces:
+    enabled: false
+  metrics:
+    enabled: false
+  spanEvents:
+    enabled: false
+  otlp:
+    endpoint: ""
+    protocol: http/protobuf
+    insecure: true
+    existingSecret: ""
+    headersKey: headers
+  metricExportIntervalMillis: 60000
+  resourceAttributes: {}
+
 ## @section Temporal
 ## Workflow orchestration engine.
 
@@ -397,6 +415,14 @@ api:
     existingSecret: cogito-minio
     accessKeySecretKey: rootUser
     secretKeySecretKey: rootPassword
+  ## @param worker.supervisorDatabase PostgreSQL connection for authoritative run-state writes.
+  supervisorDatabase:
+    host: ""
+    port: 5432
+    name: cogito
+    user: postgres
+    existingSecret: ""
+    passwordKey: postgres-password
   ## @param api.constraints.maxWallClockMinutes System-configured maximum for plan.constraints.max_wall_clock_minutes
   ## @param api.constraints.maxCostUsd System-configured maximum for plan.constraints.max_cost_usd
   ## @param api.constraints.maxReviewRounds System-configured maximum for plan.constraints.max_review_rounds

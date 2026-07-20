@@ -12,6 +12,8 @@ from .budgets import KubernetesLiteLLMRunKeyManager, KubernetesRunGitCredentialM
 from .config import load_settings
 from .execution import ExecutionJobSettings, ExecutionWorkspaceService, KubernetesExecutionJobClient
 from .harness import ClaudeCodeHarness
+from .observability import WorkerTelemetry
+from .run_state import PostgresRunStateReporter
 from .storage import MinioRunStore
 from .workflows import DeveloperRunWorkflow
 
@@ -78,6 +80,8 @@ async def main() -> None:
         store,
         execution_workspaces,
         ClaudeCodeHarness(execution_workspaces),
+        WorkerTelemetry(),
+        PostgresRunStateReporter(settings.supervisor_database_url),
     )
 
     worker = Worker(

@@ -1,4 +1,5 @@
 {{- if .Values.worker.enabled }}
+{{- $supervisorDatabase := default (dict) .Values.worker.supervisorDatabase }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,6 +46,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.worker.objectStore.existingSecret }}
                   key: {{ .Values.worker.objectStore.secretKeySecretKey }}
+            - name: COGITO_SUPERVISOR_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default "cogito-postgresql" $supervisorDatabase.existingSecret }}
+                  key: {{ default "postgres-password" $supervisorDatabase.passwordKey }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -59,6 +65,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.worker.execution.harness.gitCredentialsSecret }}
                   key: {{ .Values.worker.execution.harness.gitCredentialsKey }}
+            {{- if .Values.observability.otlp.existingSecret }}
+            - name: COGITO_TELEMETRY_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.otlp.existingSecret }}
+                  key: {{ .Values.observability.otlp.headersKey }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

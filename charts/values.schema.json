@@ -2,6 +2,26 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "observability": {
+      "type": "object",
+      "properties": {
+        "traces": { "$ref": "#/definitions/toggle" },
+        "metrics": { "$ref": "#/definitions/toggle" },
+        "spanEvents": { "$ref": "#/definitions/toggle" },
+        "otlp": {
+          "type": "object",
+          "properties": {
+            "endpoint": { "type": "string" },
+            "protocol": { "enum": ["http/protobuf", "grpc"] },
+            "insecure": { "type": "boolean" },
+            "existingSecret": { "type": "string" },
+            "headersKey": { "type": "string", "minLength": 1 }
+          }
+        },
+        "metricExportIntervalMillis": { "type": "integer", "minimum": 1000 },
+        "resourceAttributes": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 256 } }
+      }
+    },
     "litellm": {
       "type": "object",
       "properties": {
@@ -18,6 +38,11 @@
     }
   },
   "definitions": {
+    "toggle": {
+      "type": "object",
+      "properties": { "enabled": { "type": "boolean" } },
+      "required": ["enabled"]
+    },
     "rolePolicy": {
       "type": "object",
       "required": ["model", "maxBudgetUsd", "budgetDuration", "toolset", "existingSecret", "apiKeyKey"],

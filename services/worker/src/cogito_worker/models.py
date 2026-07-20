@@ -15,6 +15,8 @@ class RunEnvelope:
     submitted_at: str = ""
     submitted_by: str = ""
     requires_plan_approval: bool = False
+    traceparent: str | None = None
+    tracestate: str | None = None
 
 
 @dataclass
@@ -119,6 +121,9 @@ class PhaseExecutionRequest:
     max_turns: int
     timeout_seconds: int
     backup_reserve_turns: int = 25
+
+    traceparent: str | None = None
+    tracestate: str | None = None
 
 
 @dataclass(frozen=True)
