@@ -95,6 +95,15 @@ def test_execution_job_template_uses_an_isolated_emptydir_workspace() -> None:
         next(env["value"] for env in container["env"] if env["name"] == "ANTHROPIC_BASE_URL")
         == "http://cogito-litellm:4000"
     )
+    assert next(env["value"] for env in container["env"] if env["name"] == "ANTHROPIC_MODEL") == "complex"
+    assert (
+        next(
+            env["value"]
+            for env in container["env"]
+            if env["name"] == "CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP"
+        )
+        == "1"
+    )
     assert json.loads(next(env["value"] for env in init_container["env"] if env["name"] == "COGITO_TARGET_REPOS")) == [
         "https://github.com/acme/api-gateway.git#0123456789abcdef0123456789abcdef01234567"
     ]
@@ -167,9 +176,22 @@ async def test_provisioned_run_key_is_scoped_to_one_budget_and_execution_pod() -
         async def cleanup(self, run_id: str, secret_name: str) -> None:
             self.cleaned.append((run_id, secret_name))
 
+    class RecordingRunGitCredentials:
+        def __init__(self) -> None:
+            self.provisioned: list[str] = []
+            self.cleaned: list[tuple[str, str]] = []
+
+        async def provision(self, run_id: str) -> str:
+            self.provisioned.append(run_id)
+            return "cogito-run-git-abc"
+
+        async def cleanup(self, run_id: str, secret_name: str) -> None:
+            self.cleaned.append((run_id, secret_name))
+
     jobs = InMemoryExecutionJobClient()
     run_keys = RecordingRunKeys()
-    service = ExecutionWorkspaceService(execution_settings(), jobs, run_keys)
+    run_git_credentials = RecordingRunGitCredentials()
+    service = ExecutionWorkspaceService(execution_settings(), jobs, run_keys, run_git_credentials)
     request = ExecutionRequest(
         run_id="run-1",
         spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
@@ -183,10 +205,62 @@ async def test_provisioned_run_key_is_scoped_to_one_budget_and_execution_pod() -
 
     assert run_keys.budgets == [RunBudget("run-1", 2.5, "complex", 120)]
     assert workspace.run_key_secret == "cogito-run-key-abc"
+    assert workspace.run_git_secret == "cogito-run-git-abc"
     pod_container = jobs.created[0][1]["spec"]["template"]["spec"]["containers"][0]
     key_ref = next(env["valueFrom"] for env in pod_container["env"] if env["name"] == "ANTHROPIC_AUTH_TOKEN")
     assert key_ref["secretKeyRef"]["name"] == "cogito-run-key-abc"
+    git_ref = next(env["valueFrom"] for env in pod_container["env"] if env["name"] == "COGITO_GIT_HTTPS_TOKEN")
+    assert git_ref["secretKeyRef"]["name"] == "cogito-run-git-abc"
     assert run_keys.cleaned == [("run-1", "cogito-run-key-abc")]
+    assert run_git_credentials.provisioned == ["run-1"]
+    assert run_git_credentials.cleaned == [("run-1", "cogito-run-git-abc")]
+
+
+async def test_cleanup_revokes_run_credentials_when_job_deletion_fails() -> None:
+    class FailingDeleteExecutionJobClient(InMemoryExecutionJobClient):
+        async def delete_job(self, job_name: str) -> None:
+            await super().delete_job(job_name)
+            raise RuntimeError("Kubernetes API unavailable")
+
+    class RecordingRunKeys:
+        def __init__(self) -> None:
+            self.cleaned: list[tuple[str, str]] = []
+
+        async def provision(self, budget: RunBudget) -> str:
+            return "cogito-run-key-abc"
+
+        async def cleanup(self, run_id: str, secret_name: str) -> None:
+            self.cleaned.append((run_id, secret_name))
+
+    class RecordingRunGitCredentials:
+        def __init__(self) -> None:
+            self.cleaned: list[tuple[str, str]] = []
+
+        async def provision(self, run_id: str) -> str:
+            return "cogito-run-git-abc"
+
+        async def cleanup(self, run_id: str, secret_name: str) -> None:
+            self.cleaned.append((run_id, secret_name))
+
+    jobs = FailingDeleteExecutionJobClient()
+    run_keys = RecordingRunKeys()
+    run_git_credentials = RecordingRunGitCredentials()
+    service = ExecutionWorkspaceService(execution_settings(), jobs, run_keys, run_git_credentials)
+    workspace = await service.provision(
+        ExecutionRequest(
+            run_id="run-1",
+            spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            target_repos=[],
+            execution_timeout_seconds=120,
+            max_cost_usd=2.5,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="Kubernetes API unavailable"):
+        await service.cleanup(workspace)
+
+    assert run_keys.cleaned == [("run-1", "cogito-run-key-abc")]
+    assert run_git_credentials.cleaned == [("run-1", "cogito-run-git-abc")]
 
 
 async def test_kubernetes_exec_pipes_stdin_so_the_remote_command_receives_eof() -> None:

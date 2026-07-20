@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 from .execution_prepare import feature_branch_name, repository_clone_url, repository_directory_name
 from .models import ExecutionRequest, ExecutionWorkspace
-from .budgets import RunBudget, RunKeyManager
+from .budgets import RunBudget, RunGitCredentialManager, RunKeyManager
 
 _EXECUTION_JOB_PREFIX = "cogito-execution-"
 _RUN_HASH_LABEL = "cogito.dev/run-hash"
@@ -186,7 +186,7 @@ def build_execution_job(
                                     "name": "COGITO_GIT_HTTPS_TOKEN",
                                     "valueFrom": {
                                         "secretKeyRef": {
-                                            "name": settings.git_credentials_secret,
+                                            "name": request.run_git_secret or settings.git_credentials_secret,
                                             "key": settings.git_credentials_secret_key,
                                         }
                                     },
@@ -220,6 +220,10 @@ def build_execution_job(
                                 },
                                 {"name": "ANTHROPIC_BASE_URL", "value": settings.litellm_endpoint},
                                 {"name": "ANTHROPIC_MODEL", "value": settings.litellm_model},
+                                # Claude Code otherwise remaps an arbitrary gateway
+                                # alias to its legacy model selection. Keep the
+                                # immutable LiteLLM alias chosen by the run key.
+                                {"name": "CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP", "value": "1"},
                                 {"name": "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "value": "1"},
                                 {"name": "DISABLE_AUTOUPDATER", "value": "1"},
                                 {"name": "GIT_TERMINAL_PROMPT", "value": "0"},
@@ -240,7 +244,7 @@ def build_execution_job(
                                     "name": "COGITO_GIT_HTTPS_TOKEN",
                                     "valueFrom": {
                                         "secretKeyRef": {
-                                            "name": settings.git_credentials_secret,
+                                            "name": request.run_git_secret or settings.git_credentials_secret,
                                             "key": settings.git_credentials_secret_key,
                                         }
                                     },
@@ -511,32 +515,44 @@ class ExecutionWorkspaceService:
         settings: ExecutionJobSettings,
         jobs: ExecutionJobClient,
         run_keys: RunKeyManager | None = None,
+        run_git_credentials: RunGitCredentialManager | None = None,
     ):
         self._settings = settings
         self._jobs = jobs
         self._run_keys = run_keys
+        self._run_git_credentials = run_git_credentials
 
     async def provision(self, request: ExecutionRequest) -> ExecutionWorkspace:
         """Create the execution Job and return its non-secret descriptor."""
 
         job_name = execution_job_name(request.run_id)
         run_key_secret = request.run_key_secret
-        if self._run_keys is not None:
-            run_key_secret = await self._run_keys.provision(
-                RunBudget(
-                    run_id=request.run_id,
-                    max_cost_usd=request.max_cost_usd,
-                    model=self._settings.litellm_model,
-                    expires_in_seconds=request.execution_timeout_seconds,
+        run_git_secret = request.run_git_secret
+        try:
+            if self._run_git_credentials is not None:
+                run_git_secret = await self._run_git_credentials.provision(request.run_id)
+            if self._run_keys is not None:
+                run_key_secret = await self._run_keys.provision(
+                    RunBudget(
+                        run_id=request.run_id,
+                        max_cost_usd=request.max_cost_usd,
+                        model=self._settings.litellm_model,
+                        expires_in_seconds=request.execution_timeout_seconds,
+                    )
                 )
-            )
-        job_request = replace(request, run_key_secret=run_key_secret)
+        except Exception:
+            if self._run_git_credentials is not None and run_git_secret:
+                await self._run_git_credentials.cleanup(request.run_id, run_git_secret)
+            raise
+        job_request = replace(request, run_key_secret=run_key_secret, run_git_secret=run_git_secret)
         body = build_execution_job(request=job_request, job_name=job_name, settings=self._settings)
         try:
             await self._jobs.create_job(job_name, body)
         except Exception:
             if self._run_keys is not None:
                 await self._run_keys.cleanup(request.run_id, run_key_secret)
+            if self._run_git_credentials is not None:
+                await self._run_git_credentials.cleanup(request.run_id, run_git_secret)
             raise
         try:
             await self._jobs.wait_until_ready(job_name, self._settings.startup_timeout_seconds)
@@ -544,6 +560,8 @@ class ExecutionWorkspaceService:
             await self._jobs.delete_job(job_name)
             if self._run_keys is not None:
                 await self._run_keys.cleanup(request.run_id, run_key_secret)
+            if self._run_git_credentials is not None:
+                await self._run_git_credentials.cleanup(request.run_id, run_git_secret)
             raise
         return ExecutionWorkspace(
             run_id=request.run_id,
@@ -562,14 +580,23 @@ class ExecutionWorkspaceService:
                 for repository in request.target_repos
             },
             run_key_secret=run_key_secret,
+            run_git_secret=run_git_secret,
         )
 
     async def cleanup(self, workspace: ExecutionWorkspace) -> None:
         """Remove the execution Job and its `emptyDir` workspace."""
 
-        await self._jobs.delete_job(workspace.job_name)
-        if self._run_keys is not None:
-            await self._run_keys.cleanup(workspace.run_id, workspace.run_key_secret)
+        # A transient Kubernetes deletion error must not leave an execution
+        # credential valid after the workflow has reached a terminal outcome.
+        try:
+            await self._jobs.delete_job(workspace.job_name)
+        finally:
+            try:
+                if self._run_keys is not None:
+                    await self._run_keys.cleanup(workspace.run_id, workspace.run_key_secret)
+            finally:
+                if self._run_git_credentials is not None:
+                    await self._run_git_credentials.cleanup(workspace.run_id, workspace.run_git_secret)
 
     async def execute(
         self,

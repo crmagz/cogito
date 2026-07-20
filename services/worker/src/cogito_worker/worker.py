@@ -8,7 +8,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from .activities import WorkerActivities
-from .budgets import KubernetesLiteLLMRunKeyManager
+from .budgets import KubernetesLiteLLMRunKeyManager, KubernetesRunGitCredentialManager
 from .config import load_settings
 from .execution import ExecutionJobSettings, ExecutionWorkspaceService, KubernetesExecutionJobClient
 from .harness import ClaudeCodeHarness
@@ -68,6 +68,10 @@ async def main() -> None:
             settings.execution_namespace,
             settings.execution_litellm_endpoint,
             settings.execution_litellm_management_key,
+        ),
+        KubernetesRunGitCredentialManager(
+            settings.execution_namespace,
+            settings.execution_git_https_token,
         ),
     )
     activities = WorkerActivities(

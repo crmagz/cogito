@@ -100,3 +100,27 @@ If a required kind dependency, credential, or external integration is absent,
 the phase is not production-ready. Record the unmet acceptance criterion in
 the PR and keep it out of the release/promotion path until the cluster gate is
 completed.
+
+### Repeatable Phase 8 Kind E2E
+
+After loading and deploying the local API and worker images, run the reusable
+multi-phase gate. It submits two dependency-ordered marker phases to an
+immutable specification archive, verifies the worker's execution RBAC, waits
+for the requested terminal status, and confirms that the execution Job and
+run-key Secret were cleaned up.
+
+```bash
+COGITO_E2E_TARGET_REPO='https://github.com/example/disposable-e2e.git#<40-or-64-hex-commit>' \
+COGITO_E2E_SPEC_REF='example@v1#sha256=<64-hex-digest>' \
+COGITO_E2E_EXPECTED_STATUS=completed \
+./scripts/kind-e2e-phase8.sh
+```
+
+Use a disposable repository and a scoped write credential injected into the
+control-namespace Git Secret by the test environment. The execution namespace
+must not contain that long-lived Secret; each run gets a labelled short-lived
+copy that is deleted during cleanup. Never pass the credential as a
+shell argument, environment value committed to a file, or pull-request text.
+For the deliberate no-publish failure test, set `COGITO_E2E_EXPECTED_STATUS=failed`.
+That mode only passes if the worker reaches the Git publish boundary and fails
+closed there; it does not substitute for the positive two-phase publish gate.

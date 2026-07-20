@@ -45,6 +45,7 @@ class Settings:
     execution_litellm_management_key: str
     execution_git_credentials_secret: str
     execution_git_credentials_secret_key: str
+    execution_git_https_token: str
     execution_git_author_name: str
     execution_git_author_email: str
     execution_command_output_limit_bytes: int
@@ -126,6 +127,7 @@ def load_settings() -> Settings:
         execution_git_credentials_secret_key=os.environ.get(
             "COGITO_EXECUTION_GIT_CREDENTIALS_SECRET_KEY", "token"
         ),
+        execution_git_https_token=os.environ.get("COGITO_EXECUTION_GIT_HTTPS_TOKEN", ""),
         execution_git_author_name=os.environ.get("COGITO_EXECUTION_GIT_AUTHOR_NAME", "Cogito Agent"),
         execution_git_author_email=os.environ.get("COGITO_EXECUTION_GIT_AUTHOR_EMAIL", "cogito@local.invalid"),
         execution_command_output_limit_bytes=int(
