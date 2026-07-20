@@ -30,6 +30,14 @@ class RunKeyManager(Protocol):
     async def cleanup(self, run_id: str, secret_name: str) -> None: ...
 
 
+class RunGitCredentialManager(Protocol):
+    """Creates and removes the repository credential Secret for one execution."""
+
+    async def provision(self, run_id: str) -> str: ...
+
+    async def cleanup(self, run_id: str, secret_name: str) -> None: ...
+
+
 class KubernetesLiteLLMRunKeyManager:
     """Provision one model-limited, budget-limited key and its private Secret."""
 
@@ -133,19 +141,82 @@ class KubernetesLiteLLMRunKeyManager:
                 raise RuntimeError("LiteLLM run-key management request was rejected")
 
 
+class KubernetesRunGitCredentialManager:
+    """Copies a worker-mounted repository credential into one run-private Secret."""
+
+    def __init__(self, namespace: str, token: str) -> None:
+        if not token:
+            raise ValueError("execution Git credential is not configured")
+        try:
+            from kubernetes import client, config
+            from kubernetes.client.exceptions import ApiException
+        except ImportError as error:
+            raise RuntimeError("run Git credential provisioning requires the kubernetes dependency") from error
+        config.load_incluster_config()
+        self._namespace = namespace
+        self._token = token
+        self._core_api = client.CoreV1Api()
+        self._client = client
+        self._api_exception: type[Exception] = ApiException
+
+    async def provision(self, run_id: str) -> str:
+        secret_name = run_git_secret_name(run_id)
+        existing = await self._read_secret(secret_name)
+        if existing is not None:
+            if _secret_token(existing, key="token"):
+                return secret_name
+            await self._delete_secret(secret_name)
+        body = self._client.V1Secret(
+            metadata=self._client.V1ObjectMeta(
+                name=secret_name,
+                labels={"cogito.dev/run-hash": _run_hash(run_id)},
+            ),
+            type="Opaque",
+            data={"token": base64.b64encode(self._token.encode()).decode()},
+        )
+        await asyncio.to_thread(self._core_api.create_namespaced_secret, self._namespace, body)
+        return secret_name
+
+    async def cleanup(self, run_id: str, secret_name: str) -> None:
+        if secret_name != run_git_secret_name(run_id):
+            raise ValueError("run Git Secret does not match the execution run")
+        await self._delete_secret(secret_name)
+
+    async def _read_secret(self, name: str):
+        try:
+            return await asyncio.to_thread(self._core_api.read_namespaced_secret, name, self._namespace)
+        except self._api_exception as error:
+            if error.status == 404:
+                return None
+            raise
+
+    async def _delete_secret(self, name: str) -> None:
+        try:
+            await asyncio.to_thread(self._core_api.delete_namespaced_secret, name, self._namespace)
+        except self._api_exception as error:
+            if error.status != 404:
+                raise
+
+
 def run_key_secret_name(run_id: str) -> str:
     """Return a deterministic name that reveals no raw run identifier."""
 
     return f"cogito-run-key-{_run_hash(run_id)}"
 
 
+def run_git_secret_name(run_id: str) -> str:
+    """Return a deterministic name for the run-private Git credential Secret."""
+
+    return f"cogito-run-git-{_run_hash(run_id)}"
+
+
 def _run_hash(run_id: str) -> str:
     return hashlib.sha256(run_id.encode()).hexdigest()[:20]
 
 
-def _secret_token(secret: object) -> str | None:
+def _secret_token(secret: object, key: str = "api-key") -> str | None:
     data = getattr(secret, "data", None) or {}
-    encoded = data.get("api-key")
+    encoded = data.get(key)
     if not isinstance(encoded, str):
         return None
     try:

@@ -171,6 +171,8 @@ class DeveloperRunWorkflow:
                             start_to_close_timeout=_ACTIVITY_TIMEOUT,
                         )
                         return RunResult(run_id=envelope.run_id, status="stopped_with_backup")
+                    if phase_result.succeeded:
+                        completed_phase_ids.append(phase.id)
                     await workflow.execute_activity(
                         WorkerActivities.report_status,
                         args=[
@@ -183,7 +185,6 @@ class DeveloperRunWorkflow:
                     )
                     if not phase_result.succeeded:
                         raise RuntimeError(f"phase {phase.id} failed: {phase_result.summary}")
-                    completed_phase_ids.append(phase.id)
             finally:
                 await workflow.execute_activity(
                     WorkerActivities.cleanup_execution_workspace,

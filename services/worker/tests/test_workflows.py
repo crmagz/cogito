@@ -145,6 +145,7 @@ async def test_workflow_runs_dependency_ordered_phases_in_one_workspace(env: Wor
 
     assert result == RunResult(run_id="run-multi", status="completed")
     assert [request.phase.id for request in harness.requests] == ["phase-1", "phase-2", "phase-3"]
+    assert store.statuses["run-multi"]["completed_phase_ids"] == ["phase-1", "phase-2", "phase-3"]
     assert len(workspaces.provisioned) == 1
     assert len(workspaces.cleaned) == 1
 
@@ -202,6 +203,61 @@ async def test_workflow_backs_up_and_stops_on_a_known_ceiling(env: WorkflowEnvir
     assert [request.ceiling for request in harness.backup_requests] == ["turns"]
     assert store.statuses["run-backup"]["ceiling"] == "turns"
     assert store.statuses["run-backup"]["unfinished_phase_ids"] == ["phase-1"]
+    assert len(workspaces.cleaned) == 1
+
+
+async def test_workflow_records_an_ordinary_phase_failure_as_a_terminal_result(env: WorkflowEnvironment):
+    """A durable failed run must not keep retrying its workflow task."""
+
+    store = InMemoryRunStore()
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    store.plans["s3://plans/plans/run-failed/plan.json"] = plan
+    plan_sha256 = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    harness = InMemoryHarness(
+        result=PhaseResult(
+            phase_id="phase-1",
+            branch_name="adp/run-failed",
+            succeeded=False,
+            turns_used=1,
+            cost_usd=0.01,
+            changed_files=[],
+            commits={},
+            verification=[],
+            summary="verification failed",
+            outcome="failed",
+        )
+    )
+    workspaces = InMemoryExecutionWorkspaces()
+    activities = WorkerActivities(store, workspaces, harness)
+    task_queue = f"test-queue-{uuid.uuid4()}"
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[DeveloperRunWorkflow],
+        activities=[
+            activities.load_plan,
+            activities.report_status,
+            activities.provision_execution_workspace,
+            activities.cleanup_execution_workspace,
+            activities.run_phase,
+            activities.backup_phase,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            DeveloperRunWorkflow.run,
+            RunEnvelope(
+                run_id="run-failed",
+                plan_ref="s3://plans/plans/run-failed/plan.json",
+                plan_sha256=plan_sha256,
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            ),
+            id=f"test-workflow-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+    assert result == RunResult(run_id="run-failed", status="failed")
+    assert store.statuses["run-failed"]["status"] == "failed"
     assert len(workspaces.cleaned) == 1
 
 

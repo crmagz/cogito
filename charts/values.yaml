@@ -257,7 +257,7 @@ temporal:
 ## @param litellm.image.repository LiteLLM image (database-enabled variant, required for Postgres-backed virtual keys/budgets)
 ## @param litellm.image.tag LiteLLM image tag
 ## @param litellm.image.pullPolicy Image pull policy
-## @param litellm.existingSecret Name of an existing Secret containing LITELLM_MASTER_KEY and one `<PROVIDER>_API_KEY` entry per provider referenced in litellm.tiers (e.g. ANTHROPIC_API_KEY). Not used for the `bedrock` provider, which authenticates via AWS credentials instead (see litellm.serviceAccount for IRSA, or inject AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_REGION_NAME into this Secret for local dev). The chart never creates this Secret.
+## @param litellm.existingSecret Name of an existing Secret containing LITELLM_MASTER_KEY and one `<PROVIDER>_API_KEY` entry per provider referenced in litellm.tiers (e.g. ANTHROPIC_API_KEY). The `bedrock` provider instead uses AWS credentials (IRSA, or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN with AWS_REGION or AWS_DEFAULT_REGION for local validation). The chart never creates this Secret.
 ## @param litellm.serviceAccount.create Create a ServiceAccount for the LiteLLM pod (for IRSA when using the bedrock provider in production; leave false for local kind demos where AWS creds are injected via litellm.existingSecret instead)
 ## @param litellm.serviceAccount.name Name of the ServiceAccount to use or create. Defaults to the release's litellm name if empty.
 ## @param litellm.serviceAccount.annotations [object] Annotations for the ServiceAccount (e.g. eks.amazonaws.com/role-arn for IRSA)
@@ -532,9 +532,10 @@ worker:
       ## Explicit CIDRs for an external object store such as S3. Prefer a VPC endpoint.
       ## Empty keeps the execution namespace restricted to the in-cluster MinIO Service.
       objectStoreEgress: []
-    ## The agent receives a dedicated LiteLLM virtual key and a repository-scoped
-    ## Git write credential only in its execution pod. The chart never creates
-    ## either Secret; supply them through external secret management.
+    ## The worker reads the repository-scoped Git credential from this Secret in
+    ## the release namespace, then creates a labelled, run-private copy in the
+    ## execution namespace and deletes it during cleanup. The chart never
+    ## creates either Secret; supply them through external secret management.
     harness:
       ## Empty uses the release-local LiteLLM Service.
       litellmEndpoint: ""

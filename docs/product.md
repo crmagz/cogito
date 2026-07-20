@@ -59,8 +59,15 @@ must never expand it.
 LiteLLM tier definitions also carry explicit positive per-token input and
 output costs. This is essential: a virtual-key budget is meaningful only when
 the gateway can calculate spend. The shipped values reflect the current listed
-rates for the configured Bedrock models; operators must update those values for
-their provider, region, and pricing changes before promotion.
+rates for the configured models; operators must update those values for their
+provider, region, and pricing changes before promotion.
+
+LiteLLM supports the provider selected by each tier. This environment validates
+Anthropic models through Amazon Bedrock, using short-lived AWS session
+credentials and a region in the local Kind Secret; production Bedrock
+deployments use an IRSA role limited to their configured model IDs. Direct
+provider API-key deployments remain supported. Operators must verify model
+access and pricing for their selected provider and region before promotion.
 
 Multi-phase implementation is available through a pinned Claude Code runtime.
 The worker validates a stable topological order from each approved phase's
@@ -91,6 +98,12 @@ credential) reaches the execution pod. The management credential never enters
 the Job, Temporal history, prompts, logs, or status metadata. The worker's
 authority is limited to the run-specific workspace lifecycle and command
 channel; execution pods receive no Kubernetes service account token.
+
+The long-lived repository credential is mounted only into the control-plane
+worker. Before each Job starts, the worker copies it into a labelled,
+run-private Secret in the execution namespace, and cleanup removes that
+Secret with the run key and Job. The execution namespace therefore contains no
+long-lived Git credential.
 
 Delegated A2A sub-agents, semantic tool discovery, MCP tool execution,
 adversarial implementation review, the final implementation gate, and the

@@ -54,6 +54,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.worker.execution.keyManagement.existingSecret }}
                   key: {{ .Values.worker.execution.keyManagement.apiKeyKey }}
+            - name: COGITO_EXECUTION_GIT_HTTPS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.worker.execution.harness.gitCredentialsSecret }}
+                  key: {{ .Values.worker.execution.harness.gitCredentialsKey }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

@@ -4,6 +4,8 @@ import copy
 
 from fastapi.testclient import TestClient
 
+from cogito_api.storage import PlanStoreUnavailableError
+
 from .fakes import FakeRunStarter, InMemoryPlanStore
 
 
@@ -23,6 +25,25 @@ def test_submit_valid_plan_persists_plan_in_store(client: TestClient, valid_plan
 
     assert run_id in store.plans
     assert store.plans[run_id].title == valid_plan["title"]
+
+
+def test_submit_plan_returns_retryable_error_when_snapshot_storage_is_unavailable(
+    client: TestClient,
+    valid_plan: dict,
+    store: InMemoryPlanStore,
+    starter: FakeRunStarter,
+    monkeypatch,
+):
+    def fail_put_plan(*args, **kwargs):
+        raise PlanStoreUnavailableError("plan snapshot storage is unavailable")
+
+    monkeypatch.setattr(store, "put_plan", fail_put_plan)
+
+    response = client.post("/api/v1/runs", json={"plan": valid_plan})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "run storage is temporarily unavailable"
+    assert starter.started_runs == []
 
 
 def test_submit_missing_required_field_returns_422(client: TestClient, valid_plan: dict):

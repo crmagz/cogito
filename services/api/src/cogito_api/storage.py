@@ -15,6 +15,10 @@ from minio.retention import COMPLIANCE, Retention
 from .models import AiPlan, ArtifactReference
 
 
+class PlanStoreUnavailableError(RuntimeError):
+    """The object store could not safely complete an API storage operation."""
+
+
 class PlanStore(Protocol):
     def put_plan(self, run_id: str, plan: AiPlan) -> "PlanSnapshot": ...
 
@@ -104,7 +108,10 @@ class MinioPlanStore:
         parsed = urlparse(source_artifact_ref)
         if parsed.scheme != "s3" or parsed.netloc != self._plan_snapshots_bucket:
             raise ValueError("source artifact does not target the configured immutable snapshot bucket")
-        response = self._client.get_object(self._plan_snapshots_bucket, parsed.path.lstrip("/"))
+        try:
+            response = self._client.get_object(self._plan_snapshots_bucket, parsed.path.lstrip("/"))
+        except S3Error as error:
+            raise PlanStoreUnavailableError("source specification storage is unavailable") from error
         try:
             body = json.loads(response.read())
         finally:
@@ -125,7 +132,7 @@ class MinioPlanStore:
         except S3Error as exc:
             if exc.code == "NoSuchKey":
                 return None
-            raise
+            raise PlanStoreUnavailableError("run status storage is unavailable") from exc
         try:
             return json.loads(response.read())
         finally:
@@ -142,26 +149,32 @@ class MinioPlanStore:
             return
         except S3Error as error:
             if error.code not in {"NoSuchKey", "NoSuchObject"}:
-                raise
+                raise PlanStoreUnavailableError("plan snapshot storage is unavailable") from error
 
         retention = Retention(
             COMPLIANCE,
             datetime.now(timezone.utc) + timedelta(days=self._plan_snapshot_retention_days),
         )
-        self._client.put_object(
-            self._plan_snapshots_bucket,
-            object_name,
-            BytesIO(data),
-            length=len(data),
-            content_type="application/json",
-            retention=retention,
-        )
+        try:
+            self._client.put_object(
+                self._plan_snapshots_bucket,
+                object_name,
+                BytesIO(data),
+                length=len(data),
+                content_type="application/json",
+                retention=retention,
+            )
+        except S3Error as error:
+            raise PlanStoreUnavailableError("plan snapshot storage is unavailable") from error
 
     def _put_object(self, bucket: str, object_name: str, data: bytes) -> None:
-        self._client.put_object(
-            bucket,
-            object_name,
-            BytesIO(data),
-            length=len(data),
-            content_type="application/json",
-        )
+        try:
+            self._client.put_object(
+                bucket,
+                object_name,
+                BytesIO(data),
+                length=len(data),
+                content_type="application/json",
+            )
+        except S3Error as error:
+            raise PlanStoreUnavailableError("run status storage is unavailable") from error

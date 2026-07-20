@@ -33,6 +33,7 @@ class ExecutionWorkspace:
     repositories: list[str] = field(default_factory=list)
     repository_origins: dict[str, str] = field(default_factory=dict)
     run_key_secret: str = ""
+    run_git_secret: str = ""
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,7 @@ class ExecutionRequest:
     execution_timeout_seconds: int = 0
     max_cost_usd: float = 0.0
     run_key_secret: str = ""
+    run_git_secret: str = ""
 
 
 @dataclass(frozen=True)

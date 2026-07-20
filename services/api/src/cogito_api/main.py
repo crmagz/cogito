@@ -28,7 +28,7 @@ from .models import (
 )
 from .outbox import PlanApprovalOutboxDispatcher, stop_dispatcher
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
-from .storage import MinioPlanStore, PlanStore
+from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
 from .supervisor import ApprovalConflictError, PlanningRunRecord, PostgresSupervisorStore, SupervisorStore
 from .temporal import RunStarter, TemporalRunStarter
 
@@ -127,17 +127,20 @@ def create_app(
             )
 
         submitted_at = datetime.now(timezone.utc).isoformat()
-        snapshot = store.put_plan(run_id, plan)
-        store.put_status(
-            run_id,
-            {
-                "run_id": run_id,
-                "status": "queued",
-                "plan_ref": snapshot.ref,
-                "plan_sha256": snapshot.sha256,
-                "submitted_at": submitted_at,
-            },
-        )
+        try:
+            snapshot = store.put_plan(run_id, plan)
+            store.put_status(
+                run_id,
+                {
+                    "run_id": run_id,
+                    "status": "queued",
+                    "plan_ref": snapshot.ref,
+                    "plan_sha256": snapshot.sha256,
+                    "submitted_at": submitted_at,
+                },
+            )
+        except PlanStoreUnavailableError as error:
+            raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
 
         envelope = RunEnvelope(
             run_id=run_id,
@@ -177,7 +180,10 @@ def create_app(
                 content={"run_id": run_id, "status": "validated", "dry_run": True},
             )
 
-        source_artifact = store.put_source_specification(run_id, submission.initial_specification)
+        try:
+            source_artifact = store.put_source_specification(run_id, submission.initial_specification)
+        except PlanStoreUnavailableError as error:
+            raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
         record = PlanningRunRecord(
             run_id=run_id,
             status=PlanningRunStatus.PLANNING,
@@ -210,7 +216,10 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
         if record.status is PlanningRunStatus.PLANNING:
-            initial_specification = store.get_source_specification(record.source_artifact.ref)
+            try:
+                initial_specification = store.get_source_specification(record.source_artifact.ref)
+            except PlanStoreUnavailableError as error:
+                raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
             try:
                 generated_plan = await planner.generate(
                     PlanningContext(
@@ -223,7 +232,10 @@ def create_app(
             except PlannerError as error:
                 raise HTTPException(status_code=502, detail="planner failed to produce a valid plan") from error
             next_plan_revision = record.plan_revision + 1
-            snapshot = store.put_planning_plan(run_id, next_plan_revision, generated_plan)
+            try:
+                snapshot = store.put_planning_plan(run_id, next_plan_revision, generated_plan)
+            except PlanStoreUnavailableError as error:
+                raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
             workflow_id = _planning_workflow_id(run_id, next_plan_revision, snapshot.sha256)
             try:
                 updated = await supervisor_store.attach_generated_plan(
@@ -328,7 +340,10 @@ def create_app(
 
     @app.get("/api/v1/runs/{run_id}/status")
     async def get_run_status(run_id: str) -> dict:
-        record = store.get_status(run_id)
+        try:
+            record = store.get_status(run_id)
+        except PlanStoreUnavailableError as error:
+            raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
         if record is None:
             raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
         return record
