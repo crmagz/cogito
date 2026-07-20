@@ -6,6 +6,10 @@
 {{- $auth := default (dict) .Values.api.auth }}
 {{- $staticAuth := default (dict) $auth.static }}
 {{- $oidcAuth := default (dict) $auth.oidc }}
+{{- $telemetryEnabled := or .Values.observability.traces.enabled .Values.observability.metrics.enabled }}
+{{- if and $telemetryEnabled (not .Values.observability.otlp.endpoint) }}
+{{- fail "observability.otlp.endpoint is required when traces or metrics are enabled" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -42,4 +46,13 @@ data:
   COGITO_AUTH_OIDC_JWKS_URL: {{ default "" $oidcAuth.jwksUrl | quote }}
   COGITO_AUTH_OIDC_ROLE_CLAIM: {{ default "roles" $oidcAuth.roleClaim | quote }}
   COGITO_AUTH_OIDC_APPROVAL_ROLE: {{ default "cogito-approver" $oidcAuth.approvalRole | quote }}
+  COGITO_TELEMETRY_TRACES_ENABLED: {{ .Values.observability.traces.enabled | quote }}
+  COGITO_TELEMETRY_METRICS_ENABLED: {{ .Values.observability.metrics.enabled | quote }}
+  COGITO_TELEMETRY_SPAN_EVENTS_ENABLED: {{ .Values.observability.spanEvents.enabled | quote }}
+  COGITO_TELEMETRY_OTLP_ENDPOINT: {{ .Values.observability.otlp.endpoint | quote }}
+  COGITO_TELEMETRY_OTLP_PROTOCOL: {{ .Values.observability.otlp.protocol | quote }}
+  COGITO_TELEMETRY_OTLP_INSECURE: {{ .Values.observability.otlp.insecure | quote }}
+  COGITO_TELEMETRY_METRIC_EXPORT_INTERVAL_MILLIS: {{ .Values.observability.metricExportIntervalMillis | quote }}
+  COGITO_TELEMETRY_SERVICE_NAME: "cogito-api"
+  COGITO_TELEMETRY_RESOURCE_ATTRIBUTES: {{ toJson .Values.observability.resourceAttributes | quote }}
 {{- end }}

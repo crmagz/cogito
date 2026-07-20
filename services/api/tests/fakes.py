@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from cogito_api.models import AiPlan, ArtifactReference, PlanApprovalDecision, PlanningRunStatus, RunEnvelope
+from cogito_api.models import AgentRunStatus, AiPlan, ArtifactReference, PlanApprovalDecision, PlanningRunStatus, RunEnvelope
 from cogito_api.planner import PlanningContext
 from cogito_api.storage import PlanSnapshot, plan_snapshot_bytes, source_specification_bytes
-from cogito_api.supervisor import ApprovalConflictError, ApprovalRecord, OutboxDelivery, PlanningRunRecord
+from cogito_api.supervisor import AgentRunRecord, ApprovalConflictError, ApprovalRecord, OutboxDelivery, PlanningRunRecord
 
 
 class InMemoryPlanStore:
@@ -60,6 +60,13 @@ class InMemorySupervisorStore:
         self.approval_request_hashes: dict[tuple[str, int, str], str] = {}
         self.outbox: dict[str, OutboxDelivery] = {}
         self.leased_decision_ids: set[str] = set()
+        self.agent_runs: dict[str, AgentRunRecord] = {}
+
+    async def create_agent_run(self, record: AgentRunRecord) -> None:
+        self.agent_runs[record.run_id] = record
+
+    async def get_agent_run(self, run_id: str) -> AgentRunRecord | None:
+        return self.agent_runs.get(run_id)
 
     async def create_planning_run(self, record: PlanningRunRecord) -> None:
         self.planning_runs[record.run_id] = record

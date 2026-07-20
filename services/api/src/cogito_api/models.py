@@ -97,6 +97,21 @@ class PlanningRunStatus(StrEnum):
     REVISION_REQUESTED = "revision_requested"
 
 
+class AgentRunStatus(StrEnum):
+    """Canonical lifecycle state independent from planning approval state."""
+
+    PENDING = "PENDING"
+    QUEUED = "QUEUED"
+    STARTING = "STARTING"
+    RUNNING = "RUNNING"
+    WAITING_FOR_TOOL = "WAITING_FOR_TOOL"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    TIMED_OUT = "TIMED_OUT"
+
+
 class PlanApprovalDecision(StrEnum):
     """Human decision permitted at the plan-approval gate."""
 
@@ -151,6 +166,23 @@ class PlanningRunResponse(BaseModel):
         default=None, description="Immutable generated plan when planning has completed"
     )
     submitted_at: str = Field(description="ISO 8601 submission timestamp")
+
+
+class AgentRunResponse(BaseModel):
+    """Authoritative lifecycle projection for a submitted run."""
+
+    run_id: str
+    root_run_id: str
+    parent_run_id: str | None
+    agent_name: str
+    status: AgentRunStatus
+    trace_id: str
+    created_at: str
+    updated_at: str
+    last_heartbeat_at: str | None = None
+    worker_id: str | None = None
+    result_artifact_uri: str | None = None
+    error_summary: str | None = None
 
 
 class PlanApprovalRequest(BaseModel):
@@ -208,6 +240,8 @@ class RunEnvelope(BaseModel):
         default=False,
         description="Whether the workflow must wait for a digest-bound plan decision before execution",
     )
+    traceparent: str | None = Field(default=None, max_length=512)
+    tracestate: str | None = Field(default=None, max_length=4096)
 
 
 class Violation(BaseModel):

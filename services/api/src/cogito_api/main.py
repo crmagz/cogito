@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 import asyncio
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -11,11 +12,14 @@ from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from minio import Minio
+from opentelemetry.context import attach, detach
 
 from .auth import ApprovalAuthenticator
 from .config import Settings, load_settings
 from .dag import validate_constraints, validate_phase_dag, validate_spec_reference, validate_target_repositories
 from .models import (
+    AgentRunResponse,
+    AgentRunStatus,
     ArtifactReference,
     PlanApprovalRequest,
     PlanApprovalResponse,
@@ -27,9 +31,10 @@ from .models import (
     Violation,
 )
 from .outbox import PlanApprovalOutboxDispatcher, stop_dispatcher
+from .observability import Telemetry, TelemetrySettings
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
-from .supervisor import ApprovalConflictError, PlanningRunRecord, PostgresSupervisorStore, SupervisorStore
+from .supervisor import AgentRunRecord, ApprovalConflictError, PlanningRunRecord, PostgresSupervisorStore, SupervisorStore
 from .temporal import RunStarter, TemporalRunStarter
 
 
@@ -77,6 +82,7 @@ def create_app(
     )
     supervisor_store = supervisor_store or PostgresSupervisorStore(settings.supervisor_database_url)
     planner = planner or LiteLLMPlanner(settings)
+    telemetry = Telemetry(TelemetrySettings.from_environment())
     authenticator = ApprovalAuthenticator(settings)
 
     dispatcher = PlanApprovalOutboxDispatcher(supervisor_store, starter)
@@ -88,11 +94,25 @@ def create_app(
             yield
         finally:
             await stop_dispatcher(delivery_task)
+            telemetry.shutdown()
             close = getattr(supervisor_store, "close", None)
             if close is not None:
                 await close()
 
     app = FastAPI(title="Cogito API", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def trace_request(request: Request, call_next):
+        parent = telemetry.extract(dict(request.headers))
+        token = attach(parent)
+        try:
+            with telemetry.span("cogito.api.request", {"http.request.method": request.method}):
+                response = await call_next(request)
+                telemetry.request(request.method, response.status_code)
+                telemetry.event("cogito.api.response", {"http.response.status_code": str(response.status_code)})
+                return response
+        finally:
+            detach(token)
 
     @app.exception_handler(RequestValidationError)
     async def handle_schema_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -127,6 +147,19 @@ def create_app(
             )
 
         submitted_at = datetime.now(timezone.utc).isoformat()
+        await supervisor_store.create_agent_run(
+            AgentRunRecord(
+                run_id=run_id,
+                root_run_id=run_id,
+                parent_run_id=None,
+                agent_name="supervisor",
+                status=AgentRunStatus.QUEUED,
+                trace_id=telemetry.trace_id() or secrets.token_hex(16),
+                created_at=submitted_at,
+                updated_at=submitted_at,
+            )
+        )
+        telemetry.transition(AgentRunStatus.QUEUED.value, "supervisor")
         try:
             snapshot = store.put_plan(run_id, plan)
             store.put_status(
@@ -142,6 +175,8 @@ def create_app(
         except PlanStoreUnavailableError as error:
             raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
 
+        carrier: dict[str, str] = {}
+        telemetry.inject(carrier)
         envelope = RunEnvelope(
             run_id=run_id,
             plan_ref=snapshot.ref,
@@ -152,6 +187,8 @@ def create_app(
             priority=submission.priority,
             submitted_at=submitted_at,
             submitted_by="api",
+            traceparent=carrier.get("traceparent"),
+            tracestate=carrier.get("tracestate"),
         )
         await starter.start_run(envelope)
 
@@ -184,6 +221,19 @@ def create_app(
             source_artifact = store.put_source_specification(run_id, submission.initial_specification)
         except PlanStoreUnavailableError as error:
             raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
+        await supervisor_store.create_agent_run(
+            AgentRunRecord(
+                run_id=run_id,
+                root_run_id=run_id,
+                parent_run_id=None,
+                agent_name="planner",
+                status=AgentRunStatus.QUEUED,
+                trace_id=telemetry.trace_id() or secrets.token_hex(16),
+                created_at=submitted_at,
+                updated_at=submitted_at,
+            )
+        )
+        telemetry.transition(AgentRunStatus.QUEUED.value, "planner")
         record = PlanningRunRecord(
             run_id=run_id,
             status=PlanningRunStatus.PLANNING,
@@ -267,6 +317,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="planning run is not eligible for plan generation")
         assert updated.plan_artifact is not None
         try:
+            carrier: dict[str, str] = {}
+            telemetry.inject(carrier)
             await starter.start_run(
                 RunEnvelope(
                     run_id=updated.run_id,
@@ -280,6 +332,8 @@ def create_app(
                     submitted_by=updated.submitted_by,
                     workflow_id=updated.workflow_id,
                     requires_plan_approval=True,
+                    traceparent=carrier.get("traceparent"),
+                    tracestate=carrier.get("tracestate"),
                 )
             )
         except Exception as error:
@@ -340,6 +394,14 @@ def create_app(
 
     @app.get("/api/v1/runs/{run_id}/status")
     async def get_run_status(run_id: str) -> dict:
+        agent_run = await supervisor_store.get_agent_run(run_id)
+        if agent_run is not None:
+            response = AgentRunResponse(**agent_run.__dict__).model_dump(mode="json")
+            # Preserve the legacy lower-case field while exposing the canonical
+            # state explicitly for new clients.
+            response["lifecycle_status"] = response["status"]
+            response["status"] = agent_run.status.value.lower()
+            return response
         try:
             record = store.get_status(run_id)
         except PlanStoreUnavailableError as error:

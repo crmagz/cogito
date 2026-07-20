@@ -138,6 +138,8 @@ class DeveloperRunWorkflow:
                                         max_turns=productive_turns,
                                         timeout_seconds=max(1, int(remaining.total_seconds()) - 1),
                                         backup_reserve_turns=backup_reserve_turns,
+                                        traceparent=envelope.traceparent,
+                                        tracestate=envelope.tracestate,
                                     )
                                 ],
                                 start_to_close_timeout=remaining,

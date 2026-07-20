@@ -71,6 +71,13 @@ spec:
                   name: {{ default "cogito-operator-auth" $staticAuth.existingSecret }}
                   key: {{ default "token" $staticAuth.tokenKey }}
             {{- end }}
+            {{- if .Values.observability.otlp.existingSecret }}
+            - name: COGITO_TELEMETRY_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.otlp.existingSecret }}
+                  key: {{ .Values.observability.otlp.headersKey }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

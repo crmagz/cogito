@@ -12,6 +12,11 @@ dependencies = [
     "minio==7.2.20",
     "kubernetes==36.0.3",
     "PyYAML==6.0.3",
+    "SQLAlchemy==2.0.51",
+    "psycopg[binary]==3.3.4",
+    "opentelemetry-sdk==1.43.0",
+    "opentelemetry-exporter-otlp-proto-http==1.43.0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.43.0",
 ]
 
 [project.optional-dependencies]
