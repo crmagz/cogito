@@ -26,9 +26,10 @@ class InMemoryRunStore:
 
 
 class InMemoryExecutionWorkspaces:
-    def __init__(self) -> None:
+    def __init__(self, cleanup_error: Exception | None = None) -> None:
         self.provisioned: list[str] = []
         self.cleaned: list[ExecutionWorkspace] = []
+        self.cleanup_error = cleanup_error
 
     async def provision(self, request: ExecutionRequest) -> ExecutionWorkspace:
         self.provisioned.append(request.run_id)
@@ -41,6 +42,8 @@ class InMemoryExecutionWorkspaces:
 
     async def cleanup(self, workspace: ExecutionWorkspace) -> None:
         self.cleaned.append(workspace)
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
 
 
 class InMemoryExecutionJobClient:
@@ -74,14 +77,22 @@ class InMemoryExecutionJobClient:
 class InMemoryHarness:
     """Returns preconfigured phase results while recording workflow activity inputs."""
 
-    def __init__(self, result: PhaseResult | None = None, backup_result: PhaseResult | None = None) -> None:
+    def __init__(
+        self,
+        result: PhaseResult | None = None,
+        backup_result: PhaseResult | None = None,
+        results: list[PhaseResult] | None = None,
+    ) -> None:
         self.requests: list[PhaseExecutionRequest] = []
         self.backup_requests: list[BackupExecutionRequest] = []
         self.result = result
         self.backup_result = backup_result
+        self.results = list(results or [])
 
     async def execute_phase(self, request: PhaseExecutionRequest) -> PhaseResult:
         self.requests.append(request)
+        if self.results:
+            return self.results.pop(0)
         if self.result is not None:
             return self.result
         return PhaseResult(

@@ -14,6 +14,7 @@ with workflow.unsafe.imports_passed_through():
         BackupExecutionRequest,
         ExecutionRequest,
         PhaseExecutionRequest,
+        PhaseResult,
         PlanPhase,
         RunEnvelope,
         RunResult,
@@ -26,6 +27,7 @@ _ACTIVITY_TIMEOUT = timedelta(seconds=30)
 _PROVISION_ACTIVITY_TIMEOUT = timedelta(seconds=180)
 _CLEANUP_ACTIVITY_TIMEOUT = timedelta(seconds=120)
 _PROVISION_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
+_CLEANUP_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
 _RUN_PHASE_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 _BACKUP_PHASE_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
 _BACKUP_ACTIVITY_TIMEOUT = timedelta(seconds=120)
@@ -75,7 +77,13 @@ class DeveloperRunWorkflow:
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
             )
             _validate_plan_snapshot(plan, envelope)
-            phases, productive_turns, run_timeout, backup_reserve_turns, max_cost_usd = _execution_plan(plan)
+            (
+                phases,
+                productive_turns,
+                run_timeout,
+                backup_reserve_turns,
+                max_cost_usd,
+            ) = _execution_plan(plan)
             if envelope.requires_plan_approval:
                 self._plan_sha256 = envelope.plan_sha256
                 self._awaiting_plan_approval = True
@@ -101,7 +109,9 @@ class DeveloperRunWorkflow:
                         args=[envelope.run_id, "revision_requested"],
                         start_to_close_timeout=_ACTIVITY_TIMEOUT,
                     )
-                    return RunResult(run_id=envelope.run_id, status="revision_requested")
+                    return RunResult(
+                        run_id=envelope.run_id, status="revision_requested"
+                    )
             workspace = await workflow.execute_activity(
                 WorkerActivities.provision_execution_workspace,
                 args=[
@@ -110,7 +120,8 @@ class DeveloperRunWorkflow:
                         spec_ref=envelope.spec_ref,
                         target_repos=envelope.target_repos,
                         execution_timeout_seconds=(
-                            int(run_timeout.total_seconds()) + int(_BACKUP_ACTIVITY_TIMEOUT.total_seconds())
+                            int(run_timeout.total_seconds())
+                            + int(_BACKUP_ACTIVITY_TIMEOUT.total_seconds())
                         ),
                         max_cost_usd=max_cost_usd,
                     )
@@ -118,6 +129,9 @@ class DeveloperRunWorkflow:
                 start_to_close_timeout=_PROVISION_ACTIVITY_TIMEOUT,
                 retry_policy=_PROVISION_RETRY_POLICY,
             )
+            completed_phase_ids: list[str] = []
+            phase_results: list[dict] = []
+            stopped_phase: tuple[PlanPhase, PhaseResult] | None = None
             try:
                 await workflow.execute_activity(
                     WorkerActivities.report_status,
@@ -125,12 +139,12 @@ class DeveloperRunWorkflow:
                     start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 )
                 deadline = workflow.now() + run_timeout
-                completed_phase_ids: list[str] = []
-                phase_results: list[dict] = []
                 for phase in phases:
                     remaining = deadline - workflow.now()
                     if remaining <= timedelta():
-                        phase_result = await _backup_phase(phase, workspace, "wall_clock")
+                        phase_result = await _backup_phase(
+                            phase, workspace, "wall_clock"
+                        )
                     else:
                         try:
                             phase_result = await workflow.execute_activity(
@@ -140,7 +154,9 @@ class DeveloperRunWorkflow:
                                         phase=phase,
                                         workspace=workspace,
                                         max_turns=productive_turns,
-                                        timeout_seconds=max(1, int(remaining.total_seconds()) - 1),
+                                        timeout_seconds=max(
+                                            1, int(remaining.total_seconds()) - 1
+                                        ),
                                         backup_reserve_turns=backup_reserve_turns,
                                         traceparent=envelope.traceparent,
                                         tracestate=envelope.tracestate,
@@ -152,51 +168,72 @@ class DeveloperRunWorkflow:
                         except Exception as error:
                             if not _is_timeout_error(error):
                                 raise
-                            phase_result = await _backup_phase(phase, workspace, "wall_clock")
+                            phase_result = await _backup_phase(
+                                phase, workspace, "wall_clock"
+                            )
                         if phase_result.outcome == "ceiling_reached":
-                            phase_result = await _backup_phase(phase, workspace, phase_result.ceiling or "unknown")
+                            phase_result = await _backup_phase(
+                                phase, workspace, phase_result.ceiling or "unknown"
+                            )
                     phase_results.append(phase_result.metadata())
                     if phase_result.outcome == "stopped_with_backup":
-                        await workflow.execute_activity(
-                            WorkerActivities.report_status,
-                            args=[
-                                envelope.run_id,
-                                "stopped_with_backup",
-                                None,
-                                {
-                                    "phase_results": phase_results,
-                                    "completed_phase_ids": completed_phase_ids,
-                                    "stopped_phase_id": phase.id,
-                                    "unfinished_phase_ids": [
-                                        candidate.id for candidate in phases if candidate.id not in completed_phase_ids
-                                    ],
-                                    "branch_name": phase_result.branch_name,
-                                    "ceiling": phase_result.ceiling,
-                                },
-                            ],
-                            start_to_close_timeout=_ACTIVITY_TIMEOUT,
-                        )
-                        return RunResult(run_id=envelope.run_id, status="stopped_with_backup")
+                        # Do not record a successful terminal backup state until
+                        # the workspace has been removed. If cleanup fails, the
+                        # outer handler records one unambiguous failed outcome.
+                        stopped_phase = (phase, phase_result)
+                        break
                     if phase_result.succeeded:
                         completed_phase_ids.append(phase.id)
                     await workflow.execute_activity(
                         WorkerActivities.report_status,
                         args=[
                             envelope.run_id,
-                            "phase_complete" if phase_result.succeeded else "phase_failed",
+                            "phase_complete"
+                            if phase_result.succeeded
+                            else "phase_failed",
                             None,
-                            {"phase_results": phase_results, "completed_phase_ids": completed_phase_ids},
+                            {
+                                "phase_results": phase_results,
+                                "completed_phase_ids": completed_phase_ids,
+                            },
                         ],
                         start_to_close_timeout=_ACTIVITY_TIMEOUT,
                     )
                     if not phase_result.succeeded:
-                        raise RuntimeError(f"phase {phase.id} failed: {phase_result.summary}")
+                        raise RuntimeError(
+                            f"phase {phase.id} failed: {phase_result.summary}"
+                        )
             finally:
                 await workflow.execute_activity(
                     WorkerActivities.cleanup_execution_workspace,
                     args=[workspace],
                     start_to_close_timeout=_CLEANUP_ACTIVITY_TIMEOUT,
+                    retry_policy=_CLEANUP_RETRY_POLICY,
                 )
+            if stopped_phase is not None:
+                phase, phase_result = stopped_phase
+                await workflow.execute_activity(
+                    WorkerActivities.report_status,
+                    args=[
+                        envelope.run_id,
+                        "stopped_with_backup",
+                        None,
+                        {
+                            "phase_results": phase_results,
+                            "completed_phase_ids": completed_phase_ids,
+                            "stopped_phase_id": phase.id,
+                            "unfinished_phase_ids": [
+                                candidate.id
+                                for candidate in phases
+                                if candidate.id not in completed_phase_ids
+                            ],
+                            "branch_name": phase_result.branch_name,
+                            "ceiling": phase_result.ceiling,
+                        },
+                    ],
+                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                )
+                return RunResult(run_id=envelope.run_id, status="stopped_with_backup")
             await workflow.execute_activity(
                 WorkerActivities.report_status,
                 args=[envelope.run_id, "completed"],
@@ -219,11 +256,18 @@ def _validate_plan_snapshot(plan: dict, envelope: RunEnvelope) -> None:
     """Reject a workflow envelope that does not match its immutable plan snapshot."""
 
     actual_sha256 = hashlib.sha256(
-        json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        json.dumps(
+            plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
     ).hexdigest()
     if actual_sha256 != envelope.plan_sha256:
-        raise ValueError("run plan snapshot digest does not match the submitted envelope")
-    if plan.get("spec_set") != envelope.spec_ref or plan.get("target_repos") != envelope.target_repos:
+        raise ValueError(
+            "run plan snapshot digest does not match the submitted envelope"
+        )
+    if (
+        plan.get("spec_set") != envelope.spec_ref
+        or plan.get("target_repos") != envelope.target_repos
+    ):
         raise ValueError("run envelope does not match its immutable plan snapshot")
 
 
@@ -271,7 +315,9 @@ def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, f
         or isinstance(backup_reserve_turns, bool)
         or not 20 <= backup_reserve_turns <= 30
     ):
-        raise ValueError("plan backup_reserve_turns must be an integer between 20 and 30")
+        raise ValueError(
+            "plan backup_reserve_turns must be an integer between 20 and 30"
+        )
     if max_turns <= backup_reserve_turns:
         raise ValueError("plan max_turns_per_phase must exceed backup_reserve_turns")
     if (
@@ -287,16 +333,23 @@ def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, f
     if len(set(phase_ids)) != len(phase_ids):
         raise ValueError("plan phase IDs must be unique")
     known_ids = set(phase_ids)
-    if any(dependency not in known_ids for phase in parsed_phases for dependency in phase.depends_on):
+    if any(
+        dependency not in known_ids
+        for phase in parsed_phases
+        for dependency in phase.depends_on
+    ):
         raise ValueError("plan phase dependencies must reference approved phases")
-    remaining_dependencies = {phase.id: set(phase.depends_on) for phase in parsed_phases}
+    remaining_dependencies = {
+        phase.id: set(phase.depends_on) for phase in parsed_phases
+    }
     ordered: list[PlanPhase] = []
     while remaining_dependencies:
         ready = next(
             (
                 phase
                 for phase in parsed_phases
-                if phase.id in remaining_dependencies and not remaining_dependencies[phase.id]
+                if phase.id in remaining_dependencies
+                and not remaining_dependencies[phase.id]
             ),
             None,
         )
