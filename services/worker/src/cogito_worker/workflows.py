@@ -23,7 +23,7 @@ with workflow.unsafe.imports_passed_through():
         RunEnvelope,
         RunResult,
     )
-    from .registry import require_role
+    from .registry import require_role, require_tool
 
 _ACTIVITY_TIMEOUT = timedelta(seconds=30)
 # Workspace provisioning includes pod scheduling, repository preparation, and
@@ -95,7 +95,8 @@ class DeveloperRunWorkflow:
     @workflow.run
     async def run(self, envelope: RunEnvelope) -> RunResult:
         try:
-            require_role(envelope, "planner")
+            planner_registration = require_role(envelope, "planner")
+            require_tool(planner_registration, "planning_model", "plan_generation")
             await workflow.execute_activity(
                 WorkerActivities.report_status,
                 args=[envelope.run_id, "claimed"],
@@ -177,7 +178,9 @@ class DeveloperRunWorkflow:
                     start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 )
                 deadline = workflow.now() + run_timeout
-                require_role(envelope, "developer")
+                developer_registration = require_role(envelope, "developer")
+                require_tool(developer_registration, "execution_workspace", "run_scoped_workspace")
+                require_tool(developer_registration, "developer_harness", "approved_phase")
                 for phase in phases:
                     remaining = deadline - workflow.now()
                     if remaining <= timedelta():
@@ -354,7 +357,8 @@ class DeveloperRunWorkflow:
                 args=[envelope.run_id, "finalizing", None, {"implementation_artifact": {"sha256": implementation_artifact.sha256}}],
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
             )
-            require_role(envelope, "pull_request_publisher")
+            publisher_registration = require_role(envelope, "pull_request_publisher")
+            require_tool(publisher_registration, "github_publisher", "approved_pull_request")
             pull_request = await workflow.execute_activity(
                 WorkerActivities.open_pull_request,
                 args=[implementation_artifact.sha256, implementation_evidence],
@@ -537,7 +541,9 @@ async def _review_implementation(
 ) -> dict:
     """Run bounded review/revision rounds without allowing advisory churn."""
 
-    require_role(envelope, "reviewer")
+    reviewer_registration = require_role(envelope, "reviewer")
+    require_tool(reviewer_registration, "execution_workspace", "read_only_workspace")
+    require_tool(reviewer_registration, "review_model", "read_only_review")
     rounds: list[dict] = []
     for round_number in range(1, max_review_rounds + 1):
         remaining = deadline - workflow.now()

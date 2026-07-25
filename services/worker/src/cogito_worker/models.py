@@ -14,6 +14,7 @@ class RegistrationReference:
     manifest_sha256: str
     component_id: str
     component_version: str
+    grants: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 @dataclass

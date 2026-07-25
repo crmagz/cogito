@@ -69,6 +69,7 @@ def registration_reference(role: str, manifest: RegistrationManifest) -> Registr
         manifest_sha256=manifest_sha256(manifest),
         component_id=manifest.component_id,
         component_version=manifest.component_version,
+        grants=manifest.grants,
     )
 
 

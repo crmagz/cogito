@@ -18,3 +18,14 @@ def require_role(envelope: RunEnvelope, role: str) -> RegistrationReference | No
         if resolution.role == role:
             return resolution
     raise RegistryAuthorizationError(f"run does not include a pinned '{role}' registration")
+
+
+def require_tool(resolution: RegistrationReference | None, tool_id: str, scope: str) -> None:
+    """Reject a tool call unless the pinned role release explicitly grants its scope."""
+
+    if resolution is None:
+        return
+    for granted_tool_id, granted_version, granted_scope in resolution.grants:
+        if (granted_tool_id, granted_version, granted_scope) == (tool_id, "1.0.0", scope):
+            return
+    raise RegistryAuthorizationError(f"role '{resolution.role}' is not granted tool '{tool_id}' scope '{scope}'")
