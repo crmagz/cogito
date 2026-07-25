@@ -60,7 +60,7 @@ async def test_litellm_planner_rejects_model_output_that_changes_target_reposito
 
 async def test_litellm_planner_accepts_a_single_fenced_json_object(valid_plan: dict) -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"choices": [{"message": {"content": f"```json\\n{json.dumps(valid_plan)}\\n```"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": f"```json\n{json.dumps(valid_plan)}\n```"}}]})
 
     planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
     plan = await planner.generate(

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from cogito_worker.execution import CommandResult
+from cogito_worker.github import PullRequestResult
 from cogito_worker.models import (
     BackupExecutionRequest,
     ExecutionRequest,
     ExecutionWorkspace,
+    ImplementationArtifact,
     PhaseExecutionRequest,
     PhaseResult,
     ReviewFinding,
@@ -19,6 +21,7 @@ class InMemoryRunStore:
     def __init__(self) -> None:
         self.plans: dict[str, dict] = {}
         self.statuses: dict[str, dict] = {}
+        self.implementation_artifacts: dict[str, dict] = {}
 
     def get_plan(self, plan_ref: str) -> dict:
         return self.plans[plan_ref]
@@ -28,6 +31,14 @@ class InMemoryRunStore:
 
     def put_status(self, run_id: str, status: dict) -> None:
         self.statuses[run_id] = status
+
+    def put_implementation_artifact(self, run_id: str, artifact: dict) -> ImplementationArtifact:
+        from hashlib import sha256
+        import json
+
+        digest = sha256(json.dumps(artifact, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.implementation_artifacts[digest] = artifact
+        return ImplementationArtifact(ref=f"s3://plan-snapshots/runs/{run_id}/implementation/{digest}/artifact.json", sha256=digest)
 
 
 class InMemoryExecutionWorkspaces:
@@ -174,3 +185,14 @@ class InMemoryReviewer:
         if not findings:
             return []
         return self.verified if self.verified is not None else findings
+
+
+class InMemoryPullRequestPublisher:
+    """Captures approved publication attempts without contacting GitHub."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, dict]] = []
+
+    async def open_or_reuse(self, artifact_sha256: str, evidence: dict) -> PullRequestResult:
+        self.requests.append((artifact_sha256, evidence))
+        return PullRequestResult(number=42, url="https://github.com/acme/example/pull/42", reused=False)

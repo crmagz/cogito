@@ -56,6 +56,9 @@ class Settings:
     reviewer_primary_api_key: str
     reviewer_secondary_api_key: str
     reviewer_timeout_seconds: float
+    github_api_url: str
+    github_pull_request_token: str
+    github_base_branch: str
     supervisor_database_host: str
     supervisor_database_port: int
     supervisor_database_name: str
@@ -162,6 +165,9 @@ def load_settings() -> Settings:
         reviewer_primary_api_key=os.environ.get("COGITO_REVIEWER_PRIMARY_LITELLM_API_KEY", ""),
         reviewer_secondary_api_key=os.environ.get("COGITO_REVIEWER_SECONDARY_LITELLM_API_KEY", ""),
         reviewer_timeout_seconds=float(os.environ.get("COGITO_REVIEWER_TIMEOUT_SECONDS", "60")),
+        github_api_url=os.environ.get("COGITO_GITHUB_API_URL", "https://api.github.com"),
+        github_pull_request_token=os.environ.get("COGITO_GITHUB_PULL_REQUEST_TOKEN", ""),
+        github_base_branch=os.environ.get("COGITO_GITHUB_BASE_BRANCH", "main"),
         supervisor_database_host=os.environ.get("COGITO_SUPERVISOR_DATABASE_HOST", "cogito-postgresql"),
         supervisor_database_port=int(os.environ.get("COGITO_SUPERVISOR_DATABASE_PORT", "5432")),
         supervisor_database_name=os.environ.get("COGITO_SUPERVISOR_DATABASE_NAME", "cogito"),

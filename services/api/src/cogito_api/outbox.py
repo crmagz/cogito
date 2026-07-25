@@ -65,6 +65,51 @@ class PlanApprovalOutboxDispatcher:
             await asyncio.sleep(self._poll_seconds)
 
 
+class ImplementationApprovalOutboxDispatcher:
+    """Delivers persisted implementation decisions with the same leased semantics."""
+
+    def __init__(self, store: SupervisorStore, starter: RunStarter, poll_seconds: float = 1.0):
+        self._store = store
+        self._starter = starter
+        self._poll_seconds = poll_seconds
+
+    async def deliver_once(self, decision_id: str | None = None, limit: int = 10) -> set[str]:
+        """Deliver a bounded set of digest-bound implementation approvals."""
+
+        delivered: set[str] = set()
+        pending = await self._store.claim_implementation_approval_deliveries(
+            limit=limit, lease_seconds=30, decision_id=decision_id
+        )
+        for item in pending:
+            try:
+                accepted = await self._starter.submit_implementation_approval(item.workflow_id, item.payload)
+            except Exception as error:
+                await self._store.release_implementation_approval_delivery(
+                    item.decision_id, retry_seconds=_retry_delay(item.attempt_count), error=_error_detail(error)
+                )
+                continue
+            if accepted:
+                await self._store.mark_implementation_approval_delivered(item.decision_id)
+                delivered.add(item.decision_id)
+            else:
+                await self._store.release_implementation_approval_delivery(
+                    item.decision_id,
+                    retry_seconds=_retry_delay(item.attempt_count),
+                    error="Temporal workflow did not accept the implementation approval update",
+                )
+        return delivered
+
+    async def run(self) -> None:
+        """Poll until cancelled; leasing keeps multiple API replicas safe."""
+
+        while True:
+            try:
+                await self.deliver_once()
+            except Exception:
+                _LOGGER.warning("implementation approval outbox delivery pass failed", exc_info=False)
+            await asyncio.sleep(self._poll_seconds)
+
+
 async def stop_dispatcher(task: asyncio.Task[None]) -> None:
     """Cancel and await a background dispatcher without leaking cancellation."""
 

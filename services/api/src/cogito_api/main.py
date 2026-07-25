@@ -21,6 +21,8 @@ from .models import (
     AgentRunResponse,
     AgentRunStatus,
     ArtifactReference,
+    ImplementationApprovalRequest,
+    ImplementationApprovalResponse,
     PlanApprovalRequest,
     PlanApprovalResponse,
     PlanningRunResponse,
@@ -30,7 +32,7 @@ from .models import (
     RunSubmission,
     Violation,
 )
-from .outbox import PlanApprovalOutboxDispatcher, stop_dispatcher
+from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDispatcher, stop_dispatcher
 from .observability import Telemetry, TelemetrySettings
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
@@ -86,14 +88,17 @@ def create_app(
     authenticator = ApprovalAuthenticator(settings)
 
     dispatcher = PlanApprovalOutboxDispatcher(supervisor_store, starter)
+    implementation_dispatcher = ImplementationApprovalOutboxDispatcher(supervisor_store, starter)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         delivery_task = asyncio.create_task(dispatcher.run())
+        implementation_delivery_task = asyncio.create_task(implementation_dispatcher.run())
         try:
             yield
         finally:
             await stop_dispatcher(delivery_task)
+            await stop_dispatcher(implementation_delivery_task)
             telemetry.shutdown()
             close = getattr(supervisor_store, "close", None)
             if close is not None:
@@ -251,6 +256,7 @@ def create_app(
             status=record.status,
             source_artifact=record.source_artifact,
             plan_artifact=record.plan_artifact,
+            implementation_artifact=record.implementation_artifact,
             submitted_at=record.submitted_at,
         )
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
@@ -332,6 +338,7 @@ def create_app(
                     submitted_by=updated.submitted_by,
                     workflow_id=updated.workflow_id,
                     requires_plan_approval=True,
+                    requires_implementation_approval=True,
                     traceparent=carrier.get("traceparent"),
                     tracestate=carrier.get("tracestate"),
                 )
@@ -346,6 +353,7 @@ def create_app(
             status=updated.status,
             source_artifact=updated.source_artifact,
             plan_artifact=updated.plan_artifact,
+            implementation_artifact=updated.implementation_artifact,
             submitted_at=updated.submitted_at,
         )
         return JSONResponse(content=response.model_dump(mode="json"))
@@ -382,6 +390,47 @@ def create_app(
             limit=1,
         )
         response = PlanApprovalResponse(
+            decision_id=recorded.decision_id,
+            run_id=recorded.run_id,
+            decision=recorded.decision,
+            artifact_sha256=recorded.artifact_sha256,
+            actor_id=recorded.actor_id,
+            delivered=delivered,
+            created_at=recorded.created_at,
+        )
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
+
+    @app.post("/api/v1/runs/{run_id}/approvals/implementation")
+    async def approve_implementation(
+        run_id: str,
+        request_body: ImplementationApprovalRequest,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """Persist and deliver one authenticated decision for a frozen implementation."""
+
+        if not idempotency_key or len(idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
+        principal = await authenticator.authenticate(authorization)
+        request_sha256 = sha256(
+            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        try:
+            recorded = await supervisor_store.record_implementation_approval(
+                run_id=run_id,
+                artifact_sha256=request_body.artifact_sha256,
+                decision=request_body.decision,
+                actor_id=principal.subject,
+                comment=request_body.comment,
+                idempotency_key=idempotency_key,
+                request_sha256=request_sha256,
+            )
+        except ApprovalConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        delivered = recorded.delivered or recorded.decision_id in await implementation_dispatcher.deliver_once(
+            decision_id=recorded.decision_id, limit=1
+        )
+        response = ImplementationApprovalResponse(
             decision_id=recorded.decision_id,
             run_id=recorded.run_id,
             decision=recorded.decision,
@@ -433,6 +482,7 @@ def create_app(
             status=record.status,
             source_artifact=record.source_artifact,
             plan_artifact=record.plan_artifact,
+            implementation_artifact=record.implementation_artifact,
             submitted_at=record.submitted_at,
         )
         return JSONResponse(content=response.model_dump(mode="json"))

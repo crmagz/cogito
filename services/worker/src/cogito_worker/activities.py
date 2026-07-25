@@ -5,11 +5,13 @@ from typing import Any
 from temporalio import activity
 
 from .execution import ExecutionWorkspaceService
+from .github import PullRequestPublisher, PullRequestResult
 from .harness import ClaudeCodeHarness
 from .models import (
     BackupExecutionRequest,
     ExecutionRequest,
     ExecutionWorkspace,
+    ImplementationArtifact,
     PhaseExecutionRequest,
     PhaseResult,
     ReviewFinding,
@@ -33,11 +35,13 @@ class WorkerActivities:
         telemetry: WorkerTelemetry | None = None,
         run_state: RunStateReporter | None = None,
         reviewer: LiteLLMReviewHarness | None = None,
+        pull_request_publisher: PullRequestPublisher | None = None,
     ):
         self._store = store
         self._execution_workspaces = execution_workspaces
         self._harness = harness
         self._reviewer = reviewer or _NoopReviewHarness()
+        self._pull_request_publisher = pull_request_publisher or _NoopPullRequestPublisher()
         self._telemetry = telemetry or WorkerTelemetry()
         self._run_state = run_state or NullRunStateReporter()
 
@@ -64,6 +68,26 @@ class WorkerActivities:
             record.update(metadata)
         self._store.put_status(run_id, record)
         await self._run_state.report(run_id, status, failure_detail, metadata)
+
+    @activity.defn
+    async def freeze_implementation_artifact(self, run_id: str, evidence: dict[str, Any]) -> ImplementationArtifact:
+        """Persist the exact converged implementation evidence before human approval."""
+
+        activity.logger.info("freezing implementation artifact", extra={"run_id": run_id})
+        return self._store.put_implementation_artifact(run_id, evidence)
+
+    @activity.defn
+    async def open_pull_request(self, artifact_sha256: str, evidence: dict[str, Any]) -> PullRequestResult:
+        """Create or recover exactly one GitHub pull request for an approved artifact."""
+
+        safe_evidence = dict(evidence)
+        safe_evidence["artifact_sha256"] = artifact_sha256
+        try:
+            return await self._pull_request_publisher.open_or_reuse(artifact_sha256, safe_evidence)
+        except Exception as error:
+            # HTTP/provider exceptions can retain request details. Preserve a
+            # safe category for the workflow status instead of propagating it.
+            raise RuntimeError("GitHub pull-request publication failed") from error
 
     @activity.defn
     async def provision_execution_workspace(self, request: ExecutionRequest) -> ExecutionWorkspace:
@@ -150,3 +174,11 @@ class _NoopReviewHarness:
     ) -> list[ReviewFinding]:
         del request
         return findings
+
+
+class _NoopPullRequestPublisher:
+    """Fails closed when the worker lacks an explicitly configured GitHub publisher."""
+
+    async def open_or_reuse(self, artifact_sha256: str, evidence: dict[str, Any]) -> PullRequestResult:
+        del artifact_sha256, evidence
+        raise RuntimeError("GitHub pull-request publisher is not configured")

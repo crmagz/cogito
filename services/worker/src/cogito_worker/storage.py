@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 from minio import Minio
 from minio.error import S3Error
 
+from .models import ImplementationArtifact
+
 
 class RunStore(Protocol):
     def get_plan(self, plan_ref: str) -> dict: ...
@@ -19,6 +21,8 @@ class RunStore(Protocol):
     def get_status(self, run_id: str) -> dict | None: ...
 
     def put_status(self, run_id: str, status: dict) -> None: ...
+
+    def put_implementation_artifact(self, run_id: str, artifact: dict) -> ImplementationArtifact: ...
 
 
 class SpecStore(Protocol):
@@ -85,6 +89,26 @@ class MinioRunStore:
             length=len(data),
             content_type="application/json",
         )
+
+    def put_implementation_artifact(self, run_id: str, artifact: dict) -> ImplementationArtifact:
+        """Store canonical converged evidence at a content-addressed immutable path."""
+
+        data = json.dumps(artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        digest = sha256(data).hexdigest()
+        object_name = f"runs/{run_id}/implementation/{digest}/artifact.json"
+        try:
+            self._client.stat_object(self._plan_snapshots_bucket, object_name)
+        except S3Error as error:
+            if error.code not in {"NoSuchKey", "NoSuchObject"}:
+                raise
+            self._client.put_object(
+                self._plan_snapshots_bucket,
+                object_name,
+                BytesIO(data),
+                length=len(data),
+                content_type="application/json",
+            )
+        return ImplementationArtifact(ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=digest)
 
     def _get_object(self, bucket: str, object_name: str) -> dict:
         response = self._client.get_object(bucket, object_name)

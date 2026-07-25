@@ -172,3 +172,7 @@ worker:
       existingSecret: cogito-execution-spec-reader
       accessKeySecretKey: access-key
       secretKeySecretKey: secret-key
+  github:
+    # Repository-scoped token with pull-request write permission only.
+    existingSecret: cogito-github-pull-request
+    tokenKey: token

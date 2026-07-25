@@ -8,6 +8,7 @@ import uuid
 import pytest
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.models import (
+    ExecutionWorkspace,
     PhaseResult,
     ReviewFinding,
     ReviewResult,
@@ -16,6 +17,7 @@ from cogito_worker.models import (
 )
 from cogito_worker.workflows import (
     DeveloperRunWorkflow,
+    _implementation_evidence,
     _execution_plan,
     _failure_detail,
     _is_timeout_error,
@@ -28,6 +30,7 @@ from temporalio.worker import Worker
 from .fakes import (
     InMemoryExecutionWorkspaces,
     InMemoryHarness,
+    InMemoryPullRequestPublisher,
     InMemoryReviewer,
     InMemoryRunStore,
 )
@@ -96,6 +99,7 @@ async def test_workflow_runs_activities_and_reports_completion(
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -161,6 +165,7 @@ async def test_workflow_runs_dependency_ordered_phases_in_one_workspace(
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -231,6 +236,7 @@ async def test_workflow_revises_verified_blocker_then_converges(env: WorkflowEnv
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -300,6 +306,7 @@ async def test_workflow_downgrades_unverified_blocker_without_revision(env: Work
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -358,6 +365,7 @@ async def test_workflow_escalates_when_verified_blocker_reaches_review_cap(env: 
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -409,6 +417,7 @@ async def test_workflow_escalates_when_reviewer_is_unavailable(env: WorkflowEnvi
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -470,6 +479,7 @@ async def test_workflow_backs_up_and_stops_on_a_known_ceiling(env: WorkflowEnvir
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -535,6 +545,7 @@ async def test_workflow_records_failure_when_cleanup_fails_after_backup(
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -619,6 +630,7 @@ async def test_workflow_backs_up_a_dependent_phase_for_each_trusted_ceiling(
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -688,6 +700,7 @@ async def test_workflow_records_an_ordinary_phase_failure_as_a_terminal_result(
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -739,6 +752,7 @@ async def test_workflow_waits_for_matching_plan_approval_before_provisioning(
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -801,6 +815,7 @@ async def test_workflow_rejects_stale_plan_approval(env: WorkflowEnvironment):
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,
@@ -848,6 +863,62 @@ async def test_duplicate_plan_approval_is_an_idempotent_acknowledgement() -> Non
     assert await workflow_instance.submit_plan_approval(decision) is True
     assert await workflow_instance.submit_plan_approval(decision) is True
     assert workflow_instance._plan_decision == decision
+
+
+async def test_workflow_waits_for_implementation_approval_then_opens_one_pr(env: WorkflowEnvironment) -> None:
+    store = InMemoryRunStore()
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, ["https://github.com/acme/example.git#" + "1" * 40])
+    store.plans["s3://plans/plans/run-implementation/plan.json"] = plan
+    plan_sha256 = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    workspaces = InMemoryExecutionWorkspaces()
+    publisher = InMemoryPullRequestPublisher()
+    activities = WorkerActivities(store, workspaces, InMemoryHarness(), pull_request_publisher=publisher)
+    task_queue = f"test-queue-{uuid.uuid4()}"
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[DeveloperRunWorkflow],
+        activities=[
+            activities.load_plan,
+            activities.report_status,
+            activities.freeze_implementation_artifact,
+            activities.open_pull_request,
+            activities.provision_execution_workspace,
+            activities.cleanup_execution_workspace,
+            activities.run_phase,
+            activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
+        ],
+    ):
+        handle = await env.client.start_workflow(
+            DeveloperRunWorkflow.run,
+            RunEnvelope(
+                run_id="run-implementation",
+                plan_ref="s3://plans/plans/run-implementation/plan.json",
+                plan_sha256=plan_sha256,
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+                target_repos=plan["target_repos"],
+                requires_implementation_approval=True,
+            ),
+            id=f"test-workflow-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+        await _wait_for_status(store, "run-implementation", "awaiting_implementation_approval")
+        assert len(workspaces.cleaned) == 1
+        digest = store.statuses["run-implementation"]["implementation_artifact"]["sha256"]
+        accepted = await handle.execute_update(
+            "submit_implementation_approval",
+            {"decision_id": "implementation-decision-1", "artifact_sha256": digest, "decision": "approve"},
+        )
+        result = await handle.result()
+
+    assert accepted is True
+    assert result == RunResult(run_id="run-implementation", status="completed")
+    assert len(publisher.requests) == 1
+    assert store.statuses["run-implementation"]["pull_request"]["number"] == 42
 
 
 def test_plan_snapshot_validation_rejects_a_mutated_plan() -> None:
@@ -900,6 +971,20 @@ def test_execution_plan_requires_an_approved_verification_command() -> None:
         _execution_plan(plan)
 
 
+def test_implementation_evidence_excludes_raw_command_and_reviewer_output() -> None:
+    evidence = _implementation_evidence(
+        RunEnvelope(run_id="run-safe", plan_ref="s3://plans/plan.json", plan_sha256="a" * 64, spec_ref="spec@v1#sha256=" + "a" * 64),
+        ExecutionWorkspace(
+            run_id="run-safe", job_name="job", workspace_root="/workspace", repository_origins={"/repo": "https://github.com/acme/example.git"}
+        ),
+        [{"phase_id": "phase-1", "verification": [{"command": "pytest", "passed": True, "output": "secret output"}]}],
+        {"status": "converged", "rounds": [{"round": 1, "findings": [{"severity": "advisory", "description": "safe summary", "evidence": "raw diff"}]}]},
+    )
+
+    assert "secret output" not in str(evidence)
+    assert "raw diff" not in str(evidence)
+
+
 def test_failure_detail_includes_nested_activity_cause() -> None:
     nested = RuntimeError("workspace preparation failed")
     error = RuntimeError("Activity task failed")
@@ -909,6 +994,19 @@ def test_failure_detail_includes_nested_activity_cause() -> None:
     assert (
         _failure_detail(error) == "Activity task failed | workspace preparation failed"
     )
+
+
+def test_failure_detail_stops_at_safe_github_category_and_redacts_tokens() -> None:
+    provider_error = RuntimeError("Illegal header value Bearer gho_secretToken123")
+    safe_error = RuntimeError("GitHub pull-request publication failed")
+    safe_error.cause = provider_error  # type: ignore[attr-defined]
+    error = RuntimeError("Activity task failed")
+    error.cause = safe_error  # type: ignore[attr-defined]
+
+    detail = _failure_detail(error)
+
+    assert detail == "Activity task failed | GitHub pull-request publication failed"
+    assert "gho_secretToken123" not in detail
 
 
 def test_timeout_detection_requires_a_temporal_timeout_in_the_cause_chain() -> None:

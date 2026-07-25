@@ -11,7 +11,14 @@ from typing import Protocol
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from .models import AgentRunStatus, ArtifactReference, PlanApprovalDecision, PlanConstraints, PlanningRunStatus
+from .models import (
+    AgentRunStatus,
+    ArtifactReference,
+    ImplementationApprovalDecision,
+    PlanApprovalDecision,
+    PlanConstraints,
+    PlanningRunStatus,
+)
 
 
 @dataclass(frozen=True)
@@ -31,6 +38,8 @@ class PlanningRunRecord:
     planner_model: str | None = None
     workflow_id: str | None = None
     plan_revision: int = 0
+    implementation_artifact: ArtifactReference | None = None
+    implementation_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -45,6 +54,20 @@ class ApprovalRecord:
     created_at: str
     delivered: bool
     plan_revision: int
+
+
+@dataclass(frozen=True)
+class ImplementationApprovalRecord:
+    """Immutable implementation decision and its Temporal delivery state."""
+
+    decision_id: str
+    run_id: str
+    decision: ImplementationApprovalDecision
+    artifact_sha256: str
+    actor_id: str
+    created_at: str
+    delivered: bool
+    implementation_revision: int
 
 
 @dataclass(frozen=True)
@@ -112,6 +135,31 @@ class SupervisorStore(Protocol):
     ) -> list[OutboxDelivery]: ...
 
     async def release_plan_approval_delivery(
+        self, decision_id: str, *, retry_seconds: int, error: str
+    ) -> None: ...
+
+    async def record_implementation_artifact(
+        self, run_id: str, artifact: ArtifactReference
+    ) -> None: ...
+
+    async def record_implementation_approval(
+        self,
+        run_id: str,
+        artifact_sha256: str,
+        decision: ImplementationApprovalDecision,
+        actor_id: str,
+        comment: str | None,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> ImplementationApprovalRecord: ...
+
+    async def mark_implementation_approval_delivered(self, decision_id: str) -> None: ...
+
+    async def claim_implementation_approval_deliveries(
+        self, *, limit: int, lease_seconds: int, decision_id: str | None = None
+    ) -> list[OutboxDelivery]: ...
+
+    async def release_implementation_approval_delivery(
         self, decision_id: str, *, retry_seconds: int, error: str
     ) -> None: ...
 
@@ -230,7 +278,8 @@ class PostgresSupervisorStore:
                     """
                     SELECT run_id, status, source_artifact_ref, source_artifact_sha256,
                            target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
-                           plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision
+                           plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
+                           implementation_artifact_ref, implementation_artifact_sha256, implementation_revision
                     FROM supervisor_runs
                     WHERE run_id = :run_id
                     """
@@ -260,6 +309,14 @@ class PostgresSupervisorStore:
             planner_model=row["planner_model"],
             workflow_id=row["active_workflow_id"],
             plan_revision=row["plan_revision"],
+            implementation_artifact=(
+                ArtifactReference(
+                    ref=row["implementation_artifact_ref"], sha256=row["implementation_artifact_sha256"]
+                )
+                if row["implementation_artifact_ref"] is not None
+                else None
+            ),
+            implementation_revision=row["implementation_revision"],
         )
 
     async def attach_generated_plan(
@@ -286,7 +343,8 @@ class PostgresSupervisorStore:
                       AND plan_revision = :expected_plan_revision
                     RETURNING run_id, status, source_artifact_ref, source_artifact_sha256,
                               target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
-                              plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision
+                              plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
+                              implementation_artifact_ref, implementation_artifact_sha256, implementation_revision
                     """
                 ),
                 {
@@ -328,6 +386,8 @@ class PostgresSupervisorStore:
             planner_model=row["planner_model"],
             workflow_id=row["active_workflow_id"],
             plan_revision=row["plan_revision"],
+            implementation_artifact=None,
+            implementation_revision=row["implementation_revision"],
         )
 
     async def record_plan_approval(
@@ -576,6 +636,289 @@ class PostgresSupervisorStore:
                 {"decision_id": decision_id, "retry_seconds": retry_seconds, "error": error[:1024]},
             )
 
+    async def record_implementation_artifact(self, run_id: str, artifact: ArtifactReference) -> None:
+        """Publish one immutable converged implementation artifact for approval."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs
+                    SET status = 'awaiting_implementation_approval',
+                        implementation_artifact_ref = :ref,
+                        implementation_artifact_sha256 = :sha256,
+                        implementation_revision = implementation_revision + 1
+                    WHERE run_id = :run_id AND status = 'implementing'
+                    RETURNING implementation_revision
+                    """
+                ),
+                {"run_id": run_id, "ref": artifact.ref, "sha256": artifact.sha256},
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                # Retries may report the same immutable artifact after the
+                # first status activity committed it. A different artifact is
+                # never allowed to overwrite a live approval gate.
+                current = await connection.execute(
+                    text(
+                        """
+                        SELECT status, implementation_artifact_ref, implementation_artifact_sha256
+                        FROM supervisor_runs WHERE run_id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
+                existing = current.mappings().one_or_none()
+                if (
+                    existing is None
+                    or existing["status"] != PlanningRunStatus.AWAITING_IMPLEMENTATION_APPROVAL.value
+                    or existing["implementation_artifact_ref"] != artifact.ref
+                    or existing["implementation_artifact_sha256"] != artifact.sha256
+                ):
+                    raise ApprovalConflictError("implementation artifact cannot be registered for this run")
+                return
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO supervisor_artifacts (run_id, artifact_type, ref, sha256, created_at)
+                    VALUES (:run_id, 'implementation_review', :ref, :sha256, now())
+                    ON CONFLICT (run_id, artifact_type, ref) DO NOTHING
+                    """
+                ),
+                {"run_id": run_id, "ref": artifact.ref, "sha256": artifact.sha256},
+            )
+
+    async def record_implementation_approval(
+        self,
+        run_id: str,
+        artifact_sha256: str,
+        decision: ImplementationApprovalDecision,
+        actor_id: str,
+        comment: str | None,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> ImplementationApprovalRecord:
+        """Persist a digest-bound implementation decision before Temporal delivery."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT status, implementation_artifact_sha256, active_workflow_id, implementation_revision
+                    FROM supervisor_runs WHERE run_id = :run_id FOR UPDATE
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            run = result.mappings().one_or_none()
+            if run is None:
+                raise ApprovalConflictError("planning run does not exist")
+            existing = await connection.execute(
+                text(
+                    """
+                    SELECT decision_id, run_id, decision, artifact_sha256, actor_id, created_at, delivered_at,
+                           request_sha256, implementation_revision
+                    FROM implementation_approval_decisions
+                    WHERE run_id = :run_id AND implementation_revision = :implementation_revision
+                      AND idempotency_key = :idempotency_key
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "implementation_revision": run["implementation_revision"],
+                    "idempotency_key": idempotency_key,
+                },
+            )
+            existing_row = existing.mappings().one_or_none()
+            if existing_row is not None:
+                if existing_row["request_sha256"] != request_sha256:
+                    raise ApprovalConflictError("idempotency key was reused with a different decision")
+                return _implementation_approval_record(existing_row)
+            if run["status"] != PlanningRunStatus.AWAITING_IMPLEMENTATION_APPROVAL.value:
+                raise ApprovalConflictError("planning run is not awaiting implementation approval")
+            if run["implementation_artifact_sha256"] != artifact_sha256:
+                raise ApprovalConflictError("implementation approval artifact digest is stale")
+            if not run["active_workflow_id"]:
+                raise ApprovalConflictError("planning workflow is not available for approval")
+            decision_id = str(uuid.uuid4())
+            created_at = datetime.now().astimezone()
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO implementation_approval_decisions (
+                        decision_id, run_id, decision, artifact_sha256, actor_id, comment,
+                        idempotency_key, request_sha256, created_at, implementation_revision
+                    ) VALUES (
+                        :decision_id, :run_id, :decision, :artifact_sha256, :actor_id, :comment,
+                        :idempotency_key, :request_sha256, :created_at, :implementation_revision
+                    )
+                    """
+                ),
+                {
+                    "decision_id": decision_id,
+                    "run_id": run_id,
+                    "decision": decision.value,
+                    "artifact_sha256": artifact_sha256,
+                    "actor_id": actor_id,
+                    "comment": comment,
+                    "idempotency_key": idempotency_key,
+                    "request_sha256": request_sha256,
+                    "created_at": created_at,
+                    "implementation_revision": run["implementation_revision"],
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO implementation_temporal_outbox (decision_id, run_id, workflow_id, payload, created_at)
+                    VALUES (:decision_id, :run_id, :workflow_id, CAST(:payload AS jsonb), :created_at)
+                    """
+                ),
+                {
+                    "decision_id": decision_id,
+                    "run_id": run_id,
+                    "workflow_id": run["active_workflow_id"],
+                    "payload": json.dumps(
+                        {"decision_id": decision_id, "artifact_sha256": artifact_sha256, "decision": decision.value}
+                    ),
+                    "created_at": created_at,
+                },
+            )
+        return ImplementationApprovalRecord(
+            decision_id=decision_id,
+            run_id=run_id,
+            decision=decision,
+            artifact_sha256=artifact_sha256,
+            actor_id=actor_id,
+            created_at=created_at.isoformat(),
+            delivered=False,
+            implementation_revision=run["implementation_revision"],
+        )
+
+    async def mark_implementation_approval_delivered(self, decision_id: str) -> None:
+        """Acknowledge delivery and advance only the matching implementation revision."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT run_id, decision, implementation_revision FROM implementation_approval_decisions
+                    WHERE decision_id = :decision_id FOR UPDATE
+                    """
+                ),
+                {"decision_id": decision_id},
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                return
+            await connection.execute(
+                text("UPDATE implementation_approval_decisions SET delivered_at = now() WHERE decision_id = :decision_id AND delivered_at IS NULL"),
+                {"decision_id": decision_id},
+            )
+            await connection.execute(
+                text("UPDATE implementation_temporal_outbox SET delivered_at = now(), lease_until = NULL, last_error = NULL WHERE decision_id = :decision_id"),
+                {"decision_id": decision_id},
+            )
+            status = {
+                "approve": PlanningRunStatus.FINALIZING.value,
+                "reject": PlanningRunStatus.REJECTED.value,
+                "request_revision": PlanningRunStatus.IMPLEMENTING.value,
+            }[row["decision"]]
+            clear_artifact = row["decision"] == "request_revision"
+            await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs
+                    SET status = :status,
+                        implementation_artifact_ref = CASE WHEN :clear_artifact THEN NULL ELSE implementation_artifact_ref END,
+                        implementation_artifact_sha256 = CASE WHEN :clear_artifact THEN NULL ELSE implementation_artifact_sha256 END
+                    WHERE run_id = :run_id AND implementation_revision = :implementation_revision
+                    """
+                ),
+                {
+                    "run_id": row["run_id"],
+                    "status": status,
+                    "clear_artifact": clear_artifact,
+                    "implementation_revision": row["implementation_revision"],
+                },
+            )
+
+    async def claim_implementation_approval_deliveries(
+        self, *, limit: int, lease_seconds: int, decision_id: str | None = None
+    ) -> list[OutboxDelivery]:
+        """Lease due implementation decisions without racing API replicas."""
+
+        return await self._claim_deliveries(
+            "implementation_temporal_outbox", limit=limit, lease_seconds=lease_seconds, decision_id=decision_id
+        )
+
+    async def release_implementation_approval_delivery(
+        self, decision_id: str, *, retry_seconds: int, error: str
+    ) -> None:
+        """Release a failed implementation-delivery lease."""
+
+        await self._release_delivery("implementation_temporal_outbox", decision_id, retry_seconds, error)
+
+    async def _claim_deliveries(
+        self, table: str, *, limit: int, lease_seconds: int, decision_id: str | None
+    ) -> list[OutboxDelivery]:
+        if limit < 1:
+            return []
+        filter_sql = "AND decision_id = :decision_id" if decision_id else ""
+        parameters: dict[str, object] = {"limit": limit, "lease_seconds": lease_seconds}
+        if decision_id:
+            parameters["decision_id"] = decision_id
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    SELECT decision_id, run_id, workflow_id, payload, attempt_count
+                    FROM {table}
+                    WHERE delivered_at IS NULL AND next_attempt_at <= now()
+                      AND (lease_until IS NULL OR lease_until <= now()) {filter_sql}
+                    ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT :limit
+                    """
+                ),
+                parameters,
+            )
+            rows = result.mappings().all()
+            for row in rows:
+                await connection.execute(
+                    text(
+                        f"""
+                        UPDATE {table}
+                        SET attempt_count = attempt_count + 1,
+                            lease_until = now() + (:lease_seconds * interval '1 second')
+                        WHERE decision_id = :decision_id
+                        """
+                    ),
+                    {"decision_id": row["decision_id"], "lease_seconds": lease_seconds},
+                )
+        return [
+            OutboxDelivery(
+                decision_id=row["decision_id"],
+                run_id=row["run_id"],
+                workflow_id=row["workflow_id"],
+                payload=dict(row["payload"]),
+                attempt_count=int(row["attempt_count"]) + 1,
+            )
+            for row in rows
+        ]
+
+    async def _release_delivery(self, table: str, decision_id: str, retry_seconds: int, error: str) -> None:
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    f"""
+                    UPDATE {table}
+                    SET lease_until = NULL, next_attempt_at = now() + (:retry_seconds * interval '1 second'),
+                        last_error = :error
+                    WHERE decision_id = :decision_id AND delivered_at IS NULL
+                    """
+                ),
+                {"decision_id": decision_id, "retry_seconds": retry_seconds, "error": error[:1024]},
+            )
+
     async def close(self) -> None:
         """Dispose the pool during application shutdown."""
 
@@ -595,6 +938,22 @@ def _approval_record(row: object) -> ApprovalRecord:
         created_at=values["created_at"].isoformat(),  # type: ignore[index]
         delivered=values["delivered_at"] is not None,  # type: ignore[index]
         plan_revision=values["plan_revision"],  # type: ignore[index]
+    )
+
+
+def _implementation_approval_record(row: object) -> ImplementationApprovalRecord:
+    """Build a typed implementation decision record from a SQLAlchemy mapping row."""
+
+    values = row
+    return ImplementationApprovalRecord(
+        decision_id=values["decision_id"],  # type: ignore[index]
+        run_id=values["run_id"],  # type: ignore[index]
+        decision=ImplementationApprovalDecision(values["decision"]),  # type: ignore[index]
+        artifact_sha256=values["artifact_sha256"],  # type: ignore[index]
+        actor_id=values["actor_id"],  # type: ignore[index]
+        created_at=values["created_at"].isoformat(),  # type: ignore[index]
+        delivered=values["delivered_at"] is not None,  # type: ignore[index]
+        implementation_revision=values["implementation_revision"],  # type: ignore[index]
     )
 
 

@@ -11,4 +11,4 @@ def test_migration_chain_includes_supported_kind_baseline() -> None:
     config = Config(str(api_root / "alembic.ini"))
     config.set_main_option("script_location", str(api_root / "alembic"))
 
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260719_08"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260725_09"

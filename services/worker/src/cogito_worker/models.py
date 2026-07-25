@@ -15,6 +15,7 @@ class RunEnvelope:
     submitted_at: str = ""
     submitted_by: str = ""
     requires_plan_approval: bool = False
+    requires_implementation_approval: bool = False
     traceparent: str | None = None
     tracestate: str | None = None
 
@@ -23,6 +24,14 @@ class RunEnvelope:
 class RunResult:
     run_id: str
     status: str
+
+
+@dataclass(frozen=True)
+class ImplementationArtifact:
+    """Immutable object-store identity for the converged implementation evidence."""
+
+    ref: str
+    sha256: str
 
 
 @dataclass
