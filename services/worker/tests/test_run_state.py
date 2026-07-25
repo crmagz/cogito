@@ -74,3 +74,22 @@ async def test_review_escalation_is_a_terminal_successful_lifecycle() -> None:
     _, update_parameters = connection.calls[1]
     assert update_parameters["status"] == "SUCCEEDED"
     assert update_parameters["terminal"] is True
+
+
+async def test_running_run_can_enter_implementation_approval_and_register_artifact() -> None:
+    connection = _Connection(previous_status="RUNNING")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.report(
+        "run-1",
+        "awaiting_implementation_approval",
+        None,
+        {"implementation_artifact": {"ref": "s3://plans/implementation.json", "sha256": "a" * 64}},
+    )
+
+    _, agent_update = connection.calls[1]
+    artifact_statement, artifact_update = connection.calls[2]
+    assert agent_update["status"] == "WAITING_FOR_APPROVAL"
+    assert "SET status = 'awaiting_implementation_approval'" in artifact_statement
+    assert artifact_update["sha256"] == "a" * 64

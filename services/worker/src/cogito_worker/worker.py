@@ -11,6 +11,7 @@ from .activities import WorkerActivities
 from .budgets import KubernetesLiteLLMRunKeyManager, KubernetesRunGitCredentialManager
 from .config import load_settings
 from .execution import ExecutionJobSettings, ExecutionWorkspaceService, KubernetesExecutionJobClient
+from .github import GitHubPullRequestPublisher
 from .harness import ClaudeCodeHarness
 from .observability import WorkerTelemetry
 from .review import LiteLLMReviewHarness
@@ -98,6 +99,9 @@ async def main() -> None:
         settings.reviewer_secondary_model,
         settings.reviewer_timeout_seconds,
     )
+    pull_request_publisher = GitHubPullRequestPublisher(
+        settings.github_pull_request_token, settings.github_api_url, settings.github_base_branch
+    )
     activities = WorkerActivities(
         store,
         execution_workspaces,
@@ -105,6 +109,7 @@ async def main() -> None:
         WorkerTelemetry(),
         PostgresRunStateReporter(settings.supervisor_database_url),
         reviewer,
+        pull_request_publisher,
     )
 
     worker = Worker(
@@ -114,6 +119,8 @@ async def main() -> None:
         activities=[
             activities.load_plan,
             activities.report_status,
+            activities.freeze_implementation_artifact,
+            activities.open_pull_request,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
             activities.run_phase,

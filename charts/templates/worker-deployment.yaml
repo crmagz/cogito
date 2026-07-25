@@ -75,6 +75,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.worker.reviewer.secondaryExistingSecret }}
                   key: {{ .Values.worker.reviewer.secondaryApiKeyKey }}
+            - name: COGITO_GITHUB_PULL_REQUEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.worker.github.existingSecret }}
+                  key: {{ .Values.worker.github.tokenKey }}
             {{- if .Values.observability.otlp.existingSecret }}
             - name: COGITO_TELEMETRY_OTLP_HEADERS
               valueFrom:

@@ -54,6 +54,8 @@ data:
   COGITO_REVIEWER_PRIMARY_MODEL: {{ .Values.worker.reviewer.primaryModel | quote }}
   COGITO_REVIEWER_SECONDARY_MODEL: {{ .Values.worker.reviewer.secondaryModel | quote }}
   COGITO_REVIEWER_TIMEOUT_SECONDS: {{ .Values.worker.reviewer.timeoutSeconds | quote }}
+  COGITO_GITHUB_API_URL: {{ .Values.worker.github.apiUrl | quote }}
+  COGITO_GITHUB_BASE_BRANCH: {{ .Values.worker.github.baseBranch | quote }}
   COGITO_TELEMETRY_TRACES_ENABLED: {{ .Values.observability.traces.enabled | quote }}
   COGITO_TELEMETRY_OTLP_ENDPOINT: {{ .Values.observability.otlp.endpoint | quote }}
   COGITO_TELEMETRY_OTLP_PROTOCOL: {{ .Values.observability.otlp.protocol | quote }}

@@ -14,6 +14,8 @@ class RunStarter(Protocol):
 
     async def submit_plan_approval(self, workflow_id: str, decision: dict[str, str]) -> bool: ...
 
+    async def submit_implementation_approval(self, workflow_id: str, decision: dict[str, str]) -> bool: ...
+
 
 class TemporalRunStarter:
     def __init__(self, host: str, namespace: str, task_queue: str):
@@ -49,6 +51,16 @@ class TemporalRunStarter:
         # an outbox retry recover the original accepted result even if its
         # database acknowledgement failed after Temporal accepted the update.
         return await handle.execute_update("submit_plan_approval", decision, id=decision_id)
+
+    async def submit_implementation_approval(self, workflow_id: str, decision: dict[str, str]) -> bool:
+        """Deliver an idempotent decision for the frozen implementation artifact."""
+
+        decision_id = decision.get("decision_id")
+        if not decision_id:
+            return False
+        client = await self._get_client()
+        handle = client.get_workflow_handle(workflow_id)
+        return await handle.execute_update("submit_implementation_approval", decision, id=decision_id)
 
     async def _get_client(self) -> Client:
         if self._client is None:

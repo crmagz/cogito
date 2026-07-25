@@ -92,6 +92,9 @@ class PlanningRunStatus(StrEnum):
     PLANNING = "planning"
     AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
     IMPLEMENTING = "implementing"
+    AWAITING_IMPLEMENTATION_APPROVAL = "awaiting_implementation_approval"
+    FINALIZING = "finalizing"
+    COMPLETED = "completed"
     PLANNING_FAILED = "planning_failed"
     REJECTED = "rejected"
     REVISION_REQUESTED = "revision_requested"
@@ -114,6 +117,14 @@ class AgentRunStatus(StrEnum):
 
 class PlanApprovalDecision(StrEnum):
     """Human decision permitted at the plan-approval gate."""
+
+    APPROVE = "approve"
+    REJECT = "reject"
+    REQUEST_REVISION = "request_revision"
+
+
+class ImplementationApprovalDecision(StrEnum):
+    """Human decision permitted for a converged implementation artifact."""
 
     APPROVE = "approve"
     REJECT = "reject"
@@ -164,6 +175,9 @@ class PlanningRunResponse(BaseModel):
     source_artifact: ArtifactReference = Field(description="Immutable submitted specification")
     plan_artifact: ArtifactReference | None = Field(
         default=None, description="Immutable generated plan when planning has completed"
+    )
+    implementation_artifact: ArtifactReference | None = Field(
+        default=None, description="Frozen implementation and review evidence when approval is pending"
     )
     submitted_at: str = Field(description="ISO 8601 submission timestamp")
 
@@ -222,6 +236,45 @@ class PlanApprovalResponse(BaseModel):
     created_at: str = Field(description="ISO 8601 decision timestamp")
 
 
+class ImplementationApprovalRequest(BaseModel):
+    """Digest-bound human decision submitted after implementation review converges."""
+
+    decision: ImplementationApprovalDecision = Field(
+        description="Human approval, rejection, or revision request for the frozen implementation"
+    )
+    artifact_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the exact implementation and review artifact being reviewed",
+    )
+    comment: str | None = Field(
+        default=None,
+        max_length=10_000,
+        description="Required rationale for rejection or revision requests",
+    )
+
+    @model_validator(mode="after")
+    def require_comment_for_non_approval(self) -> "ImplementationApprovalRequest":
+        """Ensure non-approval decisions retain reviewer context."""
+
+        if self.decision is not ImplementationApprovalDecision.APPROVE and not (self.comment and self.comment.strip()):
+            raise ValueError("comment is required when rejecting or requesting revision")
+        return self
+
+
+class ImplementationApprovalResponse(BaseModel):
+    """Auditable result of an accepted idempotent implementation decision."""
+
+    decision_id: str = Field(description="Immutable decision identifier")
+    run_id: str = Field(description="Planning run identifier")
+    decision: ImplementationApprovalDecision = Field(description="Recorded implementation decision")
+    artifact_sha256: str = Field(description="Digest reviewed by the human")
+    actor_id: str = Field(description="Authenticated reviewer subject")
+    delivered: bool = Field(description="Whether Temporal accepted the decision update")
+    created_at: str = Field(description="ISO 8601 decision timestamp")
+
+
 class RunEnvelope(BaseModel):
     run_id: str
     plan_ref: str = Field(description="Object store path of the immutable plan snapshot")
@@ -239,6 +292,10 @@ class RunEnvelope(BaseModel):
     requires_plan_approval: bool = Field(
         default=False,
         description="Whether the workflow must wait for a digest-bound plan decision before execution",
+    )
+    requires_implementation_approval: bool = Field(
+        default=False,
+        description="Whether converged implementation evidence must receive a human decision before finalization",
     )
     traceparent: str | None = Field(default=None, max_length=512)
     tracestate: str | None = Field(default=None, max_length=4096)

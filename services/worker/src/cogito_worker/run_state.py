@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 _STATUS_MAP = {
     "claimed": "STARTING",
     "awaiting_plan_approval": "WAITING_FOR_APPROVAL",
+    "awaiting_implementation_approval": "WAITING_FOR_APPROVAL",
+    "finalizing": "RUNNING",
     "implementing": "RUNNING",
     "adversarial_review": "RUNNING",
     "phase_complete": "RUNNING",
@@ -29,7 +31,14 @@ _ALLOWED_TRANSITIONS = {
     "PENDING": {"QUEUED"},
     "QUEUED": {"STARTING", "FAILED", "CANCELLED"},
     "STARTING": {"RUNNING", "WAITING_FOR_APPROVAL", "FAILED", "CANCELLED", "TIMED_OUT"},
-    "RUNNING": {"WAITING_FOR_TOOL", "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"},
+    "RUNNING": {
+        "WAITING_FOR_TOOL",
+        "WAITING_FOR_APPROVAL",
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLED",
+        "TIMED_OUT",
+    },
     "WAITING_FOR_TOOL": {"RUNNING", "FAILED", "CANCELLED", "TIMED_OUT"},
     "WAITING_FOR_APPROVAL": {"RUNNING", "PENDING", "CANCELLED", "TIMED_OUT"},
 }
@@ -75,6 +84,7 @@ class PostgresRunStateReporter:
         safe_metadata = {"status": status}
         if metadata and "phase_result" in metadata:
             safe_metadata["phase_result"] = "recorded"
+        implementation_artifact = metadata.get("implementation_artifact") if metadata else None
         async with self._engine.begin() as connection:
             result = await connection.execute(
                 text("SELECT status FROM agent_runs WHERE run_id = :run_id FOR UPDATE"),
@@ -115,6 +125,73 @@ class PostgresRunStateReporter:
                     "error_summary": _safe_error(failure_detail),
                 },
             )
+            if status == "awaiting_implementation_approval":
+                if not isinstance(implementation_artifact, dict):
+                    raise ValueError("implementation approval requires a frozen artifact")
+                ref = implementation_artifact.get("ref")
+                digest = implementation_artifact.get("sha256")
+                if not isinstance(ref, str) or not isinstance(digest, str):
+                    raise ValueError("implementation approval artifact is invalid")
+                artifact_result = await connection.execute(
+                    text(
+                        """
+                        UPDATE supervisor_runs
+                        SET status = 'awaiting_implementation_approval',
+                            implementation_artifact_ref = :ref,
+                            implementation_artifact_sha256 = :sha256,
+                            implementation_revision = implementation_revision + 1
+                        WHERE run_id = :run_id AND status = 'implementing'
+                        RETURNING implementation_revision
+                        """
+                    ),
+                    {"run_id": run_id, "ref": ref, "sha256": digest},
+                )
+                if artifact_result.mappings().one_or_none() is not None:
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO supervisor_artifacts (run_id, artifact_type, ref, sha256, created_at)
+                            VALUES (:run_id, 'implementation_review', :ref, :sha256, :created_at)
+                            ON CONFLICT (run_id, artifact_type, ref) DO NOTHING
+                            """
+                        ),
+                        {"run_id": run_id, "ref": ref, "sha256": digest, "created_at": now},
+                    )
+            pull_request = metadata.get("pull_request") if metadata else None
+            if status == "completed" and isinstance(pull_request, dict) and isinstance(implementation_artifact, dict):
+                number = pull_request.get("number")
+                url = pull_request.get("url")
+                digest = implementation_artifact.get("sha256")
+                if isinstance(number, int) and isinstance(url, str) and isinstance(digest, str):
+                    repository = _repository_from_pull_request_url(url)
+                    if repository is not None:
+                        await connection.execute(
+                            text(
+                                """
+                                INSERT INTO implementation_pull_requests (run_id, artifact_sha256, repository, number, url, created_at)
+                                VALUES (:run_id, :artifact_sha256, :repository, :number, :url, :created_at)
+                                ON CONFLICT (run_id) DO NOTHING
+                                """
+                            ),
+                            {
+                                "run_id": run_id,
+                                "artifact_sha256": digest,
+                                "repository": repository,
+                                "number": number,
+                                "url": url,
+                                "created_at": now,
+                            },
+                        )
+                    await connection.execute(
+                        text(
+                            """
+                            UPDATE supervisor_runs SET status = 'completed'
+                            WHERE run_id = :run_id AND status = 'finalizing'
+                              AND implementation_artifact_sha256 = :artifact_sha256
+                            """
+                        ),
+                        {"run_id": run_id, "artifact_sha256": digest},
+                    )
             await connection.execute(
                 text(
                     """
@@ -140,3 +217,15 @@ def _safe_error(value: str | None) -> str | None:
     if not value:
         return None
     return " ".join(value.split())[:4096]
+
+
+def _repository_from_pull_request_url(url: str) -> str | None:
+    """Extract an owner/repository pair from a GitHub PR URL without accepting arbitrary URLs."""
+
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if parsed.scheme != "https" or parsed.hostname != "github.com" or len(parts) != 4 or parts[2] != "pull":
+        return None
+    return f"{parts[0]}/{parts[1]}"

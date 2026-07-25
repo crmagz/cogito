@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import timedelta
 
 from temporalio import workflow
@@ -13,6 +14,7 @@ with workflow.unsafe.imports_passed_through():
     from .models import (
         BackupExecutionRequest,
         ExecutionRequest,
+        ImplementationArtifact,
         PhaseExecutionRequest,
         PhaseResult,
         PlanPhase,
@@ -42,7 +44,11 @@ class DeveloperRunWorkflow:
         self._awaiting_plan_approval = False
         self._plan_sha256 = ""
         self._plan_decision: dict[str, str] | None = None
-        self._processed_decision_ids: set[str] = set()
+        self._awaiting_implementation_approval = False
+        self._implementation_sha256 = ""
+        self._implementation_decision: dict[str, str] | None = None
+        self._processed_plan_decision_ids: set[str] = set()
+        self._processed_implementation_decision_ids: set[str] = set()
 
     @workflow.update
     async def submit_plan_approval(self, decision: dict[str, str]) -> bool:
@@ -51,7 +57,7 @@ class DeveloperRunWorkflow:
         decision_id = decision.get("decision_id", "")
         if not decision_id:
             return False
-        if decision_id in self._processed_decision_ids:
+        if decision_id in self._processed_plan_decision_ids:
             # The control-plane outbox can retry after Temporal has accepted
             # the update but before it records delivery. A repeated durable
             # decision ID is therefore an acknowledgement, never a new vote.
@@ -62,8 +68,27 @@ class DeveloperRunWorkflow:
             return False
         if decision.get("decision") not in {"approve", "reject", "request_revision"}:
             return False
-        self._processed_decision_ids.add(decision_id)
+        self._processed_plan_decision_ids.add(decision_id)
         self._plan_decision = decision
+        return True
+
+    @workflow.update
+    async def submit_implementation_approval(self, decision: dict[str, str]) -> bool:
+        """Accept a decision only for the exact frozen implementation artifact."""
+
+        decision_id = decision.get("decision_id", "")
+        if not decision_id:
+            return False
+        if decision_id in self._processed_implementation_decision_ids:
+            return True
+        if not self._awaiting_implementation_approval:
+            return False
+        if decision.get("artifact_sha256") != self._implementation_sha256:
+            return False
+        if decision.get("decision") not in {"approve", "reject", "request_revision"}:
+            return False
+        self._processed_implementation_decision_ids.add(decision_id)
+        self._implementation_decision = decision
         return True
 
     @workflow.run
@@ -138,6 +163,8 @@ class DeveloperRunWorkflow:
             phase_results: list[dict] = []
             stopped_phase: tuple[PlanPhase, PhaseResult] | None = None
             review_outcome: dict | None = None
+            implementation_artifact: ImplementationArtifact | None = None
+            implementation_evidence: dict | None = None
             try:
                 await workflow.execute_activity(
                     WorkerActivities.report_status,
@@ -220,6 +247,18 @@ class DeveloperRunWorkflow:
                         max_review_rounds,
                         review_profile,
                     )
+                    if review_outcome["status"] == "converged":
+                        implementation_evidence = _implementation_evidence(
+                            envelope, workspace, phase_results, review_outcome
+                        )
+                        implementation_artifact = await workflow.execute_activity(
+                            WorkerActivities.freeze_implementation_artifact,
+                            args=[
+                                envelope.run_id,
+                                implementation_evidence,
+                            ],
+                            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                        )
             finally:
                 await workflow.execute_activity(
                     WorkerActivities.cleanup_execution_workspace,
@@ -258,9 +297,79 @@ class DeveloperRunWorkflow:
                     start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 )
                 return RunResult(run_id=envelope.run_id, status="escalated")
+            if not envelope.requires_implementation_approval:
+                await workflow.execute_activity(
+                    WorkerActivities.report_status,
+                    args=[envelope.run_id, "completed", None, {"review": review_outcome}],
+                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                )
+                return RunResult(run_id=envelope.run_id, status="completed")
+            if implementation_artifact is None:
+                raise RuntimeError("converged review did not produce an implementation artifact")
+            assert implementation_evidence is not None
+            self._implementation_sha256 = implementation_artifact.sha256
+            self._awaiting_implementation_approval = True
             await workflow.execute_activity(
                 WorkerActivities.report_status,
-                args=[envelope.run_id, "completed", None, {"review": review_outcome}],
+                args=[
+                    envelope.run_id,
+                    "awaiting_implementation_approval",
+                    None,
+                    {
+                        "implementation_artifact": {
+                            "ref": implementation_artifact.ref,
+                            "sha256": implementation_artifact.sha256,
+                        },
+                        "review": implementation_evidence["review"],
+                    },
+                ],
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            )
+            await workflow.wait_condition(lambda: self._implementation_decision is not None)
+            self._awaiting_implementation_approval = False
+            assert self._implementation_decision is not None
+            decision = self._implementation_decision["decision"]
+            if decision == "reject":
+                await workflow.execute_activity(
+                    WorkerActivities.report_status,
+                    args=[envelope.run_id, "rejected", None, {"implementation_artifact": {"sha256": implementation_artifact.sha256}}],
+                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                )
+                return RunResult(run_id=envelope.run_id, status="rejected")
+            if decision == "request_revision":
+                await workflow.execute_activity(
+                    WorkerActivities.report_status,
+                    args=[envelope.run_id, "revision_requested", None, {"implementation_artifact": {"sha256": implementation_artifact.sha256}}],
+                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                )
+                return RunResult(run_id=envelope.run_id, status="revision_requested")
+            await workflow.execute_activity(
+                WorkerActivities.report_status,
+                args=[envelope.run_id, "finalizing", None, {"implementation_artifact": {"sha256": implementation_artifact.sha256}}],
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            )
+            pull_request = await workflow.execute_activity(
+                WorkerActivities.open_pull_request,
+                args=[implementation_artifact.sha256, implementation_evidence],
+                start_to_close_timeout=_REVIEW_ACTIVITY_TIMEOUT,
+                retry_policy=_PROVISION_RETRY_POLICY,
+            )
+            await workflow.execute_activity(
+                WorkerActivities.report_status,
+                args=[
+                    envelope.run_id,
+                    "completed",
+                    None,
+                    {
+                        "review": implementation_evidence["review"],
+                        "pull_request": {
+                            "number": pull_request.number,
+                            "url": pull_request.url,
+                            "reused": pull_request.reused,
+                        },
+                        "implementation_artifact": {"sha256": implementation_artifact.sha256},
+                    },
+                ],
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
             )
             return RunResult(run_id=envelope.run_id, status="completed")
@@ -274,6 +383,102 @@ class DeveloperRunWorkflow:
             # prevents Temporal from replaying this workflow task indefinitely
             # after the status has already been recorded as failed.
             return RunResult(run_id=envelope.run_id, status="failed")
+
+
+def _implementation_evidence(envelope: RunEnvelope, workspace, phase_results: list[dict], review: dict) -> dict:
+    """Build compact, canonical approval evidence without source, prompts, or raw diffs."""
+
+    commits: dict[str, str] = {}
+    branch_name = ""
+    turns_used = 0
+    cost_usd = 0.0
+    models: set[str] = set()
+    safe_phase_results: list[dict] = []
+    for phase in phase_results:
+        if not isinstance(phase, dict):
+            continue
+        if not branch_name and isinstance(phase.get("branch_name"), str):
+            branch_name = phase["branch_name"]
+        phase_commits = phase.get("commits")
+        if isinstance(phase_commits, dict):
+            commits.update({key: value for key, value in phase_commits.items() if isinstance(key, str) and isinstance(value, str)})
+        if isinstance(phase.get("turns_used"), int):
+            turns_used += phase["turns_used"]
+        if isinstance(phase.get("cost_usd"), (int, float)):
+            cost_usd += float(phase["cost_usd"])
+        safe_phase_results.append(
+            {
+                key: phase[key]
+                for key in ("phase_id", "branch_name", "succeeded", "turns_used", "cost_usd", "changed_files", "commits", "outcome", "ceiling")
+                if key in phase
+            }
+            | {
+                "verification": [
+                    {"command": item.get("command"), "passed": item.get("passed")}
+                    for item in phase.get("verification", [])
+                    if isinstance(item, dict)
+                ]
+            }
+        )
+    rounds = review.get("rounds") if isinstance(review.get("rounds"), list) else []
+    for round_evidence in rounds:
+        if not isinstance(round_evidence, dict):
+            continue
+        findings = round_evidence.get("findings")
+        if not isinstance(findings, list):
+            continue
+        for finding in findings:
+            if isinstance(finding, dict) and isinstance(finding.get("model"), str):
+                models.add(finding["model"])
+        revision = round_evidence.get("revision")
+        if isinstance(revision, dict) and isinstance(revision.get("commits"), dict):
+            commits.update(
+                {key: value for key, value in revision["commits"].items() if isinstance(key, str) and isinstance(value, str)}
+            )
+    return {
+        "version": 1,
+        "run_id": envelope.run_id,
+        "plan_sha256": envelope.plan_sha256,
+        "branch_name": branch_name,
+        "commits": dict(sorted(commits.items())),
+        "repository_origin": next(iter(workspace.repository_origins.values()), ""),
+        "phase_results": safe_phase_results,
+        "review": _safe_review_evidence(review),
+        "models": sorted(models),
+        "turns_used": turns_used,
+        "cost_usd": round(cost_usd, 6),
+    }
+
+
+def _safe_review_evidence(review: dict) -> dict:
+    """Retain classified findings while excluding raw reviewer evidence and command output."""
+
+    safe_rounds: list[dict] = []
+    for item in review.get("rounds", []):
+        if not isinstance(item, dict):
+            continue
+        findings: list[dict] = []
+        for finding in item.get("findings", []):
+            if not isinstance(finding, dict):
+                continue
+            safe = {
+                key: finding[key]
+                for key in ("severity", "lens", "model", "file", "line", "verified")
+                if key in finding
+            }
+            if isinstance(finding.get("description"), str):
+                safe["description"] = finding["description"][:500]
+            findings.append(safe)
+        round_evidence: dict = {"round": item.get("round"), "findings": findings}
+        revision = item.get("revision")
+        if isinstance(revision, dict):
+            round_evidence["revision"] = {
+                key: revision[key]
+                for key in ("succeeded", "commits", "changed_files")
+                if key in revision
+            }
+        safe_rounds.append(round_evidence)
+    return {"status": review.get("status"), "rounds": safe_rounds, "reason": review.get("reason")}
 
 
 def _validate_plan_snapshot(plan: dict, envelope: RunEnvelope) -> None:
@@ -521,12 +726,31 @@ def _failure_detail(error: Exception) -> str:
     messages: list[str] = []
     current: BaseException | None = error
     while current is not None and len(messages) < 5:
-        message = " ".join(str(current).split())
+        message = _redact_failure_message(" ".join(str(current).split()))
         if message and message not in messages:
             messages.append(message)
+        # The activity deliberately wraps provider failures in this safe
+        # category. Do not traverse into a provider's exception chain: those
+        # exceptions can retain request headers or credentials.
+        if message == "GitHub pull-request publication failed":
+            break
         next_error = getattr(current, "cause", None)
         current = next_error if isinstance(next_error, BaseException) else None
     return " | ".join(messages)[:4096] or error.__class__.__name__
+
+
+_FAILURE_SECRETS = (
+    re.compile(r"(?i)Bearer\\s+[^\\s'\\\"]+"),
+    re.compile(r"\\b(?:gh[opsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\\b"),
+)
+
+
+def _redact_failure_message(message: str) -> str:
+    """Prevent known bearer-token forms from entering durable status evidence."""
+
+    for pattern in _FAILURE_SECRETS:
+        message = pattern.sub("[REDACTED]", message)
+    return message
 
 
 def _is_timeout_error(error: BaseException) -> bool:
