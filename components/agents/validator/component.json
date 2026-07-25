@@ -1,0 +1,16 @@
+{
+  "registration_id": "validator",
+  "version": "1.0.0",
+  "kind": "agent",
+  "component_id": "validator",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "adapter",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "implementation_evidence", "version": "1"},
+  "output_schema": {"schema_id": "validation_gate_result", "version": "1"},
+  "capabilities": ["evaluate_validation_gate"],
+  "grants": [{"tool_id": "validation_runner", "tool_version": "1.0.0", "scope": "approved_verification"}],
+  "quality_gates": ["artifact_contract", "no_repository_mutation", "bounded_output"]
+}

@@ -46,6 +46,7 @@ data:
   COGITO_AUTH_OIDC_JWKS_URL: {{ default "" $oidcAuth.jwksUrl | quote }}
   COGITO_AUTH_OIDC_ROLE_CLAIM: {{ default "roles" $oidcAuth.roleClaim | quote }}
   COGITO_AUTH_OIDC_APPROVAL_ROLE: {{ default "cogito-approver" $oidcAuth.approvalRole | quote }}
+  COGITO_REGISTRY_CATALOG_PATH: "/app/components"
   COGITO_TELEMETRY_TRACES_ENABLED: {{ .Values.observability.traces.enabled | quote }}
   COGITO_TELEMETRY_METRICS_ENABLED: {{ .Values.observability.metrics.enabled | quote }}
   COGITO_TELEMETRY_SPAN_EVENTS_ENABLED: {{ .Values.observability.spanEvents.enabled | quote }}

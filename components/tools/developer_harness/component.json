@@ -1,0 +1,15 @@
+{
+  "registration_id": "developer_harness",
+  "version": "1.0.0",
+  "kind": "tool",
+  "component_id": "developer_harness",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "adapter",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "phase_execution_request", "version": "1"},
+  "output_schema": {"schema_id": "phase_execution_result", "version": "1"},
+  "capabilities": ["execute_phase", "backup_phase", "address_review"],
+  "quality_gates": ["approved_plan_only", "run_scoped_workspace", "bounded_command_output"]
+}

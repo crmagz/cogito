@@ -1,0 +1,15 @@
+{
+  "registration_id": "review_model",
+  "version": "1.0.0",
+  "kind": "tool",
+  "component_id": "review_model",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "adapter",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "review_request", "version": "1"},
+  "output_schema": {"schema_id": "review_findings", "version": "1"},
+  "capabilities": ["review_diff", "verify_blockers"],
+  "quality_gates": ["read_only_scope", "credential_broker", "finding_redaction"]
+}

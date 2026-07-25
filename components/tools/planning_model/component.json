@@ -1,0 +1,15 @@
+{
+  "registration_id": "planning_model",
+  "version": "1.0.0",
+  "kind": "tool",
+  "component_id": "planning_model",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "adapter",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "planning_prompt", "version": "1"},
+  "output_schema": {"schema_id": "normalized_plan", "version": "1"},
+  "capabilities": ["complete_planning_request"],
+  "quality_gates": ["credential_broker", "bounded_output", "prompt_redaction"]
+}

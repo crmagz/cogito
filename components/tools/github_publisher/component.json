@@ -1,0 +1,15 @@
+{
+  "registration_id": "github_publisher",
+  "version": "1.0.0",
+  "kind": "tool",
+  "component_id": "github_publisher",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "adapter",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "approved_implementation", "version": "1"},
+  "output_schema": {"schema_id": "pull_request_result", "version": "1"},
+  "capabilities": ["open_or_reuse_pull_request"],
+  "quality_gates": ["implementation_approval", "artifact_marker_idempotency", "repository_scope"]
+}

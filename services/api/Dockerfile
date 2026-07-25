@@ -12,13 +12,14 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /build
 
-COPY pyproject.toml uv.lock ./
+COPY services/api/pyproject.toml services/api/uv.lock ./
 
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY src ./src
-COPY alembic ./alembic
-COPY alembic.ini ./alembic.ini
+COPY services/api/src ./src
+COPY services/api/alembic ./alembic
+COPY services/api/alembic.ini ./alembic.ini
+COPY components ./components
 
 RUN uv sync --frozen --no-dev --no-editable
 
@@ -47,6 +48,7 @@ WORKDIR /app
 COPY --from=builder --chown=cogito:cogito /opt/venv /opt/venv
 COPY --from=builder --chown=cogito:cogito /build/alembic /app/alembic
 COPY --from=builder --chown=cogito:cogito /build/alembic.ini /app/alembic.ini
+COPY --from=builder --chown=cogito:cogito /build/components /app/components
 
 USER cogito
 

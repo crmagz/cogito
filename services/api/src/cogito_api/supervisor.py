@@ -18,7 +18,10 @@ from .models import (
     PlanApprovalDecision,
     PlanConstraints,
     PlanningRunStatus,
+    RegistrationManifest,
+    RegistrationReference,
 )
+from .registry import manifest_sha256, registration_reference
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,10 @@ class ApprovalConflictError(Exception):
     """Raised when a decision cannot safely apply to the current run state."""
 
 
+class RegistryConflictError(Exception):
+    """Raised when a registry release or pinned run resolution is unsafe."""
+
+
 class SupervisorStore(Protocol):
     """Durable source of truth for supervisor run state."""
 
@@ -166,6 +173,21 @@ class SupervisorStore(Protocol):
     async def create_agent_run(self, record: AgentRunRecord) -> None: ...
 
     async def get_agent_run(self, run_id: str) -> AgentRunRecord | None: ...
+
+    async def bootstrap_registry(
+        self,
+        manifests: list[RegistrationManifest],
+        policy_revision: str,
+        assignments: dict[str, str],
+    ) -> None: ...
+
+    async def resolve_run_registration(
+        self,
+        run_id: str,
+        role: str,
+        policy_revision: str,
+        manifest: RegistrationManifest,
+    ) -> RegistrationReference: ...
 
 
 class PostgresSupervisorStore:
@@ -270,6 +292,183 @@ class PostgresSupervisorStore:
             )
             row = result.mappings().one_or_none()
         return _agent_run_record(row) if row is not None else None
+
+    async def bootstrap_registry(
+        self,
+        manifests: list[RegistrationManifest],
+        policy_revision: str,
+        assignments: dict[str, str],
+    ) -> None:
+        """Persist immutable releases and one policy revision without rewriting either."""
+
+        async with self._engine.begin() as connection:
+            for manifest in manifests:
+                manifest_json = manifest.model_dump(mode="json")
+                digest = manifest_sha256(manifest)
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO registry_registrations (
+                            registration_id, version, kind, component_id, component_version, lifecycle, maturity,
+                            execution_class, owner, input_schema_id, input_schema_version, output_schema_id,
+                            output_schema_version, manifest, manifest_sha256, created_at
+                        ) VALUES (
+                            :registration_id, :version, :kind, :component_id, :component_version, :lifecycle,
+                            :maturity, :execution_class, :owner, :input_schema_id, :input_schema_version,
+                            :output_schema_id, :output_schema_version, CAST(:manifest AS jsonb), :manifest_sha256,
+                            now()
+                        ) ON CONFLICT (registration_id, version) DO NOTHING
+                        """
+                    ),
+                    {
+                        "registration_id": manifest.registration_id,
+                        "version": manifest.version,
+                        "kind": manifest.kind.value,
+                        "component_id": manifest.component_id,
+                        "component_version": manifest.component_version,
+                        "lifecycle": manifest.lifecycle.value,
+                        "maturity": manifest.maturity.value,
+                        "execution_class": manifest.execution_class.value,
+                        "owner": manifest.owner,
+                        "input_schema_id": manifest.input_schema.schema_id,
+                        "input_schema_version": manifest.input_schema.version,
+                        "output_schema_id": manifest.output_schema.schema_id,
+                        "output_schema_version": manifest.output_schema.version,
+                        "manifest": json.dumps(manifest_json, sort_keys=True, separators=(",", ":")),
+                        "manifest_sha256": digest,
+                    },
+                )
+                result = await connection.execute(
+                    text(
+                        """
+                        SELECT manifest_sha256 FROM registry_registrations
+                        WHERE registration_id = :registration_id AND version = :version
+                        """
+                    ),
+                    {"registration_id": manifest.registration_id, "version": manifest.version},
+                )
+                existing = result.mappings().one()
+                if existing["manifest_sha256"] != digest:
+                    raise RegistryConflictError("registration version already exists with different manifest content")
+            for manifest in manifests:
+                for grant in manifest.grants:
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO registry_grants (
+                                agent_registration_id, agent_version, tool_registration_id, tool_version, scope
+                            ) VALUES (:agent_id, :agent_version, :tool_id, :tool_version, :scope)
+                            ON CONFLICT DO NOTHING
+                            """
+                        ),
+                        {
+                            "agent_id": manifest.registration_id,
+                            "agent_version": manifest.version,
+                            "tool_id": grant.tool_id,
+                            "tool_version": grant.tool_version,
+                            "scope": grant.scope,
+                        },
+                    )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO registry_policy_revisions (policy_revision, assignments, created_at)
+                    VALUES (:policy_revision, CAST(:assignments AS jsonb), now())
+                    ON CONFLICT (policy_revision) DO NOTHING
+                    """
+                ),
+                {"policy_revision": policy_revision, "assignments": json.dumps(assignments, sort_keys=True)},
+            )
+            policy = await connection.execute(
+                text("SELECT assignments FROM registry_policy_revisions WHERE policy_revision = :policy_revision"),
+                {"policy_revision": policy_revision},
+            )
+            if dict(policy.mappings().one()["assignments"]) != assignments:
+                raise RegistryConflictError("policy revision already exists with different assignments")
+
+    async def resolve_run_registration(
+        self,
+        run_id: str,
+        role: str,
+        policy_revision: str,
+        manifest: RegistrationManifest,
+    ) -> RegistrationReference:
+        """Pin an active policy-selected release once, preserving retries and in-flight runs."""
+
+        expected = registration_reference(role, manifest)
+        async with self._engine.begin() as connection:
+            existing = await connection.execute(
+                text(
+                    """
+                    SELECT registration_id, registration_version, manifest_sha256, component_id, component_version
+                    FROM run_registration_resolutions WHERE run_id = :run_id AND role = :role FOR UPDATE
+                    """
+                ),
+                {"run_id": run_id, "role": role},
+            )
+            current = existing.mappings().one_or_none()
+            if current is not None:
+                if (
+                    current["registration_id"] != expected.registration_id
+                    or current["registration_version"] != expected.version
+                    or current["manifest_sha256"] != expected.manifest_sha256
+                ):
+                    raise RegistryConflictError("run role is already pinned to a different registration release")
+                return expected
+            policy = await connection.execute(
+                text("SELECT assignments FROM registry_policy_revisions WHERE policy_revision = :policy_revision"),
+                {"policy_revision": policy_revision},
+            )
+            policy_row = policy.mappings().one_or_none()
+            if policy_row is None:
+                raise RegistryConflictError("registry policy revision is not available")
+            assignment = dict(policy_row["assignments"]).get(role)
+            if assignment != f"{manifest.registration_id}@{manifest.version}":
+                raise RegistryConflictError("registry policy does not select the requested registration release")
+            registration = await connection.execute(
+                text(
+                    """
+                    SELECT lifecycle, manifest_sha256, component_id, component_version
+                    FROM registry_registrations
+                    WHERE registration_id = :registration_id AND version = :version
+                    FOR UPDATE
+                    """
+                ),
+                {"registration_id": manifest.registration_id, "version": manifest.version},
+            )
+            row = registration.mappings().one_or_none()
+            if row is None or row["lifecycle"] != "active":
+                raise RegistryConflictError("registration release is not active")
+            if (
+                row["manifest_sha256"] != expected.manifest_sha256
+                or row["component_id"] != expected.component_id
+                or row["component_version"] != expected.component_version
+            ):
+                raise RegistryConflictError("registration release does not match its declared manifest")
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO run_registration_resolutions (
+                        run_id, role, registration_id, registration_version, manifest_sha256,
+                        component_id, component_version, policy_revision, created_at
+                    ) VALUES (
+                        :run_id, :role, :registration_id, :registration_version, :manifest_sha256,
+                        :component_id, :component_version, :policy_revision, now()
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "role": role,
+                    "registration_id": expected.registration_id,
+                    "registration_version": expected.version,
+                    "manifest_sha256": expected.manifest_sha256,
+                    "component_id": expected.component_id,
+                    "component_version": expected.component_version,
+                    "policy_revision": policy_revision,
+                },
+            )
+        return expected
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         async with self._engine.connect() as connection:

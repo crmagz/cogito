@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
         RunEnvelope,
         RunResult,
     )
+    from .registry import require_role
 
 _ACTIVITY_TIMEOUT = timedelta(seconds=30)
 # Workspace provisioning includes pod scheduling, repository preparation, and
@@ -94,6 +95,7 @@ class DeveloperRunWorkflow:
     @workflow.run
     async def run(self, envelope: RunEnvelope) -> RunResult:
         try:
+            require_role(envelope, "planner")
             await workflow.execute_activity(
                 WorkerActivities.report_status,
                 args=[envelope.run_id, "claimed"],
@@ -143,6 +145,9 @@ class DeveloperRunWorkflow:
                         run_id=envelope.run_id, status="revision_requested"
                     )
             workspace = await workflow.execute_activity(
+                # A resolved registry run must name the developer role before
+                # it receives a workspace or developer-tool capability.
+                # Legacy envelopes remain supported while migration is active.
                 WorkerActivities.provision_execution_workspace,
                 args=[
                     ExecutionRequest(
@@ -172,6 +177,7 @@ class DeveloperRunWorkflow:
                     start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 )
                 deadline = workflow.now() + run_timeout
+                require_role(envelope, "developer")
                 for phase in phases:
                     remaining = deadline - workflow.now()
                     if remaining <= timedelta():
@@ -348,6 +354,7 @@ class DeveloperRunWorkflow:
                 args=[envelope.run_id, "finalizing", None, {"implementation_artifact": {"sha256": implementation_artifact.sha256}}],
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
             )
+            require_role(envelope, "pull_request_publisher")
             pull_request = await workflow.execute_activity(
                 WorkerActivities.open_pull_request,
                 args=[implementation_artifact.sha256, implementation_evidence],
@@ -530,6 +537,7 @@ async def _review_implementation(
 ) -> dict:
     """Run bounded review/revision rounds without allowing advisory churn."""
 
+    require_role(envelope, "reviewer")
     rounds: list[dict] = []
     for round_number in range(1, max_review_rounds + 1):
         remaining = deadline - workflow.now()

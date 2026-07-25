@@ -1,0 +1,15 @@
+{
+  "registration_id": "ephemeral_environment",
+  "version": "1.0.0",
+  "kind": "tool",
+  "component_id": "ephemeral_environment",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "adapter",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "ephemeral_environment_request", "version": "1"},
+  "output_schema": {"schema_id": "ephemeral_test_evidence", "version": "1"},
+  "capabilities": ["provision_disposable_environment", "collect_evidence", "cleanup_environment"],
+  "quality_gates": ["disposable_scope", "cleanup_evidence", "no_production_credentials"]
+}

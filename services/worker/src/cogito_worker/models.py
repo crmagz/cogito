@@ -4,6 +4,18 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+@dataclass(frozen=True)
+class RegistrationReference:
+    """Pinned non-secret registry identity received from the Supervisor."""
+
+    role: str
+    registration_id: str
+    version: str
+    manifest_sha256: str
+    component_id: str
+    component_version: str
+
+
 @dataclass
 class RunEnvelope:
     run_id: str
@@ -16,6 +28,7 @@ class RunEnvelope:
     submitted_by: str = ""
     requires_plan_approval: bool = False
     requires_implementation_approval: bool = False
+    registry_resolutions: list[RegistrationReference] = field(default_factory=list)
     traceparent: str | None = None
     tracestate: str | None = None
 

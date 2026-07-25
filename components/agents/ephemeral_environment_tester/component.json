@@ -1,0 +1,16 @@
+{
+  "registration_id": "ephemeral_environment_tester",
+  "version": "1.0.0",
+  "kind": "agent",
+  "component_id": "ephemeral_environment_tester",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "adapter",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "ephemeral_test_request", "version": "1"},
+  "output_schema": {"schema_id": "ephemeral_test_evidence", "version": "1"},
+  "capabilities": ["run_ephemeral_tests", "cleanup_ephemeral_resources"],
+  "grants": [{"tool_id": "ephemeral_environment", "tool_version": "1.0.0", "scope": "disposable_environment"}],
+  "quality_gates": ["artifact_contract", "cleanup_evidence", "no_production_credentials"]
+}

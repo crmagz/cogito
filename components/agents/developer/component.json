@@ -1,0 +1,19 @@
+{
+  "registration_id": "developer",
+  "version": "1.0.0",
+  "kind": "agent",
+  "component_id": "developer",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "adapter",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "approved_plan", "version": "1"},
+  "output_schema": {"schema_id": "phase_execution_result", "version": "1"},
+  "capabilities": ["implement_approved_phase", "address_verified_review"],
+  "grants": [
+    {"tool_id": "execution_workspace", "tool_version": "1.0.0", "scope": "run_scoped_workspace"},
+    {"tool_id": "developer_harness", "tool_version": "1.0.0", "scope": "approved_phase"}
+  ],
+  "quality_gates": ["plan_approval", "artifact_contract", "workspace_cleanup"]
+}
