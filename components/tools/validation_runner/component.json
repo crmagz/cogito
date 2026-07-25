@@ -1,0 +1,15 @@
+{
+  "registration_id": "validation_runner",
+  "version": "1.0.0",
+  "kind": "tool",
+  "component_id": "validation_runner",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "adapter",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "validation_request", "version": "1"},
+  "output_schema": {"schema_id": "validation_gate_result", "version": "1"},
+  "capabilities": ["run_approved_validation"],
+  "quality_gates": ["approved_commands_only", "bounded_output", "no_publication"]
+}

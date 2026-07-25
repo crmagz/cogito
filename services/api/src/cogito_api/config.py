@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote
 
 
@@ -41,6 +42,7 @@ class Settings:
     auth_oidc_jwks_url: str
     auth_oidc_role_claim: str
     auth_oidc_approval_role: str
+    registry_catalog_path: str
 
     @property
     def supervisor_database_url(self) -> str:
@@ -107,9 +109,20 @@ def load_settings() -> Settings:
         auth_oidc_jwks_url=os.environ.get("COGITO_AUTH_OIDC_JWKS_URL", ""),
         auth_oidc_role_claim=os.environ.get("COGITO_AUTH_OIDC_ROLE_CLAIM", "roles"),
         auth_oidc_approval_role=os.environ.get("COGITO_AUTH_OIDC_APPROVAL_ROLE", "cogito-approver"),
+        registry_catalog_path=os.environ.get(
+            "COGITO_REGISTRY_CATALOG_PATH",
+            str(_default_registry_catalog_path()),
+        ),
     )
     _validate_auth_configuration(settings)
     return settings
+
+
+def _default_registry_catalog_path() -> Path:
+    """Use the checked-in catalog locally and the image-mounted catalog in production."""
+
+    local_catalog = Path(__file__).parents[4] / "components"
+    return local_catalog if local_catalog.is_dir() else Path("/app/components")
 
 
 def _validate_auth_configuration(settings: Settings) -> None:

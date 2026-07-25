@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -45,6 +47,7 @@ def make_settings(**overrides) -> Settings:
         auth_oidc_jwks_url="",
         auth_oidc_role_claim="roles",
         auth_oidc_approval_role="cogito-approver",
+        registry_catalog_path=str(Path(__file__).parents[3] / "components"),
     )
     defaults.update(overrides)
     return Settings(**defaults)

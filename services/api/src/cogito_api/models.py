@@ -167,6 +167,163 @@ class ArtifactReference(BaseModel):
     sha256: str = Field(description="SHA-256 digest of the canonical artifact bytes")
 
 
+class RegistrationKind(StrEnum):
+    """The independently versioned capability class selected by the Supervisor."""
+
+    AGENT = "agent"
+    TOOL = "tool"
+
+
+class RegistrationLifecycle(StrEnum):
+    """Selectability state for one immutable registration release."""
+
+    DRAFT = "draft"
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    REVOKED = "revoked"
+
+
+class ComponentMaturity(StrEnum):
+    """Product and operational maturity for a monorepo SDLC component."""
+
+    INCUBATING = "incubating"
+    ACTIVE = "active"
+    DEPRECATED = "deprecated"
+    RETIRED = "retired"
+
+
+class ExecutionClass(StrEnum):
+    """Execution shape for a component without granting it control-plane authority."""
+
+    ADAPTER = "adapter"
+    WORKER_SERVICE = "worker_service"
+    ISOLATED_JOB = "isolated_job"
+
+
+class ArtifactSchema(BaseModel):
+    """Versioned artifact contract accepted or emitted by a registration."""
+
+    schema_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_-]{0,127}$",
+        description="Stable artifact schema identifier",
+    )
+    version: str = Field(
+        min_length=1,
+        max_length=32,
+        pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$",
+        description="Compatible artifact schema version",
+    )
+
+
+class ToolGrant(BaseModel):
+    """A pinned tool release and the minimum scope granted to an agent release."""
+
+    tool_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_-]{0,127}$",
+        description="Registered tool identifier",
+    )
+    tool_version: str = Field(
+        min_length=1,
+        max_length=32,
+        pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$",
+        description="Pinned registered tool version",
+    )
+    scope: str = Field(
+        min_length=1,
+        max_length=256,
+        description="Bounded non-secret capability scope enforced by the broker",
+    )
+
+
+class RegistrationManifest(BaseModel):
+    """Declarative, non-secret definition of an immutable component release."""
+
+    registration_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_-]{0,127}$",
+        description="Stable agent or tool registration identifier",
+    )
+    version: str = Field(
+        min_length=1,
+        max_length=32,
+        pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$",
+        description="Immutable semantic registration version",
+    )
+    kind: RegistrationKind = Field(description="Whether this release is an agent or tool")
+    component_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_-]{0,127}$",
+        description="Monorepo component that owns this release",
+    )
+    component_version: str = Field(
+        min_length=1,
+        max_length=32,
+        pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$",
+        description="Immutable component release version",
+    )
+    lifecycle: RegistrationLifecycle = Field(description="Whether new runs may select this release")
+    maturity: ComponentMaturity = Field(description="Component product and operational maturity")
+    execution_class: ExecutionClass = Field(description="How the capability is executed")
+    owner: str = Field(min_length=1, max_length=256, description="Owning team or service identity")
+    input_schema: ArtifactSchema = Field(description="Immutable artifact contract consumed by the release")
+    output_schema: ArtifactSchema = Field(description="Immutable artifact contract emitted by the release")
+    capabilities: list[str] = Field(
+        min_length=1,
+        max_length=32,
+        description="Declared non-secret operations exposed by the release",
+    )
+    grants: list[ToolGrant] = Field(
+        default_factory=list,
+        max_length=32,
+        description="Pinned tool grants available to this release",
+    )
+    quality_gates: list[str] = Field(
+        min_length=1,
+        max_length=32,
+        description="Required contract, safety, and operational gates for the component",
+    )
+
+    @model_validator(mode="after")
+    def validate_kind_grants(self) -> "RegistrationManifest":
+        """Reject tool grants on tool definitions and duplicate capability declarations."""
+
+        if self.kind is RegistrationKind.TOOL and self.grants:
+            raise ValueError("tool registrations cannot grant other tools")
+        if len(set(self.capabilities)) != len(self.capabilities):
+            raise ValueError("registration capabilities must be unique")
+        grant_keys = [(grant.tool_id, grant.tool_version, grant.scope) for grant in self.grants]
+        if len(set(grant_keys)) != len(grant_keys):
+            raise ValueError("registration grants must be unique")
+        return self
+
+
+class RegistrationReference(BaseModel):
+    """Audit-safe identity of the exact registration release selected for a run."""
+
+    role: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_-]{0,127}$",
+        description="Supervisor role alias resolved for this run",
+    )
+    registration_id: str = Field(description="Immutable selected registration identifier")
+    version: str = Field(description="Immutable selected registration version")
+    manifest_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="SHA-256 digest of canonical non-secret manifest bytes",
+    )
+    component_id: str = Field(description="Owning monorepo component identifier")
+    component_version: str = Field(description="Owning immutable component release version")
+
+
 class PlanningRunResponse(BaseModel):
     """Accepted planning-run response returned to API callers."""
 
@@ -296,6 +453,10 @@ class RunEnvelope(BaseModel):
     requires_implementation_approval: bool = Field(
         default=False,
         description="Whether converged implementation evidence must receive a human decision before finalization",
+    )
+    registry_resolutions: list[RegistrationReference] = Field(
+        default_factory=list,
+        description="Pinned non-secret registry releases selected for this run",
     )
     traceparent: str | None = Field(default=None, max_length=512)
     tracestate: str | None = Field(default=None, max_length=4096)

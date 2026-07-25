@@ -1,0 +1,19 @@
+{
+  "registration_id": "reviewer",
+  "version": "1.0.0",
+  "kind": "agent",
+  "component_id": "reviewer",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "adapter",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "implementation_review_input", "version": "1"},
+  "output_schema": {"schema_id": "review_findings", "version": "1"},
+  "capabilities": ["review_implementation", "verify_blocking_findings"],
+  "grants": [
+    {"tool_id": "execution_workspace", "tool_version": "1.0.0", "scope": "read_only_workspace"},
+    {"tool_id": "review_model", "tool_version": "1.0.0", "scope": "read_only_review"}
+  ],
+  "quality_gates": ["artifact_contract", "read_only_scope", "finding_deduplication"]
+}

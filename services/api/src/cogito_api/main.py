@@ -4,6 +4,7 @@ import json
 import uuid
 import asyncio
 import secrets
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -36,7 +37,15 @@ from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDi
 from .observability import Telemetry, TelemetrySettings
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
-from .supervisor import AgentRunRecord, ApprovalConflictError, PlanningRunRecord, PostgresSupervisorStore, SupervisorStore
+from .registry import load_component_catalog
+from .supervisor import (
+    AgentRunRecord,
+    ApprovalConflictError,
+    PlanningRunRecord,
+    PostgresSupervisorStore,
+    RegistryConflictError,
+    SupervisorStore,
+)
 from .temporal import RunStarter, TemporalRunStarter
 
 
@@ -84,11 +93,25 @@ def create_app(
     )
     supervisor_store = supervisor_store or PostgresSupervisorStore(settings.supervisor_database_url)
     planner = planner or LiteLLMPlanner(settings)
+    catalog = load_component_catalog(Path(settings.registry_catalog_path))
+    agents = {item.registration_id: item for item in catalog.components if item.kind.value == "agent"}
+    policy_revision = "phase12_initial"
+    assignments = {role: f"{manifest.registration_id}@{manifest.version}" for role, manifest in agents.items()}
     telemetry = Telemetry(TelemetrySettings.from_environment())
     authenticator = ApprovalAuthenticator(settings)
 
     dispatcher = PlanApprovalOutboxDispatcher(supervisor_store, starter)
     implementation_dispatcher = ImplementationApprovalOutboxDispatcher(supervisor_store, starter)
+
+    async def resolve_roles(run_id: str, roles: list[str]):
+        await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments)
+        try:
+            return [
+                await supervisor_store.resolve_run_registration(run_id, role, policy_revision, agents[role])
+                for role in roles
+            ]
+        except KeyError as error:
+            raise RegistryConflictError("registry policy does not define the requested role") from error
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -164,6 +187,12 @@ def create_app(
                 updated_at=submitted_at,
             )
         )
+        try:
+            resolutions = await resolve_roles(
+                run_id, ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"]
+            )
+        except RegistryConflictError as error:
+            raise HTTPException(status_code=503, detail="registry is temporarily unavailable") from error
         telemetry.transition(AgentRunStatus.QUEUED.value, "supervisor")
         try:
             snapshot = store.put_plan(run_id, plan)
@@ -192,6 +221,7 @@ def create_app(
             priority=submission.priority,
             submitted_at=submitted_at,
             submitted_by="api",
+            registry_resolutions=resolutions,
             traceparent=carrier.get("traceparent"),
             tracestate=carrier.get("tracestate"),
         )
@@ -238,6 +268,10 @@ def create_app(
                 updated_at=submitted_at,
             )
         )
+        try:
+            await resolve_roles(run_id, ["planner"])
+        except RegistryConflictError as error:
+            raise HTTPException(status_code=503, detail="registry is temporarily unavailable") from error
         telemetry.transition(AgentRunStatus.QUEUED.value, "planner")
         record = PlanningRunRecord(
             run_id=run_id,
@@ -325,6 +359,7 @@ def create_app(
         try:
             carrier: dict[str, str] = {}
             telemetry.inject(carrier)
+            resolutions = await resolve_roles(updated.run_id, ["planner", "developer", "reviewer", "pull_request_publisher"])
             await starter.start_run(
                 RunEnvelope(
                     run_id=updated.run_id,
@@ -339,6 +374,7 @@ def create_app(
                     workflow_id=updated.workflow_id,
                     requires_plan_approval=True,
                     requires_implementation_approval=True,
+                    registry_resolutions=resolutions,
                     traceparent=carrier.get("traceparent"),
                     tracestate=carrier.get("tracestate"),
                 )

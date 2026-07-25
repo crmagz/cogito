@@ -9,8 +9,11 @@ from cogito_api.models import (
     ImplementationApprovalDecision,
     PlanApprovalDecision,
     PlanningRunStatus,
+    RegistrationManifest,
+    RegistrationReference,
     RunEnvelope,
 )
+from cogito_api.registry import manifest_sha256, registration_reference
 from cogito_api.planner import PlanningContext
 from cogito_api.storage import PlanSnapshot, plan_snapshot_bytes, source_specification_bytes
 from cogito_api.supervisor import (
@@ -20,6 +23,7 @@ from cogito_api.supervisor import (
     ImplementationApprovalRecord,
     OutboxDelivery,
     PlanningRunRecord,
+    RegistryConflictError,
 )
 
 
@@ -79,12 +83,59 @@ class InMemorySupervisorStore:
         self.implementation_approvals: dict[tuple[str, int, str], ImplementationApprovalRecord] = {}
         self.implementation_request_hashes: dict[tuple[str, int, str], str] = {}
         self.implementation_outbox: dict[str, OutboxDelivery] = {}
+        self.registrations: dict[tuple[str, str], RegistrationManifest] = {}
+        self.registry_policies: dict[str, dict[str, str]] = {}
+        self.run_registration_resolutions: dict[tuple[str, str], RegistrationReference] = {}
 
     async def create_agent_run(self, record: AgentRunRecord) -> None:
         self.agent_runs[record.run_id] = record
 
     async def get_agent_run(self, run_id: str) -> AgentRunRecord | None:
         return self.agent_runs.get(run_id)
+
+    async def bootstrap_registry(
+        self,
+        manifests: list[RegistrationManifest],
+        policy_revision: str,
+        assignments: dict[str, str],
+    ) -> None:
+        for manifest in manifests:
+            key = (manifest.registration_id, manifest.version)
+            existing = self.registrations.get(key)
+            if existing is not None and manifest_sha256(existing) != manifest_sha256(manifest):
+                raise RegistryConflictError("registration version already exists with different manifest content")
+            self.registrations[key] = manifest
+        existing_policy = self.registry_policies.get(policy_revision)
+        if existing_policy is not None and existing_policy != assignments:
+            raise RegistryConflictError("policy revision already exists with different assignments")
+        self.registry_policies[policy_revision] = dict(assignments)
+
+    async def resolve_run_registration(
+        self,
+        run_id: str,
+        role: str,
+        policy_revision: str,
+        manifest: RegistrationManifest,
+    ) -> RegistrationReference:
+        expected = registration_reference(role, manifest)
+        key = (run_id, role)
+        existing = self.run_registration_resolutions.get(key)
+        if existing is not None:
+            if existing != expected:
+                raise RegistryConflictError("run role is already pinned to a different registration release")
+            return existing
+        policy = self.registry_policies.get(policy_revision)
+        if policy is None:
+            raise RegistryConflictError("registry policy revision is not available")
+        if policy.get(role) != f"{manifest.registration_id}@{manifest.version}":
+            raise RegistryConflictError("registry policy does not select the requested registration release")
+        registered = self.registrations.get((manifest.registration_id, manifest.version))
+        if registered is None or registered.lifecycle.value != "active":
+            raise RegistryConflictError("registration release is not active")
+        if manifest_sha256(registered) != expected.manifest_sha256:
+            raise RegistryConflictError("registration release does not match its declared manifest")
+        self.run_registration_resolutions[key] = expected
+        return expected
 
     async def create_planning_run(self, record: PlanningRunRecord) -> None:
         self.planning_runs[record.run_id] = record
