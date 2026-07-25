@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 
+from cogito_api.models import AgentRunStatus
+from cogito_api.storage import PlanStoreUnavailableError
 from fastapi.testclient import TestClient
 
-from cogito_api.storage import PlanStoreUnavailableError
-
-from .fakes import FakeRunStarter, InMemoryPlanStore
+from .fakes import FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
 
 
-def test_submit_valid_plan_returns_202_with_run_id_and_plan_ref(client: TestClient, valid_plan: dict):
+def test_submit_valid_plan_returns_202_with_run_id_and_plan_ref(
+    client: TestClient, valid_plan: dict
+):
     response = client.post("/api/v1/runs", json={"plan": valid_plan})
 
     assert response.status_code == 202
@@ -19,7 +22,9 @@ def test_submit_valid_plan_returns_202_with_run_id_and_plan_ref(client: TestClie
     assert body["plan_ref"].endswith(f"plans/{body['run_id']}/plan.json")
 
 
-def test_submit_valid_plan_persists_plan_in_store(client: TestClient, valid_plan: dict, store: InMemoryPlanStore):
+def test_submit_valid_plan_persists_plan_in_store(
+    client: TestClient, valid_plan: dict, store: InMemoryPlanStore
+):
     response = client.post("/api/v1/runs", json={"plan": valid_plan})
     run_id = response.json()["run_id"]
 
@@ -46,7 +51,9 @@ def test_submit_plan_returns_retryable_error_when_snapshot_storage_is_unavailabl
     assert starter.started_runs == []
 
 
-def test_submit_missing_required_field_returns_422(client: TestClient, valid_plan: dict):
+def test_submit_missing_required_field_returns_422(
+    client: TestClient, valid_plan: dict
+):
     plan = copy.deepcopy(valid_plan)
     del plan["title"]
 
@@ -70,7 +77,9 @@ def test_submit_dag_cycle_returns_422(client: TestClient, valid_plan: dict):
     assert any("cycle" in v["message"] for v in body["violations"])
 
 
-def test_submit_unknown_phase_dependency_returns_422(client: TestClient, valid_plan: dict):
+def test_submit_unknown_phase_dependency_returns_422(
+    client: TestClient, valid_plan: dict
+):
     plan = copy.deepcopy(valid_plan)
     plan["phases"][1]["depends_on"] = ["phase-3"]
 
@@ -81,7 +90,9 @@ def test_submit_unknown_phase_dependency_returns_422(client: TestClient, valid_p
     assert any("phase-3" in v["message"] for v in body["violations"])
 
 
-def test_submit_constraints_exceeding_system_maximum_returns_422(client: TestClient, valid_plan: dict):
+def test_submit_constraints_exceeding_system_maximum_returns_422(
+    client: TestClient, valid_plan: dict
+):
     plan = copy.deepcopy(valid_plan)
     plan["constraints"]["max_cost_usd"] = 10_000.0
 
@@ -92,9 +103,14 @@ def test_submit_constraints_exceeding_system_maximum_returns_422(client: TestCli
     assert any(v["field"] == "constraints.max_cost_usd" for v in body["violations"])
 
 
-def test_submit_rejects_non_https_or_credentialed_repository_urls(client: TestClient, valid_plan: dict):
+def test_submit_rejects_non_https_or_credentialed_repository_urls(
+    client: TestClient, valid_plan: dict
+):
     plan = copy.deepcopy(valid_plan)
-    plan["target_repos"] = ["ssh://git@github.com/acme/api-gateway.git", "https://token@github.com/acme/private.git"]
+    plan["target_repos"] = [
+        "ssh://git@github.com/acme/api-gateway.git",
+        "https://token@github.com/acme/private.git",
+    ]
 
     response = client.post("/api/v1/runs", json={"plan": plan})
 
@@ -106,17 +122,27 @@ def test_submit_rejects_non_https_or_credentialed_repository_urls(client: TestCl
     }
 
 
-def test_submit_rejects_malformed_or_unpinned_repository_urls(client: TestClient, valid_plan: dict):
+def test_submit_rejects_malformed_or_unpinned_repository_urls(
+    client: TestClient, valid_plan: dict
+):
     plan = copy.deepcopy(valid_plan)
-    plan["target_repos"] = ["https://[bad", "https://git.example.test/repository.git#main"]
+    plan["target_repos"] = [
+        "https://[bad",
+        "https://git.example.test/repository.git#main",
+    ]
 
     response = client.post("/api/v1/runs", json={"plan": plan})
 
     assert response.status_code == 422
-    assert {violation["field"] for violation in response.json()["violations"]} == {"target_repos[0]", "target_repos[1]"}
+    assert {violation["field"] for violation in response.json()["violations"]} == {
+        "target_repos[0]",
+        "target_repos[1]",
+    }
 
 
-def test_dry_run_validates_without_persisting(client: TestClient, valid_plan: dict, store: InMemoryPlanStore):
+def test_dry_run_validates_without_persisting(
+    client: TestClient, valid_plan: dict, store: InMemoryPlanStore
+):
     response = client.post("/api/v1/runs", json={"plan": valid_plan, "dry_run": True})
 
     assert response.status_code == 200
@@ -126,7 +152,9 @@ def test_dry_run_validates_without_persisting(client: TestClient, valid_plan: di
     assert store.plans == {}
 
 
-def test_submit_valid_plan_starts_workflow(client: TestClient, valid_plan: dict, starter: FakeRunStarter):
+def test_submit_valid_plan_starts_workflow(
+    client: TestClient, valid_plan: dict, starter: FakeRunStarter
+):
     response = client.post("/api/v1/runs", json={"plan": valid_plan})
     run_id = response.json()["run_id"]
 
@@ -138,7 +166,9 @@ def test_submit_valid_plan_starts_workflow(client: TestClient, valid_plan: dict,
     assert envelope.spec_ref == valid_plan["spec_set"]
 
 
-def test_dry_run_does_not_start_workflow(client: TestClient, valid_plan: dict, starter: FakeRunStarter):
+def test_dry_run_does_not_start_workflow(
+    client: TestClient, valid_plan: dict, starter: FakeRunStarter
+):
     client.post("/api/v1/runs", json={"plan": valid_plan, "dry_run": True})
 
     assert starter.started_runs == []
@@ -163,8 +193,42 @@ def test_get_status_for_existing_run_returns_authoritative_lifecycle_and_executi
     assert response.json()["lifecycle_status"] == "QUEUED"
     assert response.json()["execution_status"] == "completed"
     assert response.json()["completed_phase_ids"] == ["phase-1"]
-    assert response.json()["phase_results"] == [{"phase_id": "phase-1", "turns_used": 4}]
+    assert response.json()["phase_results"] == [
+        {"phase_id": "phase-1", "turns_used": 4}
+    ]
     assert len(response.json()["trace_id"]) == 32
+
+
+def test_get_status_keeps_backup_execution_evidence_beside_terminal_lifecycle(
+    client: TestClient,
+    valid_plan: dict,
+    store: InMemoryPlanStore,
+    supervisor_store: InMemorySupervisorStore,
+):
+    submit = client.post("/api/v1/runs", json={"plan": valid_plan})
+    run_id = submit.json()["run_id"]
+    supervisor_store.agent_runs[run_id] = replace(
+        supervisor_store.agent_runs[run_id], status=AgentRunStatus.TIMED_OUT
+    )
+    store.statuses[run_id] = {
+        "run_id": run_id,
+        "status": "stopped_with_backup",
+        "ceiling": "cost",
+        "completed_phase_ids": ["phase-1"],
+        "stopped_phase_id": "phase-2",
+        "unfinished_phase_ids": ["phase-2"],
+        "branch_name": f"adp/{run_id}",
+    }
+
+    response = client.get(f"/api/v1/runs/{run_id}/status")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "timed_out"
+    assert response.json()["lifecycle_status"] == "TIMED_OUT"
+    assert response.json()["execution_status"] == "stopped_with_backup"
+    assert response.json()["ceiling"] == "cost"
+    assert response.json()["completed_phase_ids"] == ["phase-1"]
+    assert response.json()["unfinished_phase_ids"] == ["phase-2"]
 
 
 def test_get_status_for_unknown_run_returns_404(client: TestClient):

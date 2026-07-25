@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 import hashlib
 import json
+import uuid
 
 import pytest
-from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
-
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.models import PhaseResult, RunEnvelope, RunResult
-from temporalio.exceptions import TimeoutError
-
 from cogito_worker.workflows import (
     DeveloperRunWorkflow,
     _execution_plan,
@@ -20,6 +15,9 @@ from cogito_worker.workflows import (
     _is_timeout_error,
     _validate_plan_snapshot,
 )
+from temporalio.exceptions import TimeoutError
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
 
 from .fakes import InMemoryExecutionWorkspaces, InMemoryHarness, InMemoryRunStore
 
@@ -47,7 +45,11 @@ def _single_phase_plan(spec_ref: str, target_repos: list[str]) -> dict:
                 "verification": ["true"],
             }
         ],
-        "constraints": {"max_turns_per_phase": 50, "max_wall_clock_minutes": 1, "max_cost_usd": 1.0},
+        "constraints": {
+            "max_turns_per_phase": 50,
+            "max_wall_clock_minutes": 1,
+            "max_cost_usd": 1.0,
+        },
     }
 
 
@@ -57,13 +59,19 @@ async def env():
         yield env
 
 
-async def test_workflow_runs_activities_and_reports_completion(env: WorkflowEnvironment):
+async def test_workflow_runs_activities_and_reports_completion(
+    env: WorkflowEnvironment,
+):
     store = InMemoryRunStore()
     store.plans["s3://plans/plans/run-1/plan.json"] = _single_phase_plan(
         "typescript-backend@v2.1#sha256=" + "a" * 64, []
     )
     plan_sha256 = hashlib.sha256(
-        json.dumps(store.plans["s3://plans/plans/run-1/plan.json"], sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(
+            store.plans["s3://plans/plans/run-1/plan.json"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
     workspaces = InMemoryExecutionWorkspaces()
     harness = InMemoryHarness()
@@ -103,16 +111,30 @@ async def test_workflow_runs_activities_and_reports_completion(env: WorkflowEnvi
     assert store.statuses["run-1"]["phase_results"][0]["turns_used"] == 3
 
 
-async def test_workflow_runs_dependency_ordered_phases_in_one_workspace(env: WorkflowEnvironment):
+async def test_workflow_runs_dependency_ordered_phases_in_one_workspace(
+    env: WorkflowEnvironment,
+):
     store = InMemoryRunStore()
     plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
     plan["phases"] = [
-        {**plan["phases"][0], "id": "phase-2", "name": "Second", "depends_on": ["phase-1"]},
-        {**plan["phases"][0], "id": "phase-3", "name": "Third", "depends_on": ["phase-1"]},
+        {
+            **plan["phases"][0],
+            "id": "phase-2",
+            "name": "Second",
+            "depends_on": ["phase-1"],
+        },
+        {
+            **plan["phases"][0],
+            "id": "phase-3",
+            "name": "Third",
+            "depends_on": ["phase-1"],
+        },
         {**plan["phases"][0], "id": "phase-1", "name": "First", "depends_on": []},
     ]
     store.plans["s3://plans/plans/run-multi/plan.json"] = plan
-    plan_sha256 = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     workspaces = InMemoryExecutionWorkspaces()
     harness = InMemoryHarness()
     activities = WorkerActivities(store, workspaces, harness)
@@ -144,8 +166,16 @@ async def test_workflow_runs_dependency_ordered_phases_in_one_workspace(env: Wor
         )
 
     assert result == RunResult(run_id="run-multi", status="completed")
-    assert [request.phase.id for request in harness.requests] == ["phase-1", "phase-2", "phase-3"]
-    assert store.statuses["run-multi"]["completed_phase_ids"] == ["phase-1", "phase-2", "phase-3"]
+    assert [request.phase.id for request in harness.requests] == [
+        "phase-1",
+        "phase-2",
+        "phase-3",
+    ]
+    assert store.statuses["run-multi"]["completed_phase_ids"] == [
+        "phase-1",
+        "phase-2",
+        "phase-3",
+    ]
     assert len(workspaces.provisioned) == 1
     assert len(workspaces.cleaned) == 1
 
@@ -154,7 +184,9 @@ async def test_workflow_backs_up_and_stops_on_a_known_ceiling(env: WorkflowEnvir
     store = InMemoryRunStore()
     plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
     store.plans["s3://plans/plans/run-backup/plan.json"] = plan
-    plan_sha256 = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     harness = InMemoryHarness(
         result=PhaseResult(
             phase_id="phase-1",
@@ -206,13 +238,165 @@ async def test_workflow_backs_up_and_stops_on_a_known_ceiling(env: WorkflowEnvir
     assert len(workspaces.cleaned) == 1
 
 
-async def test_workflow_records_an_ordinary_phase_failure_as_a_terminal_result(env: WorkflowEnvironment):
+async def test_workflow_records_failure_when_cleanup_fails_after_backup(
+    env: WorkflowEnvironment,
+):
+    store = InMemoryRunStore()
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    store.plans["s3://plans/plans/run-backup-cleanup-failure/plan.json"] = plan
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    harness = InMemoryHarness(
+        result=PhaseResult(
+            phase_id="phase-1",
+            branch_name="adp/run-backup-cleanup-failure",
+            succeeded=False,
+            turns_used=25,
+            cost_usd=0.01,
+            changed_files=[],
+            commits={},
+            verification=[],
+            summary="turn ceiling reached",
+            outcome="ceiling_reached",
+            ceiling="turns",
+        )
+    )
+    workspaces = InMemoryExecutionWorkspaces(
+        cleanup_error=RuntimeError("workspace cleanup failed")
+    )
+    activities = WorkerActivities(store, workspaces, harness)
+    task_queue = f"test-queue-{uuid.uuid4()}"
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[DeveloperRunWorkflow],
+        activities=[
+            activities.load_plan,
+            activities.report_status,
+            activities.provision_execution_workspace,
+            activities.cleanup_execution_workspace,
+            activities.run_phase,
+            activities.backup_phase,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            DeveloperRunWorkflow.run,
+            RunEnvelope(
+                run_id="run-backup-cleanup-failure",
+                plan_ref="s3://plans/plans/run-backup-cleanup-failure/plan.json",
+                plan_sha256=plan_sha256,
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            ),
+            id=f"test-workflow-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+    assert result == RunResult(run_id="run-backup-cleanup-failure", status="failed")
+    assert store.statuses["run-backup-cleanup-failure"]["status"] == "failed"
+    assert len(workspaces.cleaned) == 3
+
+
+@pytest.mark.parametrize("ceiling", ["turns", "cost", "wall_clock"])
+async def test_workflow_backs_up_a_dependent_phase_for_each_trusted_ceiling(
+    env: WorkflowEnvironment, ceiling: str
+):
+    store = InMemoryRunStore()
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    plan["phases"] = [
+        {**plan["phases"][0], "id": "phase-1", "name": "First", "depends_on": []},
+        {
+            **plan["phases"][0],
+            "id": "phase-2",
+            "name": "Second",
+            "depends_on": ["phase-1"],
+        },
+    ]
+    store.plans["s3://plans/plans/run-dependent-backup/plan.json"] = plan
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    harness = InMemoryHarness(
+        results=[
+            PhaseResult(
+                phase_id="phase-1",
+                branch_name="adp/run-dependent-backup",
+                succeeded=True,
+                turns_used=3,
+                cost_usd=0.01,
+                changed_files=["/workspace/repos/example:phase-1.txt"],
+                commits={"/workspace/repos/example": "a" * 40},
+                verification=[],
+                summary="phase one complete",
+            ),
+            PhaseResult(
+                phase_id="phase-2",
+                branch_name="adp/run-dependent-backup",
+                succeeded=False,
+                turns_used=25,
+                cost_usd=0.02,
+                changed_files=["/workspace/repos/example:phase-2.txt"],
+                commits={"/workspace/repos/example": "b" * 40},
+                verification=[],
+                summary=f"{ceiling} ceiling reached",
+                outcome="ceiling_reached",
+                ceiling=ceiling,
+            ),
+        ]
+    )
+    workspaces = InMemoryExecutionWorkspaces()
+    activities = WorkerActivities(store, workspaces, harness)
+    task_queue = f"test-queue-{uuid.uuid4()}"
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[DeveloperRunWorkflow],
+        activities=[
+            activities.load_plan,
+            activities.report_status,
+            activities.provision_execution_workspace,
+            activities.cleanup_execution_workspace,
+            activities.run_phase,
+            activities.backup_phase,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            DeveloperRunWorkflow.run,
+            RunEnvelope(
+                run_id="run-dependent-backup",
+                plan_ref="s3://plans/plans/run-dependent-backup/plan.json",
+                plan_sha256=plan_sha256,
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            ),
+            id=f"test-workflow-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+    assert result == RunResult(
+        run_id="run-dependent-backup", status="stopped_with_backup"
+    )
+    assert [request.phase.id for request in harness.requests] == ["phase-1", "phase-2"]
+    assert [request.phase.id for request in harness.backup_requests] == ["phase-2"]
+    assert harness.backup_requests[0].ceiling == ceiling
+    assert store.statuses["run-dependent-backup"]["completed_phase_ids"] == ["phase-1"]
+    assert store.statuses["run-dependent-backup"]["stopped_phase_id"] == "phase-2"
+    assert store.statuses["run-dependent-backup"]["unfinished_phase_ids"] == ["phase-2"]
+    assert len(workspaces.cleaned) == 1
+
+
+async def test_workflow_records_an_ordinary_phase_failure_as_a_terminal_result(
+    env: WorkflowEnvironment,
+):
     """A durable failed run must not keep retrying its workflow task."""
 
     store = InMemoryRunStore()
     plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
     store.plans["s3://plans/plans/run-failed/plan.json"] = plan
-    plan_sha256 = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     harness = InMemoryHarness(
         result=PhaseResult(
             phase_id="phase-1",
@@ -261,14 +445,18 @@ async def test_workflow_records_an_ordinary_phase_failure_as_a_terminal_result(e
     assert len(workspaces.cleaned) == 1
 
 
-async def test_workflow_waits_for_matching_plan_approval_before_provisioning(env: WorkflowEnvironment):
+async def test_workflow_waits_for_matching_plan_approval_before_provisioning(
+    env: WorkflowEnvironment,
+):
     store = InMemoryRunStore()
     store.plans["s3://plans/plans/run-approval/plan.json"] = _single_phase_plan(
         "typescript-backend@v2.1#sha256=" + "a" * 64, []
     )
     plan_sha256 = hashlib.sha256(
         json.dumps(
-            store.plans["s3://plans/plans/run-approval/plan.json"], sort_keys=True, separators=(",", ":")
+            store.plans["s3://plans/plans/run-approval/plan.json"],
+            sort_keys=True,
+            separators=(",", ":"),
         ).encode()
     ).hexdigest()
     workspaces = InMemoryExecutionWorkspaces()
@@ -305,7 +493,11 @@ async def test_workflow_waits_for_matching_plan_approval_before_provisioning(env
 
         accepted = await handle.execute_update(
             "submit_plan_approval",
-            {"decision_id": "decision-1", "artifact_sha256": plan_sha256, "decision": "approve"},
+            {
+                "decision_id": "decision-1",
+                "artifact_sha256": plan_sha256,
+                "decision": "approve",
+            },
         )
         result = await handle.result()
 
@@ -320,7 +512,11 @@ async def test_workflow_rejects_stale_plan_approval(env: WorkflowEnvironment):
         "typescript-backend@v2.1#sha256=" + "a" * 64, []
     )
     plan_sha256 = hashlib.sha256(
-        json.dumps(store.plans["s3://plans/plans/run-stale/plan.json"], sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(
+            store.plans["s3://plans/plans/run-stale/plan.json"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
     workspaces = InMemoryExecutionWorkspaces()
     activities = WorkerActivities(store, workspaces, InMemoryHarness())
@@ -354,7 +550,11 @@ async def test_workflow_rejects_stale_plan_approval(env: WorkflowEnvironment):
         await _wait_for_status(store, "run-stale", "awaiting_plan_approval")
         accepted = await handle.execute_update(
             "submit_plan_approval",
-            {"decision_id": "decision-stale", "artifact_sha256": "0" * 64, "decision": "approve"},
+            {
+                "decision_id": "decision-stale",
+                "artifact_sha256": "0" * 64,
+                "decision": "approve",
+            },
         )
         assert accepted is False
         assert workspaces.provisioned == []
@@ -364,7 +564,11 @@ async def test_duplicate_plan_approval_is_an_idempotent_acknowledgement() -> Non
     workflow_instance = DeveloperRunWorkflow()
     workflow_instance._awaiting_plan_approval = True
     workflow_instance._plan_sha256 = "a" * 64
-    decision = {"decision_id": "decision-1", "artifact_sha256": "a" * 64, "decision": "approve"}
+    decision = {
+        "decision_id": "decision-1",
+        "artifact_sha256": "a" * 64,
+        "decision": "approve",
+    }
 
     assert await workflow_instance.submit_plan_approval(decision) is True
     assert await workflow_instance.submit_plan_approval(decision) is True
@@ -392,7 +596,12 @@ def test_plan_snapshot_validation_rejects_a_mutated_plan() -> None:
 def test_execution_plan_orders_multi_phase_dependencies_stably() -> None:
     plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
     plan["phases"] = [
-        {**plan["phases"][0], "id": "phase-2", "name": "Second", "depends_on": ["phase-1"]},
+        {
+            **plan["phases"][0],
+            "id": "phase-2",
+            "name": "Second",
+            "depends_on": ["phase-1"],
+        },
         {**plan["phases"][0], "id": "phase-3", "name": "Independent"},
         {**plan["phases"][0], "id": "phase-1", "name": "First"},
     ]
@@ -404,6 +613,7 @@ def test_execution_plan_orders_multi_phase_dependencies_stably() -> None:
     assert timeout.total_seconds() == 60
     assert reserve == 25
     assert max_cost_usd == 1.0
+
 
 def test_execution_plan_requires_an_approved_verification_command() -> None:
     plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
@@ -419,7 +629,9 @@ def test_failure_detail_includes_nested_activity_cause() -> None:
     error.__cause__ = nested
     error.cause = nested  # type: ignore[attr-defined]
 
-    assert _failure_detail(error) == "Activity task failed | workspace preparation failed"
+    assert (
+        _failure_detail(error) == "Activity task failed | workspace preparation failed"
+    )
 
 
 def test_timeout_detection_requires_a_temporal_timeout_in_the_cause_chain() -> None:

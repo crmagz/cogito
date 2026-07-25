@@ -10,13 +10,13 @@ from typing import Any, Protocol
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-
 _STATUS_MAP = {
     "claimed": "STARTING",
     "awaiting_plan_approval": "WAITING_FOR_APPROVAL",
     "implementing": "RUNNING",
     "phase_complete": "RUNNING",
     "phase_failed": "FAILED",
+    "stopped_with_backup": "TIMED_OUT",
     "completed": "SUCCEEDED",
     "failed": "FAILED",
     "rejected": "CANCELLED",
@@ -34,19 +34,39 @@ _ALLOWED_TRANSITIONS = {
 
 
 class RunStateReporter(Protocol):
-    async def report(self, run_id: str, status: str, failure_detail: str | None, metadata: dict[str, Any] | None) -> None: ...
+    async def report(
+        self,
+        run_id: str,
+        status: str,
+        failure_detail: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> None: ...
 
 
 class NullRunStateReporter:
-    async def report(self, run_id: str, status: str, failure_detail: str | None, metadata: dict[str, Any] | None) -> None:
+    async def report(
+        self,
+        run_id: str,
+        status: str,
+        failure_detail: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> None:
         del run_id, status, failure_detail, metadata
 
 
 class PostgresRunStateReporter:
     def __init__(self, database_url: str):
-        self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
+        self._engine: AsyncEngine = create_async_engine(
+            database_url, pool_pre_ping=True
+        )
 
-    async def report(self, run_id: str, status: str, failure_detail: str | None, metadata: dict[str, Any] | None) -> None:
+    async def report(
+        self,
+        run_id: str,
+        status: str,
+        failure_detail: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> None:
         target = _STATUS_MAP.get(status)
         if target is None:
             return
@@ -55,7 +75,8 @@ class PostgresRunStateReporter:
             safe_metadata["phase_result"] = "recorded"
         async with self._engine.begin() as connection:
             result = await connection.execute(
-                text("SELECT status FROM agent_runs WHERE run_id = :run_id FOR UPDATE"), {"run_id": run_id}
+                text("SELECT status FROM agent_runs WHERE run_id = :run_id FOR UPDATE"),
+                {"run_id": run_id},
             )
             row = result.mappings().one_or_none()
             if row is None:
@@ -68,7 +89,9 @@ class PostgresRunStateReporter:
                 return
             if previous in _TERMINAL and previous != target:
                 return
-            if previous != target and target not in _ALLOWED_TRANSITIONS.get(previous, set()):
+            if previous != target and target not in _ALLOWED_TRANSITIONS.get(
+                previous, set()
+            ):
                 return
             now = datetime.now(timezone.utc)
             await connection.execute(
@@ -98,8 +121,12 @@ class PostgresRunStateReporter:
                     """
                 ),
                 {
-                    "event_id": str(uuid.uuid4()), "run_id": run_id, "from_status": previous,
-                    "to_status": target, "occurred_at": now, "metadata": json.dumps(safe_metadata),
+                    "event_id": str(uuid.uuid4()),
+                    "run_id": run_id,
+                    "from_status": previous,
+                    "to_status": target,
+                    "occurred_at": now,
+                    "metadata": json.dumps(safe_metadata),
                 },
             )
 
