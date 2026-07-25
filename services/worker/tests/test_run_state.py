@@ -62,3 +62,15 @@ async def test_successful_backup_stop_is_a_terminal_timed_out_lifecycle() -> Non
     assert update_parameters["status"] == "TIMED_OUT"
     assert update_parameters["terminal"] is True
     assert event_parameters["to_status"] == "TIMED_OUT"
+
+
+async def test_review_escalation_is_a_terminal_successful_lifecycle() -> None:
+    connection = _Connection(previous_status="RUNNING")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.report("run-1", "escalated", None, {"review": {"status": "escalated"}})
+
+    _, update_parameters = connection.calls[1]
+    assert update_parameters["status"] == "SUCCEEDED"
+    assert update_parameters["terminal"] is True

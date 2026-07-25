@@ -1,6 +1,6 @@
 {{- if .Values.litellm.enabled }}
-{{- $rolePolicies := required "litellm.rolePolicies must define planner, developer, and reviewer policies" .Values.litellm.rolePolicies }}
-{{- range $role := list "planner" "developer" "reviewer" }}
+{{- $rolePolicies := required "litellm.rolePolicies must define planner, developer, reviewerPrimary, and reviewerSecondary policies" .Values.litellm.rolePolicies }}
+{{- range $role := list "planner" "developer" "reviewerPrimary" "reviewerSecondary" }}
 {{- $policy := required (printf "litellm.rolePolicies.%s is required" $role) (index $rolePolicies $role) }}
 {{- $model := required (printf "litellm.rolePolicies.%s.model is required" $role) $policy.model }}
 {{- if not (hasKey $.Values.litellm.tiers $model) }}
@@ -22,6 +22,13 @@
 {{- fail (printf "litellm.rolePolicies.%s.apiKeyKey is required" $role) }}
 {{- end }}
 {{- end }}
+{{- $reviewerPrimary := index $rolePolicies "reviewerPrimary" }}
+{{- $reviewerSecondary := index $rolePolicies "reviewerSecondary" }}
+{{- $primaryTier := index $.Values.litellm.tiers $reviewerPrimary.model }}
+{{- $secondaryTier := index $.Values.litellm.tiers $reviewerSecondary.model }}
+{{- if and (eq $primaryTier.provider $secondaryTier.provider) (eq $primaryTier.model $secondaryTier.model) }}
+{{- fail "reviewerPrimary and reviewerSecondary must resolve to different concrete provider models" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -34,7 +41,7 @@ data:
     # Desired virtual-key policy. Trusted infrastructure provisions the keys.
     # No MCP servers are registered in this release; every role has zero tools.
     roles:
-      {{- range $role := list "planner" "developer" "reviewer" }}
+      {{- range $role := list "planner" "developer" "reviewerPrimary" "reviewerSecondary" }}
       {{- $policy := index $rolePolicies $role }}
       {{ $role }}:
         model: {{ $policy.model | quote }}

@@ -231,6 +231,36 @@ def test_get_status_keeps_backup_execution_evidence_beside_terminal_lifecycle(
     assert response.json()["unfinished_phase_ids"] == ["phase-2"]
 
 
+def test_get_status_exposes_escalated_review_evidence_without_overwriting_lifecycle(
+    client: TestClient,
+    valid_plan: dict,
+    store: InMemoryPlanStore,
+    supervisor_store: InMemorySupervisorStore,
+):
+    submit = client.post("/api/v1/runs", json={"plan": valid_plan})
+    run_id = submit.json()["run_id"]
+    supervisor_store.agent_runs[run_id] = replace(
+        supervisor_store.agent_runs[run_id], status=AgentRunStatus.SUCCEEDED
+    )
+    store.statuses[run_id] = {
+        "run_id": run_id,
+        "status": "escalated",
+        "review": {
+            "status": "escalated",
+            "reason": "max_review_rounds",
+            "rounds": [{"round": 1, "findings": [{"severity": "blocking"}]}],
+        },
+    }
+
+    response = client.get(f"/api/v1/runs/{run_id}/status")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
+    assert response.json()["lifecycle_status"] == "SUCCEEDED"
+    assert response.json()["execution_status"] == "escalated"
+    assert response.json()["review"]["reason"] == "max_review_rounds"
+
+
 def test_get_status_for_unknown_run_returns_404(client: TestClient):
     response = client.get("/api/v1/runs/does-not-exist/status")
 

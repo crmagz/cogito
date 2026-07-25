@@ -50,6 +50,12 @@ class Settings:
     execution_git_author_name: str
     execution_git_author_email: str
     execution_command_output_limit_bytes: int
+    reviewer_litellm_endpoint: str
+    reviewer_primary_model: str
+    reviewer_secondary_model: str
+    reviewer_primary_api_key: str
+    reviewer_secondary_api_key: str
+    reviewer_timeout_seconds: float
     supervisor_database_host: str
     supervisor_database_port: int
     supervisor_database_name: str
@@ -147,6 +153,15 @@ def load_settings() -> Settings:
         execution_command_output_limit_bytes=int(
             os.environ.get("COGITO_EXECUTION_COMMAND_OUTPUT_LIMIT_BYTES", str(256 * 1024))
         ),
+        reviewer_litellm_endpoint=os.environ.get(
+            "COGITO_REVIEWER_LITELLM_ENDPOINT",
+            os.environ.get("COGITO_EXECUTION_LITELLM_ENDPOINT", "http://cogito-litellm:4000"),
+        ),
+        reviewer_primary_model=os.environ.get("COGITO_REVIEWER_PRIMARY_MODEL", "balanced"),
+        reviewer_secondary_model=os.environ.get("COGITO_REVIEWER_SECONDARY_MODEL", "complex"),
+        reviewer_primary_api_key=os.environ.get("COGITO_REVIEWER_PRIMARY_LITELLM_API_KEY", ""),
+        reviewer_secondary_api_key=os.environ.get("COGITO_REVIEWER_SECONDARY_LITELLM_API_KEY", ""),
+        reviewer_timeout_seconds=float(os.environ.get("COGITO_REVIEWER_TIMEOUT_SECONDS", "60")),
         supervisor_database_host=os.environ.get("COGITO_SUPERVISOR_DATABASE_HOST", "cogito-postgresql"),
         supervisor_database_port=int(os.environ.get("COGITO_SUPERVISOR_DATABASE_PORT", "5432")),
         supervisor_database_name=os.environ.get("COGITO_SUPERVISOR_DATABASE_NAME", "cogito"),

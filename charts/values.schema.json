@@ -27,11 +27,12 @@
       "properties": {
         "rolePolicies": {
           "type": "object",
-          "required": ["planner", "developer", "reviewer"],
+          "required": ["planner", "developer", "reviewerPrimary", "reviewerSecondary"],
           "properties": {
             "planner": { "$ref": "#/definitions/rolePolicy" },
             "developer": { "$ref": "#/definitions/rolePolicy" },
-            "reviewer": { "$ref": "#/definitions/rolePolicy" }
+            "reviewerPrimary": { "$ref": "#/definitions/rolePolicy" },
+            "reviewerSecondary": { "$ref": "#/definitions/rolePolicy" }
           }
         }
       }

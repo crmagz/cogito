@@ -7,7 +7,13 @@ import uuid
 
 import pytest
 from cogito_worker.activities import WorkerActivities
-from cogito_worker.models import PhaseResult, RunEnvelope, RunResult
+from cogito_worker.models import (
+    PhaseResult,
+    ReviewFinding,
+    ReviewResult,
+    RunEnvelope,
+    RunResult,
+)
 from cogito_worker.workflows import (
     DeveloperRunWorkflow,
     _execution_plan,
@@ -19,7 +25,12 @@ from temporalio.exceptions import TimeoutError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from .fakes import InMemoryExecutionWorkspaces, InMemoryHarness, InMemoryRunStore
+from .fakes import (
+    InMemoryExecutionWorkspaces,
+    InMemoryHarness,
+    InMemoryReviewer,
+    InMemoryRunStore,
+)
 
 
 async def _wait_for_status(store: InMemoryRunStore, run_id: str, expected: str) -> None:
@@ -89,6 +100,9 @@ async def test_workflow_runs_activities_and_reports_completion(
             activities.cleanup_execution_workspace,
             activities.run_phase,
             activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
         ],
     ):
         result = await env.client.execute_workflow(
@@ -151,6 +165,9 @@ async def test_workflow_runs_dependency_ordered_phases_in_one_workspace(
             activities.cleanup_execution_workspace,
             activities.run_phase,
             activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
         ],
     ):
         result = await env.client.execute_workflow(
@@ -177,6 +194,246 @@ async def test_workflow_runs_dependency_ordered_phases_in_one_workspace(
         "phase-3",
     ]
     assert len(workspaces.provisioned) == 1
+    assert len(workspaces.cleaned) == 1
+
+
+async def test_workflow_revises_verified_blocker_then_converges(env: WorkflowEnvironment):
+    store = InMemoryRunStore()
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    plan["constraints"]["max_review_rounds"] = 2
+    store.plans["s3://plans/plans/run-review-converges/plan.json"] = plan
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    blocker = ReviewFinding(
+        severity="blocking",
+        lens="correctness",
+        model="balanced",
+        file="src/main.py",
+        line=1,
+        description="intentional issue",
+        evidence="reproduced",
+        verified=True,
+    )
+    reviewer = InMemoryReviewer(
+        results=[ReviewResult(findings=[blocker]), ReviewResult(findings=[])],
+        verified=[blocker],
+    )
+    workspaces = InMemoryExecutionWorkspaces()
+    harness = InMemoryHarness()
+    activities = WorkerActivities(store, workspaces, harness, reviewer=reviewer)
+    task_queue = f"test-queue-{uuid.uuid4()}"
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[DeveloperRunWorkflow],
+        activities=[
+            activities.load_plan,
+            activities.report_status,
+            activities.provision_execution_workspace,
+            activities.cleanup_execution_workspace,
+            activities.run_phase,
+            activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            DeveloperRunWorkflow.run,
+            RunEnvelope(
+                run_id="run-review-converges",
+                plan_ref="s3://plans/plans/run-review-converges/plan.json",
+                plan_sha256=plan_sha256,
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            ),
+            id=f"test-workflow-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+    assert result == RunResult(run_id="run-review-converges", status="completed")
+    assert len(reviewer.requests) == 2
+    assert len(harness.review_revision_requests) == 1
+    assert store.statuses["run-review-converges"]["review"]["status"] == "converged"
+    assert len(workspaces.cleaned) == 1
+
+
+async def test_workflow_downgrades_unverified_blocker_without_revision(env: WorkflowEnvironment):
+    store = InMemoryRunStore()
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    store.plans["s3://plans/plans/run-review-unverified/plan.json"] = plan
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    blocker = ReviewFinding(
+        severity="blocking",
+        lens="correctness",
+        model="balanced",
+        file="src/main.py",
+        line=1,
+        description="unverified issue",
+    )
+    reviewer = InMemoryReviewer(
+        results=[ReviewResult(findings=[blocker])],
+        verified=[
+            ReviewFinding(
+                severity="advisory",
+                lens=blocker.lens,
+                model=blocker.model,
+                file=blocker.file,
+                line=blocker.line,
+                description=blocker.description,
+                verified=False,
+            )
+        ],
+    )
+    workspaces = InMemoryExecutionWorkspaces()
+    harness = InMemoryHarness()
+    activities = WorkerActivities(store, workspaces, harness, reviewer=reviewer)
+    task_queue = f"test-queue-{uuid.uuid4()}"
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[DeveloperRunWorkflow],
+        activities=[
+            activities.load_plan,
+            activities.report_status,
+            activities.provision_execution_workspace,
+            activities.cleanup_execution_workspace,
+            activities.run_phase,
+            activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            DeveloperRunWorkflow.run,
+            RunEnvelope(
+                run_id="run-review-unverified",
+                plan_ref="s3://plans/plans/run-review-unverified/plan.json",
+                plan_sha256=plan_sha256,
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            ),
+            id=f"test-workflow-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+    assert result == RunResult(run_id="run-review-unverified", status="completed")
+    assert harness.review_revision_requests == []
+    finding = store.statuses["run-review-unverified"]["review"]["rounds"][0]["findings"][0]
+    assert finding["severity"] == "advisory"
+    assert finding["verified"] is False
+
+
+async def test_workflow_escalates_when_verified_blocker_reaches_review_cap(env: WorkflowEnvironment):
+    store = InMemoryRunStore()
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    plan["constraints"]["max_review_rounds"] = 1
+    store.plans["s3://plans/plans/run-review-escalates/plan.json"] = plan
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    blocker = ReviewFinding(
+        severity="blocking",
+        lens="blast_radius",
+        model="complex",
+        file="src/main.py",
+        line=1,
+        description="persistent issue",
+        verified=True,
+    )
+    reviewer = InMemoryReviewer(results=[ReviewResult(findings=[blocker])], verified=[blocker])
+    workspaces = InMemoryExecutionWorkspaces()
+    harness = InMemoryHarness()
+    activities = WorkerActivities(store, workspaces, harness, reviewer=reviewer)
+    task_queue = f"test-queue-{uuid.uuid4()}"
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[DeveloperRunWorkflow],
+        activities=[
+            activities.load_plan,
+            activities.report_status,
+            activities.provision_execution_workspace,
+            activities.cleanup_execution_workspace,
+            activities.run_phase,
+            activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            DeveloperRunWorkflow.run,
+            RunEnvelope(
+                run_id="run-review-escalates",
+                plan_ref="s3://plans/plans/run-review-escalates/plan.json",
+                plan_sha256=plan_sha256,
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            ),
+            id=f"test-workflow-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+    assert result == RunResult(run_id="run-review-escalates", status="escalated")
+    assert harness.review_revision_requests == []
+    assert store.statuses["run-review-escalates"]["status"] == "escalated"
+    assert store.statuses["run-review-escalates"]["review"]["reason"] == "max_review_rounds"
+
+
+async def test_workflow_escalates_when_reviewer_is_unavailable(env: WorkflowEnvironment):
+    store = InMemoryRunStore()
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    store.plans["s3://plans/plans/run-review-unavailable/plan.json"] = plan
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    workspaces = InMemoryExecutionWorkspaces()
+    harness = InMemoryHarness()
+    activities = WorkerActivities(
+        store,
+        workspaces,
+        harness,
+        reviewer=InMemoryReviewer(review_error=RuntimeError("LiteLLM unavailable")),
+    )
+    task_queue = f"test-queue-{uuid.uuid4()}"
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[DeveloperRunWorkflow],
+        activities=[
+            activities.load_plan,
+            activities.report_status,
+            activities.provision_execution_workspace,
+            activities.cleanup_execution_workspace,
+            activities.run_phase,
+            activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            DeveloperRunWorkflow.run,
+            RunEnvelope(
+                run_id="run-review-unavailable",
+                plan_ref="s3://plans/plans/run-review-unavailable/plan.json",
+                plan_sha256=plan_sha256,
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            ),
+            id=f"test-workflow-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+    assert result == RunResult(run_id="run-review-unavailable", status="escalated")
+    review = store.statuses["run-review-unavailable"]["review"]
+    assert review["reason"] == "review_unavailable"
+    assert review["rounds"] == [{"round": 1, "error": "review activity did not complete"}]
     assert len(workspaces.cleaned) == 1
 
 
@@ -217,6 +474,9 @@ async def test_workflow_backs_up_and_stops_on_a_known_ceiling(env: WorkflowEnvir
             activities.cleanup_execution_workspace,
             activities.run_phase,
             activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
         ],
     ):
         result = await env.client.execute_workflow(
@@ -279,6 +539,9 @@ async def test_workflow_records_failure_when_cleanup_fails_after_backup(
             activities.cleanup_execution_workspace,
             activities.run_phase,
             activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
         ],
     ):
         result = await env.client.execute_workflow(
@@ -360,6 +623,9 @@ async def test_workflow_backs_up_a_dependent_phase_for_each_trusted_ceiling(
             activities.cleanup_execution_workspace,
             activities.run_phase,
             activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
         ],
     ):
         result = await env.client.execute_workflow(
@@ -426,6 +692,9 @@ async def test_workflow_records_an_ordinary_phase_failure_as_a_terminal_result(
             activities.cleanup_execution_workspace,
             activities.run_phase,
             activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
         ],
     ):
         result = await env.client.execute_workflow(
@@ -474,6 +743,9 @@ async def test_workflow_waits_for_matching_plan_approval_before_provisioning(
             activities.cleanup_execution_workspace,
             activities.run_phase,
             activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
         ],
     ):
         handle = await env.client.start_workflow(
@@ -533,6 +805,9 @@ async def test_workflow_rejects_stale_plan_approval(env: WorkflowEnvironment):
             activities.cleanup_execution_workspace,
             activities.run_phase,
             activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
         ],
     ):
         handle = await env.client.start_workflow(
@@ -606,13 +881,15 @@ def test_execution_plan_orders_multi_phase_dependencies_stably() -> None:
         {**plan["phases"][0], "id": "phase-1", "name": "First"},
     ]
 
-    phases, max_turns, timeout, reserve, max_cost_usd = _execution_plan(plan)
+    phases, max_turns, timeout, reserve, max_cost_usd, max_review_rounds, review_profile = _execution_plan(plan)
 
     assert [phase.id for phase in phases] == ["phase-3", "phase-1", "phase-2"]
     assert max_turns == 25
     assert timeout.total_seconds() == 60
     assert reserve == 25
     assert max_cost_usd == 1.0
+    assert max_review_rounds == 3
+    assert review_profile == "standard"
 
 
 def test_execution_plan_requires_an_approved_verification_command() -> None:
