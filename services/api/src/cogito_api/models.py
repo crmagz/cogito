@@ -322,6 +322,7 @@ class RegistrationReference(BaseModel):
     )
     component_id: str = Field(description="Owning monorepo component identifier")
     component_version: str = Field(description="Owning immutable component release version")
+    grants: list[ToolGrant] = Field(default_factory=list, description="Pinned tool releases and scopes for this role")
 
 
 class PlanningRunResponse(BaseModel):
