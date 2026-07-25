@@ -21,6 +21,7 @@ from cogito_worker.workflows import (
     _execution_plan,
     _failure_detail,
     _is_timeout_error,
+    _redact_failure_message,
     _validate_plan_snapshot,
 )
 from temporalio.exceptions import TimeoutError
@@ -1007,6 +1008,14 @@ def test_failure_detail_stops_at_safe_github_category_and_redacts_tokens() -> No
 
     assert detail == "Activity task failed | GitHub pull-request publication failed"
     assert "gho_secretToken123" not in detail
+
+
+def test_failure_redaction_removes_bearer_and_github_tokens() -> None:
+    detail = _redact_failure_message("request failed with Bearer gho_secretToken123 and github_pat_secretToken456")
+
+    assert "gho_secretToken123" not in detail
+    assert "github_pat_secretToken456" not in detail
+    assert "[REDACTED]" in detail
 
 
 def test_timeout_detection_requires_a_temporal_timeout_in_the_cause_chain() -> None:

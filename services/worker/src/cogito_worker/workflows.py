@@ -740,8 +740,8 @@ def _failure_detail(error: Exception) -> str:
 
 
 _FAILURE_SECRETS = (
-    re.compile(r"(?i)Bearer\\s+[^\\s'\\\"]+"),
-    re.compile(r"\\b(?:gh[opsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\\b"),
+    re.compile(r"(?i)Bearer\s+[^\s'\"]+"),
+    re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b"),
 )
 
 

@@ -51,15 +51,10 @@ class GitHubPullRequestPublisher:
         }
         async with httpx.AsyncClient(base_url=self._api_url, headers=headers, timeout=20.0) as client:
             owner = repository.split("/", maxsplit=1)[0]
-            response = await client.get(
-                f"/repos/{repository}/pulls",
-                params={"state": "all", "head": f"{owner}:{branch_name}", "base": self._base_branch},
-            )
-            response.raise_for_status()
             marker = f"<!-- cogito-implementation-artifact:{artifact_sha256} -->"
-            for existing in response.json():
-                if isinstance(existing, dict) and marker in str(existing.get("body", "")):
-                    return PullRequestResult(number=int(existing["number"]), url=str(existing["html_url"]), reused=True)
+            existing = await _find_pull_request(client, repository, owner, branch_name, marker, self._base_branch)
+            if existing is not None:
+                return existing
             created = await client.post(
                 f"/repos/{repository}/pulls",
                 json={
@@ -74,6 +69,29 @@ class GitHubPullRequestPublisher:
             number = int(body["number"])
             await _post_advisory_comments(client, repository, number, evidence, body.get("head", {}).get("sha"))
             return PullRequestResult(number=number, url=str(body["html_url"]), reused=False)
+
+
+async def _find_pull_request(
+    client: httpx.AsyncClient, repository: str, owner: str, branch_name: str, marker: str, base_branch: str
+) -> PullRequestResult | None:
+    """Search every GitHub result page before creating a marker-bound pull request."""
+
+    page = 1
+    while True:
+        response = await client.get(
+            f"/repos/{repository}/pulls",
+            params={"state": "all", "head": f"{owner}:{branch_name}", "base": base_branch, "per_page": 100, "page": page},
+        )
+        response.raise_for_status()
+        pull_requests = response.json()
+        if not isinstance(pull_requests, list):
+            raise RuntimeError("GitHub pull-request lookup returned an invalid response")
+        for existing in pull_requests:
+            if isinstance(existing, dict) and marker in str(existing.get("body", "")):
+                return PullRequestResult(number=int(existing["number"]), url=str(existing["html_url"]), reused=True)
+        if len(pull_requests) < 100:
+            return None
+        page += 1
 
 
 def _repository_from_evidence(evidence: dict) -> str:
