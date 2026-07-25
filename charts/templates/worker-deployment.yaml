@@ -65,6 +65,16 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.worker.execution.harness.gitCredentialsSecret }}
                   key: {{ .Values.worker.execution.harness.gitCredentialsKey }}
+            - name: COGITO_REVIEWER_PRIMARY_LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.worker.reviewer.primaryExistingSecret }}
+                  key: {{ .Values.worker.reviewer.primaryApiKeyKey }}
+            - name: COGITO_REVIEWER_SECONDARY_LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.worker.reviewer.secondaryExistingSecret }}
+                  key: {{ .Values.worker.reviewer.secondaryApiKeyKey }}
             {{- if .Values.observability.otlp.existingSecret }}
             - name: COGITO_TELEMETRY_OTLP_HEADERS
               valueFrom:

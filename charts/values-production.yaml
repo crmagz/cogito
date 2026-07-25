@@ -87,8 +87,10 @@ litellm:
       existingSecret: cogito-planner-key
     developer:
       existingSecret: cogito-developer-key
-    reviewer:
-      existingSecret: cogito-reviewer-key
+    reviewerPrimary:
+      existingSecret: cogito-reviewer-primary-key
+    reviewerSecondary:
+      existingSecret: cogito-reviewer-secondary-key
   # When a deployment selects the `bedrock` provider, IRSA grants LiteLLM AWS
   # credentials without static keys. Scope the role to the selected models'
   # bedrock:InvokeModel and bedrock:InvokeModelWithResponseStream actions.

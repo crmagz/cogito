@@ -12,8 +12,14 @@ from .models import (
     ExecutionWorkspace,
     PhaseExecutionRequest,
     PhaseResult,
+    ReviewFinding,
+    ReviewRequest,
+    ReviewResult,
+    ReviewRevisionRequest,
+    ReviewRevisionResult,
 )
 from .observability import WorkerTelemetry
+from .review import LiteLLMReviewHarness
 from .run_state import NullRunStateReporter, RunStateReporter
 from .storage import RunStore, now_iso
 
@@ -26,10 +32,12 @@ class WorkerActivities:
         harness: ClaudeCodeHarness,
         telemetry: WorkerTelemetry | None = None,
         run_state: RunStateReporter | None = None,
+        reviewer: LiteLLMReviewHarness | None = None,
     ):
         self._store = store
         self._execution_workspaces = execution_workspaces
         self._harness = harness
+        self._reviewer = reviewer or _NoopReviewHarness()
         self._telemetry = telemetry or WorkerTelemetry()
         self._run_state = run_state or NullRunStateReporter()
 
@@ -98,3 +106,47 @@ class WorkerActivities:
             },
         )
         return await self._harness.backup_phase(request)
+
+    @activity.defn
+    async def review(self, request: ReviewRequest) -> ReviewResult:
+        """Run independent read-only reviewer lenses against the exact branch diff."""
+
+        activity.logger.info(
+            "reviewing implementation diff",
+            extra={"run_id": request.workspace.run_id, "round": request.round_number},
+        )
+        return await self._reviewer.review(request)
+
+    @activity.defn
+    async def verify_review_findings(
+        self, request: ReviewRequest, findings: list[ReviewFinding]
+    ) -> list[ReviewFinding]:
+        """Confirm only blocking review findings before developer revision."""
+
+        return await self._reviewer.verify_blocking(request, findings)
+
+    @activity.defn
+    async def address_review_findings(
+        self, request: ReviewRevisionRequest
+    ) -> ReviewRevisionResult:
+        """Ask the developer harness to address verified blockers only."""
+
+        activity.logger.info(
+            "addressing verified review findings",
+            extra={"run_id": request.workspace.run_id, "findings": len(request.findings)},
+        )
+        return await self._harness.address_review_findings(request)
+
+
+class _NoopReviewHarness:
+    """Test-only default preserving existing activity construction seams."""
+
+    async def review(self, request: ReviewRequest) -> ReviewResult:
+        del request
+        return ReviewResult(findings=[])
+
+    async def verify_blocking(
+        self, request: ReviewRequest, findings: list[ReviewFinding]
+    ) -> list[ReviewFinding]:
+        del request
+        return findings

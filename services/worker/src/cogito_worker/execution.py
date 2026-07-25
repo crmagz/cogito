@@ -563,7 +563,7 @@ class ExecutionWorkspaceService:
             if self._run_git_credentials is not None:
                 await self._run_git_credentials.cleanup(request.run_id, run_git_secret)
             raise
-        return ExecutionWorkspace(
+        workspace = ExecutionWorkspace(
             run_id=request.run_id,
             job_name=job_name,
             workspace_root=self._settings.workspace_root,
@@ -582,6 +582,21 @@ class ExecutionWorkspaceService:
             run_key_secret=run_key_secret,
             run_git_secret=run_git_secret,
         )
+        try:
+            base_commits: dict[str, str] = {}
+            for repository in workspace.repositories:
+                result = await self.execute(
+                    workspace,
+                    ["git", "-C", repository, "rev-parse", "HEAD"],
+                    timeout_seconds=30,
+                )
+                if result.exit_code != 0 or not result.stdout.strip():
+                    raise RuntimeError("could not resolve the review base commit")
+                base_commits[repository] = result.stdout.strip()
+        except Exception:
+            await self.cleanup(workspace)
+            raise
+        return replace(workspace, base_commits=base_commits)
 
     async def cleanup(self, workspace: ExecutionWorkspace) -> None:
         """Remove the execution Job and its `emptyDir` workspace."""

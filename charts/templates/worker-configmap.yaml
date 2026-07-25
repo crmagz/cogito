@@ -50,6 +50,10 @@ data:
   COGITO_EXECUTION_GIT_AUTHOR_NAME: {{ .Values.worker.execution.harness.gitAuthorName | quote }}
   COGITO_EXECUTION_GIT_AUTHOR_EMAIL: {{ .Values.worker.execution.harness.gitAuthorEmail | quote }}
   COGITO_EXECUTION_COMMAND_OUTPUT_LIMIT_BYTES: {{ .Values.worker.execution.harness.commandOutputLimitBytes | quote }}
+  COGITO_REVIEWER_LITELLM_ENDPOINT: {{ default (printf "http://%s-litellm.%s.svc:4000" .Release.Name .Release.Namespace) .Values.worker.reviewer.litellmEndpoint | quote }}
+  COGITO_REVIEWER_PRIMARY_MODEL: {{ .Values.worker.reviewer.primaryModel | quote }}
+  COGITO_REVIEWER_SECONDARY_MODEL: {{ .Values.worker.reviewer.secondaryModel | quote }}
+  COGITO_REVIEWER_TIMEOUT_SECONDS: {{ .Values.worker.reviewer.timeoutSeconds | quote }}
   COGITO_TELEMETRY_TRACES_ENABLED: {{ .Values.observability.traces.enabled | quote }}
   COGITO_TELEMETRY_OTLP_ENDPOINT: {{ .Values.observability.otlp.endpoint | quote }}
   COGITO_TELEMETRY_OTLP_PROTOCOL: {{ .Values.observability.otlp.protocol | quote }}

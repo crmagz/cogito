@@ -358,12 +358,19 @@ litellm:
       toolset: development-restricted
       existingSecret: cogito-developer-key
       apiKeyKey: api-key
-    reviewer:
+    reviewerPrimary:
       model: balanced
       maxBudgetUsd: 10
       budgetDuration: 1d
       toolset: review-readonly
-      existingSecret: cogito-reviewer-key
+      existingSecret: cogito-reviewer-primary-key
+      apiKeyKey: api-key
+    reviewerSecondary:
+      model: complex
+      maxBudgetUsd: 10
+      budgetDuration: 1d
+      toolset: review-readonly
+      existingSecret: cogito-reviewer-secondary-key
       apiKeyKey: api-key
 
 ## @section API
@@ -573,6 +580,17 @@ worker:
       gitAuthorName: Cogito Agent
       gitAuthorEmail: cogito@local.invalid
       commandOutputLimitBytes: 262144
+  ## @param worker.reviewer Dedicated read-only LiteLLM reviewer configuration. Both aliases must be distinct and each Secret is supplied by external secret management; the chart never creates or copies either key.
+  ##
+  reviewer:
+    litellmEndpoint: ""
+    primaryModel: balanced
+    secondaryModel: complex
+    primaryExistingSecret: cogito-reviewer-primary-key
+    primaryApiKeyKey: api-key
+    secondaryExistingSecret: cogito-reviewer-secondary-key
+    secondaryApiKeyKey: api-key
+    timeoutSeconds: 60
   ## @param worker.resources.requests.memory Memory request
   ## @param worker.resources.requests.cpu CPU request
   ## @param worker.resources.limits.memory Memory limit

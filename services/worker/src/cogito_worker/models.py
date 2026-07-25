@@ -34,6 +34,7 @@ class ExecutionWorkspace:
     workspace_root: str
     repositories: list[str] = field(default_factory=list)
     repository_origins: dict[str, str] = field(default_factory=dict)
+    base_commits: dict[str, str] = field(default_factory=dict)
     run_key_secret: str = ""
     run_git_secret: str = ""
 
@@ -164,3 +165,67 @@ class ResolvedSpecSet:
 
     ref: str
     files: list[ResolvedSpecFile]
+
+
+@dataclass(frozen=True)
+class ReviewFinding:
+    """One bounded, classified observation produced by a read-only reviewer."""
+
+    severity: str
+    lens: str
+    model: str
+    file: str
+    line: int | None
+    description: str
+    evidence: str | None = None
+    suggested_fix: str | None = None
+    verified: bool | None = None
+
+    def metadata(self) -> dict[str, Any]:
+        """Return JSON-safe evidence without exposing reviewer credentials."""
+
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ReviewRequest:
+    """Read-only inputs for one adversarial review round."""
+
+    workspace: ExecutionWorkspace
+    phase_results: list[dict[str, Any]]
+    round_number: int
+    review_profile: str
+
+
+@dataclass(frozen=True)
+class ReviewResult:
+    """Findings from all independent reviewer lenses in one round."""
+
+    findings: list[ReviewFinding]
+
+    def metadata(self) -> list[dict[str, Any]]:
+        """Return JSON-safe finding evidence."""
+
+        return [finding.metadata() for finding in self.findings]
+
+
+@dataclass(frozen=True)
+class ReviewRevisionRequest:
+    """Bounded developer revision request for verified blocking findings only."""
+
+    workspace: ExecutionWorkspace
+    findings: list[ReviewFinding]
+    phases: list[PlanPhase]
+    max_turns: int
+    timeout_seconds: int
+
+
+@dataclass(frozen=True)
+class ReviewRevisionResult:
+    """Evidence that the developer addressed one verified review round."""
+
+    succeeded: bool
+    summary: str
+    commits: dict[str, str]
+    changed_files: list[str]
+    verification: list[VerificationResult]

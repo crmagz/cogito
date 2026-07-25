@@ -7,6 +7,11 @@ from cogito_worker.models import (
     ExecutionWorkspace,
     PhaseExecutionRequest,
     PhaseResult,
+    ReviewFinding,
+    ReviewRequest,
+    ReviewResult,
+    ReviewRevisionRequest,
+    ReviewRevisionResult,
 )
 
 
@@ -85,6 +90,7 @@ class InMemoryHarness:
     ) -> None:
         self.requests: list[PhaseExecutionRequest] = []
         self.backup_requests: list[BackupExecutionRequest] = []
+        self.review_revision_requests: list[ReviewRevisionRequest] = []
         self.result = result
         self.backup_result = backup_result
         self.results = list(results or [])
@@ -124,3 +130,47 @@ class InMemoryHarness:
             outcome="stopped_with_backup",
             ceiling=request.ceiling,
         )
+
+    async def address_review_findings(
+        self, request: ReviewRevisionRequest
+    ) -> ReviewRevisionResult:
+        self.review_revision_requests.append(request)
+        return ReviewRevisionResult(
+            succeeded=True,
+            summary="verified blockers addressed",
+            commits={"/workspace/repos/example": "c" * 40},
+            changed_files=["/workspace/repos/example:src/main.py"],
+            verification=[],
+        )
+
+
+class InMemoryReviewer:
+    """Returns configured review outcomes while recording each read-only round."""
+
+    def __init__(
+        self,
+        results: list[ReviewResult] | None = None,
+        verified: list[ReviewFinding] | None = None,
+        review_error: Exception | None = None,
+    ) -> None:
+        self.requests: list[ReviewRequest] = []
+        self.verification_requests: list[tuple[ReviewRequest, list[ReviewFinding]]] = []
+        self.results = list(results or [])
+        self.verified = verified
+        self.review_error = review_error
+
+    async def review(self, request: ReviewRequest) -> ReviewResult:
+        self.requests.append(request)
+        if self.review_error is not None:
+            raise self.review_error
+        if self.results:
+            return self.results.pop(0)
+        return ReviewResult(findings=[])
+
+    async def verify_blocking(
+        self, request: ReviewRequest, findings: list[ReviewFinding]
+    ) -> list[ReviewFinding]:
+        self.verification_requests.append((request, findings))
+        if not findings:
+            return []
+        return self.verified if self.verified is not None else findings

@@ -13,6 +13,7 @@ from .config import load_settings
 from .execution import ExecutionJobSettings, ExecutionWorkspaceService, KubernetesExecutionJobClient
 from .harness import ClaudeCodeHarness
 from .observability import WorkerTelemetry
+from .review import LiteLLMReviewHarness
 from .run_state import PostgresRunStateReporter
 from .storage import MinioRunStore
 from .workflows import DeveloperRunWorkflow
@@ -87,12 +88,23 @@ async def main() -> None:
             settings.execution_git_https_token,
         ),
     )
+    harness = ClaudeCodeHarness(execution_workspaces)
+    reviewer = LiteLLMReviewHarness(
+        execution_workspaces,
+        settings.reviewer_litellm_endpoint,
+        settings.reviewer_primary_api_key,
+        settings.reviewer_secondary_api_key,
+        settings.reviewer_primary_model,
+        settings.reviewer_secondary_model,
+        settings.reviewer_timeout_seconds,
+    )
     activities = WorkerActivities(
         store,
         execution_workspaces,
-        ClaudeCodeHarness(execution_workspaces),
+        harness,
         WorkerTelemetry(),
         PostgresRunStateReporter(settings.supervisor_database_url),
+        reviewer,
     )
 
     worker = Worker(
@@ -106,6 +118,9 @@ async def main() -> None:
             activities.cleanup_execution_workspace,
             activities.run_phase,
             activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
         ],
     )
     await worker.run()

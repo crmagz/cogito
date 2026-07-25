@@ -16,6 +16,8 @@ with workflow.unsafe.imports_passed_through():
         PhaseExecutionRequest,
         PhaseResult,
         PlanPhase,
+        ReviewRequest,
+        ReviewRevisionRequest,
         RunEnvelope,
         RunResult,
     )
@@ -31,6 +33,7 @@ _CLEANUP_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
 _RUN_PHASE_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 _BACKUP_PHASE_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
 _BACKUP_ACTIVITY_TIMEOUT = timedelta(seconds=120)
+_REVIEW_ACTIVITY_TIMEOUT = timedelta(seconds=120)
 
 
 @workflow.defn
@@ -83,6 +86,8 @@ class DeveloperRunWorkflow:
                 run_timeout,
                 backup_reserve_turns,
                 max_cost_usd,
+                max_review_rounds,
+                review_profile,
             ) = _execution_plan(plan)
             if envelope.requires_plan_approval:
                 self._plan_sha256 = envelope.plan_sha256
@@ -132,6 +137,7 @@ class DeveloperRunWorkflow:
             completed_phase_ids: list[str] = []
             phase_results: list[dict] = []
             stopped_phase: tuple[PlanPhase, PhaseResult] | None = None
+            review_outcome: dict | None = None
             try:
                 await workflow.execute_activity(
                     WorkerActivities.report_status,
@@ -203,6 +209,17 @@ class DeveloperRunWorkflow:
                         raise RuntimeError(
                             f"phase {phase.id} failed: {phase_result.summary}"
                         )
+                if stopped_phase is None:
+                    review_outcome = await _review_implementation(
+                        envelope,
+                        workspace,
+                        phases,
+                        phase_results,
+                        productive_turns,
+                        deadline,
+                        max_review_rounds,
+                        review_profile,
+                    )
             finally:
                 await workflow.execute_activity(
                     WorkerActivities.cleanup_execution_workspace,
@@ -234,13 +251,20 @@ class DeveloperRunWorkflow:
                     start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 )
                 return RunResult(run_id=envelope.run_id, status="stopped_with_backup")
+            if review_outcome is not None and review_outcome["status"] == "escalated":
+                await workflow.execute_activity(
+                    WorkerActivities.report_status,
+                    args=[envelope.run_id, "escalated", None, {"review": review_outcome}],
+                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                )
+                return RunResult(run_id=envelope.run_id, status="escalated")
             await workflow.execute_activity(
                 WorkerActivities.report_status,
-                args=[envelope.run_id, "completed"],
+                args=[envelope.run_id, "completed", None, {"review": review_outcome}],
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
             )
             return RunResult(run_id=envelope.run_id, status="completed")
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - Temporal wraps activity failures variably.
             await workflow.execute_activity(
                 WorkerActivities.report_status,
                 args=[envelope.run_id, "failed", _failure_detail(error)],
@@ -289,7 +313,118 @@ async def _backup_phase(phase: PlanPhase, workspace, ceiling: str):
     )
 
 
-def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, float]:
+async def _review_implementation(
+    envelope: RunEnvelope,
+    workspace,
+    phases: list[PlanPhase],
+    phase_results: list[dict],
+    productive_turns: int,
+    deadline,
+    max_review_rounds: int,
+    review_profile: str,
+) -> dict:
+    """Run bounded review/revision rounds without allowing advisory churn."""
+
+    rounds: list[dict] = []
+    for round_number in range(1, max_review_rounds + 1):
+        remaining = deadline - workflow.now()
+        if remaining <= timedelta():
+            return {"status": "escalated", "rounds": rounds, "reason": "wall_clock"}
+        request = ReviewRequest(
+            workspace=workspace,
+            phase_results=phase_results,
+            round_number=round_number,
+            review_profile=review_profile,
+        )
+        await workflow.execute_activity(
+            WorkerActivities.report_status,
+            args=[
+                envelope.run_id,
+                "adversarial_review",
+                None,
+                {"review": {"status": "in_progress", "round": round_number, "rounds": rounds}},
+            ],
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+        )
+        try:
+            review = await workflow.execute_activity(
+                WorkerActivities.review,
+                args=[request],
+                start_to_close_timeout=min(_REVIEW_ACTIVITY_TIMEOUT, remaining),
+                retry_policy=_RUN_PHASE_RETRY_POLICY,
+            )
+            findings = await workflow.execute_activity(
+                WorkerActivities.verify_review_findings,
+                args=[request, review.findings],
+                start_to_close_timeout=min(_REVIEW_ACTIVITY_TIMEOUT, remaining),
+                retry_policy=_RUN_PHASE_RETRY_POLICY,
+            )
+        except Exception as error:  # noqa: BLE001 - reviewer failures must escalate safely.
+            del error
+            rounds.append(
+                {
+                    "round": round_number,
+                    "error": "review activity did not complete",
+                }
+            )
+            return {
+                "status": "escalated",
+                "rounds": rounds,
+                "reason": "review_unavailable",
+            }
+        blocking = [
+            finding
+            for finding in findings
+            if finding.severity == "blocking" and finding.verified is True
+        ]
+        evidence = {
+            "round": round_number,
+            "findings": [finding.metadata() for finding in findings],
+        }
+        rounds.append(evidence)
+        if not blocking:
+            return {"status": "converged", "rounds": rounds}
+        if round_number == max_review_rounds:
+            return {"status": "escalated", "rounds": rounds, "reason": "max_review_rounds"}
+        try:
+            revision = await workflow.execute_activity(
+                WorkerActivities.address_review_findings,
+                args=[
+                    ReviewRevisionRequest(
+                        workspace=workspace,
+                        findings=blocking,
+                        phases=phases,
+                        max_turns=productive_turns,
+                        timeout_seconds=max(1, int(remaining.total_seconds()) - 1),
+                    )
+                ],
+                start_to_close_timeout=min(_REVIEW_ACTIVITY_TIMEOUT, remaining),
+                retry_policy=_RUN_PHASE_RETRY_POLICY,
+            )
+        except Exception as error:  # noqa: BLE001 - revision failures must escalate safely.
+            del error
+            evidence["revision"] = {
+                "succeeded": False,
+                "error": "revision activity did not complete",
+            }
+            return {
+                "status": "escalated",
+                "rounds": rounds,
+                "reason": "revision_unavailable",
+            }
+        evidence["revision"] = {
+            "succeeded": revision.succeeded,
+            "summary": revision.summary,
+            "commits": revision.commits,
+            "changed_files": revision.changed_files,
+            "verification": [item.__dict__ for item in revision.verification],
+        }
+        if not revision.succeeded:
+            return {"status": "escalated", "rounds": rounds, "reason": "revision_failed"}
+    return {"status": "escalated", "rounds": rounds, "reason": "max_review_rounds"}
+
+
+def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, float, int, str]:
     """Parse limits and return a source-order-stable topological phase order."""
 
     phases = plan.get("phases")
@@ -301,7 +436,9 @@ def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, f
     max_turns = constraints.get("max_turns_per_phase")
     max_wall_clock_minutes = constraints.get("max_wall_clock_minutes")
     max_cost_usd = constraints.get("max_cost_usd")
+    max_review_rounds = constraints.get("max_review_rounds", 3)
     backup_reserve_turns = constraints.get("backup_reserve_turns", 25)
+    review_profile = plan.get("review_profile", "standard")
     if not isinstance(max_turns, int) or isinstance(max_turns, bool) or max_turns < 1:
         raise ValueError("plan max_turns_per_phase must be a positive integer")
     if (
@@ -320,6 +457,14 @@ def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, f
         )
     if max_turns <= backup_reserve_turns:
         raise ValueError("plan max_turns_per_phase must exceed backup_reserve_turns")
+    if (
+        not isinstance(max_review_rounds, int)
+        or isinstance(max_review_rounds, bool)
+        or max_review_rounds < 1
+    ):
+        raise ValueError("plan max_review_rounds must be a positive integer")
+    if review_profile not in {"strict", "standard", "minimal"}:
+        raise ValueError("plan review_profile must be strict, standard, or minimal")
     if (
         not isinstance(max_cost_usd, int | float)
         or isinstance(max_cost_usd, bool)
@@ -365,6 +510,8 @@ def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, f
         timedelta(minutes=max_wall_clock_minutes),
         backup_reserve_turns,
         float(max_cost_usd),
+        max_review_rounds,
+        review_profile,
     )
 
 
