@@ -18,11 +18,22 @@ from .storage import MinioRunStore
 from .workflows import DeveloperRunWorkflow
 
 
+async def _connect_temporal(host: str, namespace: str) -> Client:
+    """Wait for Temporal during independent control-plane startup."""
+    logger = logging.getLogger(__name__)
+    while True:
+        try:
+            return await Client.connect(host, namespace=namespace)
+        except Exception:
+            logger.warning("Temporal is not ready; retrying worker connection")
+            await asyncio.sleep(2)
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = load_settings()
 
-    client = await Client.connect(settings.temporal_host, namespace=settings.temporal_namespace)
+    client = await _connect_temporal(settings.temporal_host, settings.temporal_namespace)
     minio_client = Minio(
         settings.minio_endpoint,
         access_key=settings.minio_access_key,
