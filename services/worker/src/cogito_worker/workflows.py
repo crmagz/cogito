@@ -20,6 +20,10 @@ with workflow.unsafe.imports_passed_through():
     )
 
 _ACTIVITY_TIMEOUT = timedelta(seconds=30)
+# Workspace provisioning includes pod scheduling, repository preparation, and
+# the operator-configured execution startup allowance. It cannot share the
+# short status/load activity timeout or Temporal will cancel it first.
+_PROVISION_ACTIVITY_TIMEOUT = timedelta(seconds=180)
 _CLEANUP_ACTIVITY_TIMEOUT = timedelta(seconds=120)
 _PROVISION_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
 _RUN_PHASE_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
@@ -111,7 +115,7 @@ class DeveloperRunWorkflow:
                         max_cost_usd=max_cost_usd,
                     )
                 ],
-                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                start_to_close_timeout=_PROVISION_ACTIVITY_TIMEOUT,
                 retry_policy=_PROVISION_RETRY_POLICY,
             )
             try:

@@ -78,7 +78,7 @@ class PostgresRunStateReporter:
                     SET status = :status, updated_at = :now,
                         last_heartbeat_at = :now,
                         completed_at = CASE WHEN :terminal THEN :now ELSE completed_at END,
-                        error_summary = CASE WHEN :error_summary IS NULL THEN error_summary ELSE :error_summary END
+                        error_summary = COALESCE(CAST(:error_summary AS text), error_summary)
                     WHERE run_id = :run_id
                     """
                 ),

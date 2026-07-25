@@ -401,6 +401,17 @@ def create_app(
             # state explicitly for new clients.
             response["lifecycle_status"] = response["status"]
             response["status"] = agent_run.status.value.lower()
+            # The durable SQL projection is authoritative for lifecycle state;
+            # execution evidence remains in the immutable run-status object.
+            # Return that evidence without letting it overwrite canonical state.
+            try:
+                execution = store.get_status(run_id)
+            except PlanStoreUnavailableError:
+                execution = None
+            if execution is not None:
+                response["execution_status"] = execution.get("status")
+                for key, value in execution.items():
+                    response.setdefault(key, value)
             return response
         try:
             record = store.get_status(run_id)

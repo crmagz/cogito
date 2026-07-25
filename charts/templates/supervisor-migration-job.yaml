@@ -34,7 +34,17 @@ spec:
         - name: migrate
           image: "{{ include "cogito.image" (dict "root" . "image" .Values.api.image) }}"
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
-          command: ["/bin/sh", "-ec", "python -m cogito_api.database_bootstrap && alembic upgrade head"]
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              attempt=0
+              until python -m cogito_api.database_bootstrap; do
+                attempt=$((attempt + 1))
+                test "$attempt" -lt 60 || exit 1
+                sleep 2
+              done
+              alembic upgrade head
           env:
             - name: COGITO_SUPERVISOR_DATABASE_HOST
               value: {{ default (printf "%s-postgresql" .Release.Name) $supervisorDatabase.host | quote }}

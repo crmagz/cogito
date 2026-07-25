@@ -144,15 +144,26 @@ def test_dry_run_does_not_start_workflow(client: TestClient, valid_plan: dict, s
     assert starter.started_runs == []
 
 
-def test_get_status_for_existing_run_returns_queued(client: TestClient, valid_plan: dict):
+def test_get_status_for_existing_run_returns_authoritative_lifecycle_and_execution_evidence(
+    client: TestClient, valid_plan: dict, store: InMemoryPlanStore
+):
     submit = client.post("/api/v1/runs", json={"plan": valid_plan})
     run_id = submit.json()["run_id"]
+    store.statuses[run_id] = {
+        "run_id": run_id,
+        "status": "completed",
+        "completed_phase_ids": ["phase-1"],
+        "phase_results": [{"phase_id": "phase-1", "turns_used": 4}],
+    }
 
     response = client.get(f"/api/v1/runs/{run_id}/status")
 
     assert response.status_code == 200
     assert response.json()["status"] == "queued"
     assert response.json()["lifecycle_status"] == "QUEUED"
+    assert response.json()["execution_status"] == "completed"
+    assert response.json()["completed_phase_ids"] == ["phase-1"]
+    assert response.json()["phase_results"] == [{"phase_id": "phase-1", "turns_used": 4}]
     assert len(response.json()["trace_id"]) == 32
 
 
