@@ -440,6 +440,50 @@ class CoordinationGate(StrEnum):
     IMPLEMENTATION = "implementation"
 
 
+class WorkbenchArtifactKind(StrEnum):
+    """Server-owned evidence kinds available to an authorized Workbench."""
+
+    SOURCE = "source"
+    PLAN = "plan"
+    IMPLEMENTATION = "implementation"
+
+
+class WorkbenchArtifactSummary(BaseModel):
+    """Immutable evidence identity that deliberately omits its object-store location."""
+
+    kind: WorkbenchArtifactKind
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class WorkbenchRunResponse(BaseModel):
+    """Scope-filtered, authoritative run projection for the Operator Workbench."""
+
+    run_id: str
+    project_id: str
+    status: PlanningRunStatus
+    submitted_at: str
+    active_gate: CoordinationGate | None = None
+    artifacts: list[WorkbenchArtifactSummary] = Field(default_factory=list)
+    abilities: list[str] = Field(default_factory=list)
+    workflow: list[str] = Field(default_factory=list, description="Authoritative ordered stage and gate labels")
+
+
+class WorkbenchRunListResponse(BaseModel):
+    """Bounded Workbench inventory with a representation revision."""
+
+    items: list[WorkbenchRunResponse]
+    revision: str
+
+
+class WorkbenchEvidenceResponse(BaseModel):
+    """Bounded verified evidence safe to render as text or structured JSON."""
+
+    kind: WorkbenchArtifactKind
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    content_type: str
+    content: str
+
+
 class CoordinationApprovalActionRequest(BaseModel):
     """Normalized authenticated approval action for a future operator client."""
 

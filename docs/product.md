@@ -51,6 +51,16 @@ an independent leased outbox; notification delivery never has authority to
 approve work or signal Temporal directly. Slack and GitHub Issues adapters are
 not part of this release.
 
+The Operator Workbench contract is project-scoped and default-deny. New
+planning runs receive a trusted deployment project identity; OIDC principals
+must carry an explicit project claim and an appropriate viewer, approver, or
+admin role. The Workbench inventory, detail, evidence, and approval routes
+authorize that scope before returning any run data or reading storage. Evidence
+is selected only by server-owned artifact kind and digest, loaded with a strict
+size limit, and verified against SHA-256; browser clients never receive an
+object-store location or credential. Historic unscopeable runs are excluded
+from Workbench responses until an explicit migration assigns their project.
+
 The Helm chart declares three stable role policies: `planner`, `developer`,
 and `reviewer`. Each names one model alias, a positive LiteLLM virtual-key
 budget ceiling and reset period, and a toolset label. Keys are provisioned by

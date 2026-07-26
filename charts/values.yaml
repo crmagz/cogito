@@ -473,11 +473,17 @@ api:
   ## @param api.auth.static.existingSecret Local-only Secret containing the static operator token
   ## @param api.auth.static.tokenKey Key containing the static operator token
   ## @param api.auth.static.subject Audit subject used only in local static-auth mode
+  ## @param api.auth.static.projects Development project scopes granted to the static operator
+  ## @param api.auth.static.roles Development roles granted to the static operator
   ## @param api.auth.oidc.issuer Expected production OIDC issuer
   ## @param api.auth.oidc.audience Expected production OIDC audience
   ## @param api.auth.oidc.jwksUrl JWKS endpoint used to validate production bearer tokens
   ## @param api.auth.oidc.roleClaim Claim containing operator roles
   ## @param api.auth.oidc.approvalRole Required role for plan approval
+  ## @param api.auth.oidc.projectClaim Claim containing authorized project IDs
+  ## @param api.auth.oidc.viewerRole Required role for Workbench reads
+  ## @param api.auth.oidc.adminRole Role that may read and approve within its claimed projects
+  ## @param api.auth.defaultProjectId Trusted project assigned to newly created planning runs
   ##
   auth:
     mode: static
@@ -485,12 +491,18 @@ api:
       existingSecret: cogito-operator-auth
       tokenKey: token
       subject: local-operator
+      projects: [default]
+      roles: [cogito-viewer, cogito-approver]
     oidc:
       issuer: ""
       audience: ""
       jwksUrl: ""
       roleClaim: roles
       approvalRole: cogito-approver
+      projectClaim: cogito_projects
+      viewerRole: cogito-viewer
+      adminRole: cogito-admin
+    defaultProjectId: default
   ## @param api.notifications.enabled Enable the optional provider-neutral webhook sink. Disabled by default.
   ## @param api.notifications.webhookUrl HTTPS endpoint for signed event delivery (HTTP is permitted only in local development).
   ## @param api.notifications.existingSecret Existing Secret containing the webhook HMAC key; the chart never creates it.
