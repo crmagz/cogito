@@ -37,7 +37,7 @@ def test_phase14_workbench_e2e() -> None:
     assert status == 202, created
     run_id = str(created["run_id"])
     source_sha256 = str(dict(created["source_artifact"])["sha256"])
-    unauthenticated, _ = harness.api("GET", "/api/v1/workbench/runs")
+    unauthenticated, _ = harness.api("GET", "/api/v1/workbench/runs", authenticated=False)
     assert unauthenticated == 401
     listed, queue = harness.api("GET", "/api/v1/workbench/runs", authenticated=True)
     assert listed == 200, queue

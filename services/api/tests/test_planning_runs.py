@@ -39,6 +39,60 @@ def test_submit_planning_run_persists_immutable_source_artifact_and_run(
     assert record.target_repos == valid_plan["target_repos"]
 
 
+def test_submit_planning_run_requires_a_scoped_approver(
+    client: TestClient,
+    valid_plan: dict,
+    store: InMemoryPlanStore,
+    supervisor_store: InMemorySupervisorStore,
+) -> None:
+    unauthenticated = client.post(
+        "/api/v1/planning-runs",
+        json=_planning_request(valid_plan),
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+
+    assert unauthenticated.status_code == 401
+    assert store.source_specifications == {}
+    assert supervisor_store.planning_runs == {}
+
+
+def test_submit_planning_run_rejects_an_approver_without_default_project_scope(
+    valid_plan: dict, starter: FakeRunStarter, planner: FakePlanner
+) -> None:
+    store = InMemoryPlanStore()
+    supervisor_store = InMemorySupervisorStore()
+    client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(auth_static_projects=("other-project",)),
+            starter=starter,
+            supervisor_store=supervisor_store,
+            planner=planner,
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    response = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+
+    assert response.status_code == 403
+    assert store.source_specifications == {}
+    assert supervisor_store.planning_runs == {}
+
+
+def test_generate_plan_requires_a_scoped_approver(
+    client: TestClient, valid_plan: dict, planner: FakePlanner
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+
+    response = client.post(
+        f"/api/v1/planning-runs/{submitted.json()['run_id']}/generate-plan",
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+
+    assert response.status_code == 401
+    assert planner.contexts == []
+
+
 def test_submit_planning_run_rejects_unpinned_repository_without_writing(
     client: TestClient,
     valid_plan: dict,
@@ -133,7 +187,7 @@ def test_generate_plan_rejects_a_planner_without_the_model_grant(
         supervisor_store=supervisor_store,
         planner=planner,
     )
-    client = TestClient(app)
+    client = TestClient(app, headers={"Authorization": "Bearer operator-test-token"})
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
 
     response = client.post(f"/api/v1/planning-runs/{submitted.json()['run_id']}/generate-plan")
@@ -177,7 +231,8 @@ def test_concurrent_generation_converges_on_the_persisted_plan(
             starter=starter,
             supervisor_store=supervisor_store,
             planner=planner,
-        )
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
     )
     submitted = racing_client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
 

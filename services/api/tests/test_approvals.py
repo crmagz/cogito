@@ -26,7 +26,7 @@ def test_approval_requires_authenticated_operator(client: TestClient, valid_plan
     response = client.post(
         f"/api/v1/runs/{run_id}/approvals/plan",
         json={"decision": "approve", "artifact_sha256": digest},
-        headers={"Idempotency-Key": "approval-1"},
+        headers={"Authorization": "Bearer invalid-token", "Idempotency-Key": "approval-1"},
     )
 
     assert response.status_code == 401

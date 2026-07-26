@@ -258,9 +258,16 @@ def create_app(
         )
 
     @app.post("/api/v1/planning-runs")
-    async def submit_planning_run(submission: PlanningRunSubmission) -> JSONResponse:
+    async def submit_planning_run(
+        submission: PlanningRunSubmission,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
         """Persist an initial work specification for a future human-gated planning workflow."""
 
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        if settings.workbench_default_project_id not in principal.projects:
+            raise HTTPException(status_code=403, detail="operator is not authorized for the configured default project")
         violations = (
             validate_constraints(submission.constraints, settings)
             + validate_target_repositories(submission.target_repos, settings.allowed_git_hosts)
@@ -322,15 +329,21 @@ def create_app(
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
 
     @app.post("/api/v1/planning-runs/{run_id}/generate-plan")
-    async def generate_plan(run_id: str) -> JSONResponse:
+    async def generate_plan(
+        run_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
         """Generate and persist one normalized plan for a planning run.
 
         This endpoint becomes worker-internal when the durable workflow gate is added.
         """
 
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
+        require_workbench_scope(record, principal)
         if record.status is PlanningRunStatus.PLANNING:
             try:
                 planner_resolution = (await resolve_roles(run_id, ["planner"]))[0]
@@ -558,7 +571,7 @@ def create_app(
         """Return the authoritative supervisor record for a planning run."""
 
         principal = await authenticator.authenticate(authorization)
-        authenticator.require_viewer(principal)
+        authenticator.require_approver(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
@@ -768,7 +781,7 @@ def create_app(
         """Return one authenticated Supervisor-owned coordination projection."""
 
         principal = await authenticator.authenticate(authorization)
-        authenticator.require_viewer(principal)
+        authenticator.require_approver(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
@@ -785,7 +798,7 @@ def create_app(
         if limit < 1 or limit > 100:
             raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
         principal = await authenticator.authenticate(authorization)
-        authenticator.require_viewer(principal)
+        authenticator.require_approver(principal)
         records = await supervisor_store.list_workbench_runs(project_ids=principal.projects, limit=limit)
         response = CoordinationRunListResponse(items=[await coordination_response(record) for record in records])
         return JSONResponse(content=response.model_dump(mode="json"))

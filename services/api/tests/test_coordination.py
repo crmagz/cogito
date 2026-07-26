@@ -16,7 +16,10 @@ def _headers(key: str = "coordination-action") -> dict[str, str]:
 def test_coordination_detail_requires_existing_operator_auth(client, valid_plan: dict) -> None:
     run_id, _ = _awaiting_plan(client, valid_plan)
 
-    response = client.get(f"/api/v1/planning-runs/{run_id}/coordination")
+    response = client.get(
+        f"/api/v1/planning-runs/{run_id}/coordination",
+        headers={"Authorization": "Bearer invalid-token"},
+    )
 
     assert response.status_code == 401
 
@@ -80,7 +83,7 @@ async def test_coordination_list_is_authenticated_and_bounded(client, valid_plan
         ArtifactReference(ref=f"s3://plans/runs/{run_id}/implementation.json", sha256="b" * 64),
     )
 
-    unauthenticated = client.get("/api/v1/coordination/runs")
+    unauthenticated = client.get("/api/v1/coordination/runs", headers={"Authorization": "Bearer invalid-token"})
     response = client.get("/api/v1/coordination/runs?limit=1", headers=_headers())
 
     assert unauthenticated.status_code == 401
@@ -107,6 +110,7 @@ def test_unauthenticated_normalized_action_fails_auth_before_request_validation(
     response = client.post(
         f"/api/v1/coordination/runs/{run_id}/actions/plan",
         json={"decision": "approve", "artifact_sha256": digest},
+        headers={"Authorization": "Bearer invalid-token"},
     )
 
     assert response.status_code == 401
