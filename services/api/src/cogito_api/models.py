@@ -543,7 +543,7 @@ class CoordinationEventResponse(BaseModel):
 
 
 class CoordinationRunResponse(BaseModel):
-    """Authenticated Workbench summary from Supervisor-owned coordination state."""
+    """Privileged coordination summary from Supervisor-owned state."""
 
     run_id: str = Field(description="Authoritative Cogito run identifier")
     status: PlanningRunStatus = Field(description="Authoritative planning-run state")

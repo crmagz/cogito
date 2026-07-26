@@ -97,7 +97,7 @@ def client(
         supervisor_store=supervisor_store,
         planner=planner,
     )
-    return TestClient(app)
+    return TestClient(app, headers={"Authorization": "Bearer operator-test-token"})
 
 
 @pytest.fixture

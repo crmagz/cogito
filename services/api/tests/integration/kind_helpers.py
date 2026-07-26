@@ -50,7 +50,7 @@ class KindHarness:
         if self.context not in self.command("kubectl", "config", "get-contexts", "-o", "name").splitlines():
             pytest.skip(f"Kind context unavailable: {self.context}")
 
-    def api(self, method: str, path: str, body: dict[str, object] | None = None, *, authenticated: bool = False) -> tuple[int, dict[str, object]]:
+    def api(self, method: str, path: str, body: dict[str, object] | None = None, *, authenticated: bool = True) -> tuple[int, dict[str, object]]:
         code = """
 import json,os,sys,urllib.error,urllib.request
 payload=json.loads(sys.stdin.read()); headers={"Content-Type":"application/json"}

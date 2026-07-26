@@ -80,6 +80,17 @@ def test_workbench_returns_not_modified_for_matching_revision(client, valid_plan
 def test_workbench_hides_foreign_detail_and_rejects_viewer_actions(valid_plan) -> None:
     store = InMemoryPlanStore()
     supervisor_store = InMemorySupervisorStore()
+    writer = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(),
+            starter=FakeRunStarter(),
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+    run_id, digest = _awaiting_plan(writer, valid_plan)
     app = create_app(
         store=store,
         settings=make_settings(auth_static_projects=("alpha",), auth_static_roles=("cogito-viewer",)),
@@ -87,8 +98,9 @@ def test_workbench_hides_foreign_detail_and_rejects_viewer_actions(valid_plan) -
         supervisor_store=supervisor_store,
         planner=FakePlanner(AiPlan.model_validate(valid_plan)),
     )
-    client = TestClient(app)
-    run_id, digest = _awaiting_plan(client, valid_plan)
+    client = TestClient(app, headers={"Authorization": "Bearer operator-test-token"})
+    legacy_detail = client.get(f"/api/v1/planning-runs/{run_id}", headers=_headers())
+    coordination = client.get(f"/api/v1/planning-runs/{run_id}/coordination", headers=_headers())
     supervisor_store.planning_runs[run_id] = replace(
         supervisor_store.planning_runs[run_id], project_id="beta", status=PlanningRunStatus.AWAITING_PLAN_APPROVAL
     )
@@ -101,4 +113,6 @@ def test_workbench_hides_foreign_detail_and_rejects_viewer_actions(valid_plan) -
     )
 
     assert detail.status_code == 404
+    assert legacy_detail.status_code == 403
+    assert coordination.status_code == 403
     assert action.status_code == 403
