@@ -433,6 +433,95 @@ class ImplementationApprovalResponse(BaseModel):
     created_at: str = Field(description="ISO 8601 decision timestamp")
 
 
+class CoordinationGate(StrEnum):
+    """Human gate represented by a provider-neutral coordination event."""
+
+    PLAN = "plan"
+    IMPLEMENTATION = "implementation"
+
+
+class CoordinationApprovalActionRequest(BaseModel):
+    """Normalized authenticated approval action for a future operator client."""
+
+    decision: PlanApprovalDecision = Field(description="Decision to record for the selected approval gate")
+    artifact_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the exact immutable artifact being approved",
+    )
+    comment: str | None = Field(
+        default=None,
+        max_length=10_000,
+        description="Required durable rationale for rejection or revision requests",
+    )
+
+    @model_validator(mode="after")
+    def require_comment_for_non_approval(self) -> "CoordinationApprovalActionRequest":
+        """Keep normalized approval actions equivalent to existing gate requests."""
+
+        if self.decision is not PlanApprovalDecision.APPROVE and not (self.comment and self.comment.strip()):
+            raise ValueError("comment is required when rejecting or requesting revision")
+        return self
+
+
+class CoordinationArtifactReference(BaseModel):
+    """Safe immutable artifact identity surfaced to coordination clients."""
+
+    ref: str = Field(description="Immutable artifact reference; never includes artifact contents")
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$", description="SHA-256 digest of the immutable artifact")
+
+
+class CoordinationDeliveryResponse(BaseModel):
+    """Bounded reconciliation state for one outbound notification."""
+
+    delivered: bool = Field(description="Whether the configured sink acknowledged this event")
+    attempt_count: int = Field(ge=0, description="Number of leased delivery attempts")
+    last_error: str | None = Field(default=None, description="Bounded non-secret failure category")
+
+
+class CoordinationEventResponse(BaseModel):
+    """Provider-neutral authoritative event safe for authenticated operator reads."""
+
+    event_id: str = Field(description="Immutable coordination event identifier")
+    event_type: str = Field(description="Versioned safe event kind")
+    run_id: str = Field(description="Authoritative Cogito run identifier")
+    occurred_at: str = Field(description="ISO 8601 authoritative event timestamp")
+    gate: CoordinationGate | None = Field(default=None, description="Approval gate when applicable")
+    artifact: CoordinationArtifactReference | None = Field(
+        default=None, description="Exact immutable artifact identity when applicable"
+    )
+    decision: PlanApprovalDecision | None = Field(default=None, description="Recorded approval decision when applicable")
+    lifecycle_status: AgentRunStatus | None = Field(
+        default=None, description="Canonical lifecycle state when the event is a status transition"
+    )
+    delivery: CoordinationDeliveryResponse = Field(description="Notification reconciliation state")
+
+
+class CoordinationRunResponse(BaseModel):
+    """Authenticated Workbench summary from Supervisor-owned coordination state."""
+
+    run_id: str = Field(description="Authoritative Cogito run identifier")
+    status: PlanningRunStatus = Field(description="Authoritative planning-run state")
+    submitted_at: str = Field(description="ISO 8601 run submission timestamp")
+    plan_artifact: CoordinationArtifactReference | None = Field(
+        default=None, description="Current immutable plan identity when available"
+    )
+    implementation_artifact: CoordinationArtifactReference | None = Field(
+        default=None, description="Current immutable implementation identity when available"
+    )
+    active_gate: CoordinationGate | None = Field(default=None, description="Gate currently awaiting an operator action")
+    events: list[CoordinationEventResponse] = Field(
+        default_factory=list, description="Bounded newest-first coordination event history"
+    )
+
+
+class CoordinationRunListResponse(BaseModel):
+    """Bounded authenticated run queue for a future Operator Workbench."""
+
+    items: list[CoordinationRunResponse] = Field(description="Newest-first authoritative coordination summaries")
+
+
 class RunEnvelope(BaseModel):
     run_id: str
     plan_ref: str = Field(description="Object store path of the immutable plan snapshot")

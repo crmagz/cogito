@@ -85,6 +85,7 @@ class PostgresRunStateReporter:
         if metadata and "phase_result" in metadata:
             safe_metadata["phase_result"] = "recorded"
         implementation_artifact = metadata.get("implementation_artifact") if metadata else None
+        implementation_gate_event: dict[str, str] | None = None
         async with self._engine.begin() as connection:
             result = await connection.execute(
                 text("SELECT status FROM agent_runs WHERE run_id = :run_id FOR UPDATE"),
@@ -157,6 +158,7 @@ class PostgresRunStateReporter:
                         ),
                         {"run_id": run_id, "ref": ref, "sha256": digest, "created_at": now},
                     )
+                    implementation_gate_event = {"ref": ref, "sha256": digest}
             pull_request = metadata.get("pull_request") if metadata else None
             if status == "completed" and isinstance(pull_request, dict) and isinstance(implementation_artifact, dict):
                 number = pull_request.get("number")
@@ -192,6 +194,97 @@ class PostgresRunStateReporter:
                         ),
                         {"run_id": run_id, "artifact_sha256": digest},
                     )
+            if status in {"failed", "phase_failed", "stopped_with_backup"}:
+                # Planning runs have no generic `failed` state. Preserve the
+                # terminal worker outcome in the lifecycle event below while
+                # making the Supervisor projection terminal as well, so an
+                # operator can never be shown a live implementation gate for
+                # a workflow Temporal has already closed.
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE supervisor_runs
+                        SET status = 'planning_failed'
+                        WHERE run_id = :run_id
+                          AND status IN ('planning', 'implementing', 'awaiting_implementation_approval', 'finalizing')
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
+            if implementation_gate_event is not None:
+                implementation_event_id = str(uuid.uuid4())
+                implementation_payload = {
+                    "schema_version": "1.0",
+                    "event_type": "implementation_approval_requested",
+                    "run_id": run_id,
+                    "gate": "implementation",
+                    "artifact": implementation_gate_event,
+                    "decision": None,
+                    "lifecycle_status": None,
+                    "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
+                    "action_url": f"/api/v1/coordination/runs/{run_id}/actions/implementation",
+                }
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO coordination_events (event_id, run_id, event_type, dedupe_key, payload, created_at)
+                        VALUES (:event_id, :run_id, 'implementation_approval_requested', :dedupe_key,
+                                CAST(:payload AS jsonb), :occurred_at)
+                        """
+                    ),
+                    {
+                        "event_id": implementation_event_id,
+                        "run_id": run_id,
+                        "dedupe_key": implementation_event_id,
+                        "payload": json.dumps(implementation_payload, sort_keys=True, separators=(",", ":")),
+                        "occurred_at": now,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO notification_outbox (event_id, sink_id, created_at)
+                        VALUES (:event_id, 'webhook', :created_at)
+                        """
+                    ),
+                    {"event_id": implementation_event_id, "created_at": now},
+                )
+            coordination_event_id = str(uuid.uuid4())
+            coordination_payload = {
+                "schema_version": "1.0",
+                "event_type": "run_status_changed",
+                "run_id": run_id,
+                "gate": None,
+                "artifact": implementation_artifact if status == "awaiting_implementation_approval" else None,
+                "decision": None,
+                "lifecycle_status": target,
+                "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
+                "action_url": None,
+            }
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO coordination_events (event_id, run_id, event_type, dedupe_key, payload, created_at)
+                    VALUES (:event_id, :run_id, 'run_status_changed', :dedupe_key, CAST(:payload AS jsonb), :occurred_at)
+                    """
+                ),
+                {
+                    "event_id": coordination_event_id,
+                    "run_id": run_id,
+                    "dedupe_key": coordination_event_id,
+                    "payload": json.dumps(coordination_payload, sort_keys=True, separators=(",", ":")),
+                    "occurred_at": now,
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO notification_outbox (event_id, sink_id, created_at)
+                    VALUES (:event_id, 'webhook', :created_at)
+                    """
+                ),
+                {"event_id": coordination_event_id, "created_at": now},
+            )
             await connection.execute(
                 text(
                     """

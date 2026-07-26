@@ -29,3 +29,26 @@ def test_development_static_auth_remains_available_for_kind(monkeypatch: pytest.
     monkeypatch.setenv("COGITO_AUTH_MODE", "static")
 
     assert load_settings().auth_mode == "static"
+
+
+def test_enabled_notifications_require_a_signing_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COGITO_NOTIFICATION_ENABLED", "true")
+    monkeypatch.setenv("COGITO_NOTIFICATION_WEBHOOK_URL", "https://receiver.example.test/events")
+    monkeypatch.delenv("COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET", raising=False)
+
+    with pytest.raises(ValueError, match="HMAC_SECRET is required"):
+        load_settings()
+
+
+def test_production_notifications_require_https(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COGITO_DEPLOYMENT_MODE", "production")
+    monkeypatch.setenv("COGITO_AUTH_MODE", "oidc")
+    monkeypatch.setenv("COGITO_AUTH_OIDC_ISSUER", "https://issuer.example.test")
+    monkeypatch.setenv("COGITO_AUTH_OIDC_AUDIENCE", "cogito")
+    monkeypatch.setenv("COGITO_AUTH_OIDC_JWKS_URL", "https://issuer.example.test/jwks")
+    monkeypatch.setenv("COGITO_NOTIFICATION_ENABLED", "true")
+    monkeypatch.setenv("COGITO_NOTIFICATION_WEBHOOK_URL", "http://receiver.example.test/events")
+    monkeypatch.setenv("COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET", "test-secret")
+
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        load_settings()

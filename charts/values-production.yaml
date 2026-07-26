@@ -141,6 +141,8 @@ api:
       jwksUrl: "https://issuer.example.com/.well-known/jwks.json"
       roleClaim: roles
       approvalRole: cogito-approver
+  notifications:
+    enabled: false
 
 # Production worker settings
 worker:

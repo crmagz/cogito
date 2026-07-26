@@ -20,7 +20,9 @@ from cogito_api.supervisor import (
     AgentRunRecord,
     ApprovalConflictError,
     ApprovalRecord,
+    CoordinationEvent,
     ImplementationApprovalRecord,
+    NotificationDelivery,
     OutboxDelivery,
     PlanningRunRecord,
     RegistryConflictError,
@@ -86,6 +88,9 @@ class InMemorySupervisorStore:
         self.registrations: dict[tuple[str, str], RegistrationManifest] = {}
         self.registry_policies: dict[str, dict[str, str]] = {}
         self.run_registration_resolutions: dict[tuple[str, str], RegistrationReference] = {}
+        self.coordination_events: dict[str, CoordinationEvent] = {}
+        self.notification_deliveries: dict[str, tuple[bool, int, str | None]] = {}
+        self.leased_notification_event_ids: set[str] = set()
 
     async def create_agent_run(self, record: AgentRunRecord) -> None:
         self.agent_runs[record.run_id] = record
@@ -170,6 +175,12 @@ class InMemorySupervisorStore:
             plan_revision=record.plan_revision + 1,
         )
         self.planning_runs[run_id] = updated
+        self._append_coordination_event(
+            run_id,
+            "plan_approval_requested",
+            gate="plan",
+            artifact=plan_artifact,
+        )
         return updated
 
     async def record_plan_approval(
@@ -216,6 +227,13 @@ class InMemorySupervisorStore:
                 "decision": record.decision.value,
             },
             attempt_count=0,
+        )
+        self._append_coordination_event(
+            run_id,
+            "plan_approval_recorded",
+            gate="plan",
+            artifact=run.plan_artifact,
+            decision=decision.value,
         )
         return record
 
@@ -303,6 +321,12 @@ class InMemorySupervisorStore:
             **{**run.__dict__, "status": PlanningRunStatus.AWAITING_IMPLEMENTATION_APPROVAL,
                "implementation_artifact": artifact, "implementation_revision": run.implementation_revision + 1}
         )
+        self._append_coordination_event(
+            run_id,
+            "implementation_approval_requested",
+            gate="implementation",
+            artifact=artifact,
+        )
 
     async def record_implementation_approval(
         self, run_id: str, artifact_sha256: str, decision: ImplementationApprovalDecision,
@@ -331,6 +355,13 @@ class InMemorySupervisorStore:
             decision_id=record.decision_id, run_id=run_id, workflow_id=run.workflow_id or "",
             payload={"decision_id": record.decision_id, "artifact_sha256": artifact_sha256, "decision": decision.value},
             attempt_count=0,
+        )
+        self._append_coordination_event(
+            run_id,
+            "implementation_approval_recorded",
+            gate="implementation",
+            artifact=run.implementation_artifact,
+            decision=decision.value,
         )
         return record
 
@@ -376,6 +407,83 @@ class InMemorySupervisorStore:
     ) -> None:
         del retry_seconds, error
         self.leased_decision_ids.discard(decision_id)
+
+    def _append_coordination_event(
+        self,
+        run_id: str,
+        event_type: str,
+        *,
+        gate: str | None = None,
+        artifact: ArtifactReference | None = None,
+        decision: str | None = None,
+    ) -> None:
+        payload = {
+            "schema_version": "1.0",
+            "event_type": event_type,
+            "run_id": run_id,
+            "gate": gate,
+            "artifact": {"ref": artifact.ref, "sha256": artifact.sha256} if artifact and artifact.ref else None,
+            "decision": decision,
+            "lifecycle_status": None,
+            "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
+            "action_url": f"/api/v1/coordination/runs/{run_id}/actions/{gate}" if gate else None,
+        }
+        import hashlib
+        import json
+
+        event_id = f"notification-{len(self.coordination_events) + 1}"
+        dedupe_key = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if any(existing.payload.get("dedupe_key") == dedupe_key for existing in self.coordination_events.values()):
+            return
+        payload["dedupe_key"] = dedupe_key
+        self.coordination_events[event_id] = CoordinationEvent(
+            event_id=event_id,
+            run_id=run_id,
+            event_type=event_type,
+            occurred_at=datetime.now(timezone.utc).isoformat(),
+            gate=gate,
+            artifact_ref=artifact.ref if artifact and artifact.ref else None,
+            artifact_sha256=artifact.sha256 if artifact and artifact.ref else None,
+            decision=decision,
+            lifecycle_status=None,
+            payload=payload,
+        )
+        self.notification_deliveries[event_id] = (False, 0, None)
+
+    async def list_coordination_events(self, run_id: str, *, limit: int = 100):  # type: ignore[no-untyped-def]
+        events = [event for event in self.coordination_events.values() if event.run_id == run_id]
+        events.sort(key=lambda item: item.occurred_at, reverse=True)
+        return [
+            (event, *self.notification_deliveries[event.event_id])
+            for event in events[:limit]
+        ]
+
+    async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]:
+        return sorted(self.planning_runs.values(), key=lambda item: item.submitted_at, reverse=True)[:limit]
+
+    async def claim_notification_deliveries(self, *, limit: int, lease_seconds: int) -> list[NotificationDelivery]:
+        del lease_seconds
+        claimed = []
+        for event_id, (delivered, attempts, error) in self.notification_deliveries.items():
+            if delivered or event_id in self.leased_notification_event_ids:
+                continue
+            self.leased_notification_event_ids.add(event_id)
+            self.notification_deliveries[event_id] = (delivered, attempts + 1, error)
+            claimed.append(NotificationDelivery(self.coordination_events[event_id], attempts + 1))
+            if len(claimed) == limit:
+                break
+        return claimed
+
+    async def mark_notification_delivered(self, event_id: str) -> None:
+        _, attempts, _ = self.notification_deliveries[event_id]
+        self.notification_deliveries[event_id] = (True, attempts, None)
+        self.leased_notification_event_ids.discard(event_id)
+
+    async def release_notification_delivery(self, event_id: str, *, retry_seconds: int, error: str) -> None:
+        del retry_seconds
+        delivered, attempts, _ = self.notification_deliveries[event_id]
+        self.notification_deliveries[event_id] = (delivered, attempts, error)
+        self.leased_notification_event_ids.discard(event_id)
 
 
 class FakePlanner:

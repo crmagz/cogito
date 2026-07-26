@@ -113,7 +113,8 @@ run-key Secret were cleaned up.
 COGITO_E2E_TARGET_REPO='https://github.com/example/disposable-e2e.git#<40-or-64-hex-commit>' \
 COGITO_E2E_SPEC_REF='example@v1#sha256=<64-hex-digest>' \
 COGITO_E2E_EXPECTED_STATUS=completed \
-./scripts/kind-e2e-phase8.sh
+COGITO_E2E_ENABLED=1 uv run --project services/api pytest \
+  services/api/tests/integration/test_kind_e2e_phase8.py -m kind_e2e
 ```
 
 Use a disposable repository and a scoped write credential injected into the

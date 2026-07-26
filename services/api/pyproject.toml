@@ -35,3 +35,6 @@ packages = ["src/cogito_api"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "kind_e2e: opt-in Kind cluster integration tests requiring external credentials",
+]
