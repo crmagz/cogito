@@ -22,6 +22,7 @@ with workflow.unsafe.imports_passed_through():
         ReviewRevisionRequest,
         RunEnvelope,
         RunResult,
+        ValidationRequest,
     )
     from .registry import require_role, require_tool
 
@@ -257,8 +258,26 @@ class DeveloperRunWorkflow:
                         review_profile,
                     )
                     if review_outcome["status"] == "converged":
+                        validator_registration = require_role(envelope, "validator")
+                        validation = None
+                        if validator_registration is not None:
+                            require_tool(validator_registration, "validation_runner", "approved_verification")
+                            validation = await workflow.execute_activity(
+                                WorkerActivities.validate_implementation,
+                                args=[
+                                    ValidationRequest(
+                                        run_id=envelope.run_id,
+                                        phase_results=phase_results,
+                                        review=review_outcome,
+                                    )
+                                ],
+                                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                                retry_policy=_RUN_PHASE_RETRY_POLICY,
+                            )
+                            if validation.status != "passed":
+                                raise RuntimeError(f"validation gate failed: {validation.reason or 'unknown'}")
                         implementation_evidence = _implementation_evidence(
-                            envelope, workspace, phase_results, review_outcome
+                            envelope, workspace, phase_results, review_outcome, validation
                         )
                         implementation_artifact = await workflow.execute_activity(
                             WorkerActivities.freeze_implementation_artifact,
@@ -396,7 +415,7 @@ class DeveloperRunWorkflow:
             return RunResult(run_id=envelope.run_id, status="failed")
 
 
-def _implementation_evidence(envelope: RunEnvelope, workspace, phase_results: list[dict], review: dict) -> dict:
+def _implementation_evidence(envelope: RunEnvelope, workspace, phase_results: list[dict], review: dict, validation=None) -> dict:
     """Build compact, canonical approval evidence without source, prompts, or raw diffs."""
 
     commits: dict[str, str] = {}
@@ -455,6 +474,32 @@ def _implementation_evidence(envelope: RunEnvelope, workspace, phase_results: li
         "repository_origin": next(iter(workspace.repository_origins.values()), ""),
         "phase_results": safe_phase_results,
         "review": _safe_review_evidence(review),
+        "validation": {
+            "status": validation.status,
+            "checked_phases": validation.checked_phases,
+            "reason": validation.reason,
+        }
+        if validation is not None
+        else None,
+        "registry_resolutions": [
+            {
+                "role": resolution.role,
+                "registration_id": resolution.registration_id,
+                "version": resolution.version,
+                "manifest_sha256": resolution.manifest_sha256,
+                "component_id": resolution.component_id,
+                "component_version": resolution.component_version,
+                "grants": [
+                    {
+                        "tool_id": grant.tool_id,
+                        "tool_version": grant.tool_version,
+                        "scope": grant.scope,
+                    }
+                    for grant in resolution.grants
+                ],
+            }
+            for resolution in envelope.registry_resolutions
+        ],
         "models": sorted(models),
         "turns_used": turns_used,
         "cost_usd": round(cost_usd, 6),

@@ -5,6 +5,15 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class ToolGrant:
+    """Pinned least-privilege tool capability selected by the Supervisor."""
+
+    tool_id: str
+    tool_version: str
+    scope: str
+
+
+@dataclass(frozen=True)
 class RegistrationReference:
     """Pinned non-secret registry identity received from the Supervisor."""
 
@@ -14,7 +23,7 @@ class RegistrationReference:
     manifest_sha256: str
     component_id: str
     component_version: str
-    grants: list[tuple[str, str, str]] = field(default_factory=list)
+    grants: list[ToolGrant] = field(default_factory=list)
 
 
 @dataclass
@@ -46,6 +55,24 @@ class ImplementationArtifact:
 
     ref: str
     sha256: str
+
+
+@dataclass(frozen=True)
+class ValidationRequest:
+    """Bounded immutable evidence evaluated by the validator adapter."""
+
+    run_id: str
+    phase_results: list[dict[str, Any]]
+    review: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    """Safe deterministic result returned by the validation-gate adapter."""
+
+    status: str
+    checked_phases: int
+    reason: str | None = None
 
 
 @dataclass

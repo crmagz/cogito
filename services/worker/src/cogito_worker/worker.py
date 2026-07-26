@@ -120,6 +120,7 @@ async def main() -> None:
             activities.load_plan,
             activities.report_status,
             activities.freeze_implementation_artifact,
+            activities.validate_implementation,
             activities.open_pull_request,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
