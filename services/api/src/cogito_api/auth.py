@@ -61,6 +61,7 @@ class ApprovalAuthenticator:
             or not isinstance(roles, list)
             or not isinstance(projects, list)
             or not projects
+            or not all(isinstance(role, str) and role.strip() for role in roles)
             or not all(isinstance(project, str) and project.strip() for project in projects)
         ):
             raise HTTPException(status_code=403, detail="operator is not authorized for a project scope")

@@ -68,7 +68,7 @@ except urllib.error.HTTPError as error: print(json.dumps({"status":error.code,"b
         deadline = time.monotonic() + self.timeout
         latest: dict[str, object] = {}
         while time.monotonic() < deadline:
-            status, latest = self.api("GET", path)
+            status, latest = self.api("GET", path, authenticated=True)
             assert status == 200, latest
             if latest.get(field) == expected:
                 return latest
