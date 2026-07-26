@@ -31,6 +31,13 @@ def test_development_static_auth_remains_available_for_kind(monkeypatch: pytest.
     assert load_settings().auth_mode == "static"
 
 
+def test_static_scope_configuration_requires_json_string_arrays(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COGITO_AUTH_STATIC_PROJECTS", '{"project":"default"}')
+
+    with pytest.raises(ValueError, match="COGITO_AUTH_STATIC_PROJECTS must be a non-empty JSON string array"):
+        load_settings()
+
+
 def test_enabled_notifications_require_a_signing_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COGITO_NOTIFICATION_ENABLED", "true")
     monkeypatch.setenv("COGITO_NOTIFICATION_WEBHOOK_URL", "https://receiver.example.test/events")
