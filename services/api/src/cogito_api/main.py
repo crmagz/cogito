@@ -37,7 +37,7 @@ from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDi
 from .observability import Telemetry, TelemetrySettings
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
-from .registry import load_component_catalog
+from .registry import RegistryAuthorizationError, load_component_catalog, require_tool
 from .supervisor import (
     AgentRunRecord,
     ApprovalConflictError,
@@ -310,6 +310,11 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
         if record.status is PlanningRunStatus.PLANNING:
+            try:
+                planner_resolution = (await resolve_roles(run_id, ["planner"]))[0]
+                require_tool(planner_resolution, "planning_model", "plan_generation")
+            except (RegistryAuthorizationError, RegistryConflictError) as error:
+                raise HTTPException(status_code=503, detail="planner registry grant is unavailable") from error
             try:
                 initial_specification = store.get_source_specification(record.source_artifact.ref)
             except PlanStoreUnavailableError as error:

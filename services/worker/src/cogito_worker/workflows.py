@@ -146,10 +146,13 @@ class DeveloperRunWorkflow:
                     return RunResult(
                         run_id=envelope.run_id, status="revision_requested"
                     )
+            # A resolved registry run must authorize the developer before it
+            # creates a workspace or receives a developer-tool capability.
+            # Legacy envelopes remain supported while migration is active.
+            developer_registration = require_role(envelope, "developer")
+            require_tool(developer_registration, "execution_workspace", "run_scoped_workspace")
+            require_tool(developer_registration, "developer_harness", "approved_phase")
             workspace = await workflow.execute_activity(
-                # A resolved registry run must name the developer role before
-                # it receives a workspace or developer-tool capability.
-                # Legacy envelopes remain supported while migration is active.
                 WorkerActivities.provision_execution_workspace,
                 args=[
                     ExecutionRequest(
@@ -179,9 +182,6 @@ class DeveloperRunWorkflow:
                     start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 )
                 deadline = workflow.now() + run_timeout
-                developer_registration = require_role(envelope, "developer")
-                require_tool(developer_registration, "execution_workspace", "run_scoped_workspace")
-                require_tool(developer_registration, "developer_harness", "approved_phase")
                 for phase in phases:
                     remaining = deadline - workflow.now()
                     if remaining <= timedelta():
