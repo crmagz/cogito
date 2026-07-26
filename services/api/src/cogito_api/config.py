@@ -37,11 +37,17 @@ class Settings:
     auth_mode: str
     auth_static_token: str
     auth_static_subject: str
+    auth_static_projects: tuple[str, ...]
+    auth_static_roles: tuple[str, ...]
     auth_oidc_issuer: str
     auth_oidc_audience: str
     auth_oidc_jwks_url: str
     auth_oidc_role_claim: str
     auth_oidc_approval_role: str
+    auth_oidc_project_claim: str
+    auth_oidc_viewer_role: str
+    auth_oidc_admin_role: str
+    workbench_default_project_id: str
     registry_catalog_path: str
     notification_enabled: bool
     notification_webhook_url: str
@@ -108,11 +114,19 @@ def load_settings() -> Settings:
         auth_mode=os.environ.get("COGITO_AUTH_MODE", "static"),
         auth_static_token=os.environ.get("COGITO_AUTH_STATIC_TOKEN", ""),
         auth_static_subject=os.environ.get("COGITO_AUTH_STATIC_SUBJECT", "local-operator"),
+        auth_static_projects=tuple(json.loads(os.environ.get("COGITO_AUTH_STATIC_PROJECTS", '["default"]'))),
+        auth_static_roles=tuple(
+            json.loads(os.environ.get("COGITO_AUTH_STATIC_ROLES", '["cogito-viewer", "cogito-approver"]'))
+        ),
         auth_oidc_issuer=os.environ.get("COGITO_AUTH_OIDC_ISSUER", ""),
         auth_oidc_audience=os.environ.get("COGITO_AUTH_OIDC_AUDIENCE", ""),
         auth_oidc_jwks_url=os.environ.get("COGITO_AUTH_OIDC_JWKS_URL", ""),
         auth_oidc_role_claim=os.environ.get("COGITO_AUTH_OIDC_ROLE_CLAIM", "roles"),
         auth_oidc_approval_role=os.environ.get("COGITO_AUTH_OIDC_APPROVAL_ROLE", "cogito-approver"),
+        auth_oidc_project_claim=os.environ.get("COGITO_AUTH_OIDC_PROJECT_CLAIM", "cogito_projects"),
+        auth_oidc_viewer_role=os.environ.get("COGITO_AUTH_OIDC_VIEWER_ROLE", "cogito-viewer"),
+        auth_oidc_admin_role=os.environ.get("COGITO_AUTH_OIDC_ADMIN_ROLE", "cogito-admin"),
+        workbench_default_project_id=os.environ.get("COGITO_WORKBENCH_DEFAULT_PROJECT_ID", "default"),
         registry_catalog_path=os.environ.get(
             "COGITO_REGISTRY_CATALOG_PATH",
             str(_default_registry_catalog_path()),
@@ -146,6 +160,12 @@ def _validate_auth_configuration(settings: Settings) -> None:
         (settings.auth_oidc_issuer, settings.auth_oidc_audience, settings.auth_oidc_jwks_url)
     ):
         raise ValueError("OIDC approval authentication requires issuer, audience, and JWKS URL")
+    if not settings.workbench_default_project_id.strip():
+        raise ValueError("COGITO_WORKBENCH_DEFAULT_PROJECT_ID must not be empty")
+    if not settings.auth_static_projects or not all(project.strip() for project in settings.auth_static_projects):
+        raise ValueError("COGITO_AUTH_STATIC_PROJECTS must be a non-empty JSON string array")
+    if not settings.auth_static_roles or not all(role.strip() for role in settings.auth_static_roles):
+        raise ValueError("COGITO_AUTH_STATIC_ROLES must be a non-empty JSON string array")
     if settings.notification_timeout_seconds <= 0 or settings.notification_timeout_seconds > 60:
         raise ValueError("COGITO_NOTIFICATION_TIMEOUT_SECONDS must be greater than zero and at most 60")
     if not settings.notification_enabled:

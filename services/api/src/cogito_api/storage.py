@@ -32,6 +32,8 @@ class PlanStore(Protocol):
 
     def get_source_specification(self, source_artifact_ref: str) -> str: ...
 
+    def get_verified_artifact(self, artifact: ArtifactReference, *, max_bytes: int) -> bytes: ...
+
 
 @dataclass(frozen=True)
 class PlanSnapshot:
@@ -121,6 +123,32 @@ class MinioPlanStore:
         if not isinstance(initial_specification, str):
             raise ValueError("source artifact is not a valid initial specification")
         return initial_specification
+
+    def get_verified_artifact(self, artifact: ArtifactReference, *, max_bytes: int) -> bytes:
+        """Load one already-authorized immutable artifact with a strict byte limit."""
+
+        parsed = urlparse(artifact.ref)
+        if (
+            max_bytes < 1
+            or parsed.scheme != "s3"
+            or parsed.netloc not in {self._status_bucket, self._plan_snapshots_bucket}
+            or not parsed.path.lstrip("/")
+        ):
+            raise ValueError("artifact does not target a configured immutable bucket")
+        try:
+            response = self._client.get_object(parsed.netloc, parsed.path.lstrip("/"))
+        except S3Error as error:
+            raise PlanStoreUnavailableError("artifact storage is unavailable") from error
+        try:
+            body = response.read(max_bytes + 1)
+        finally:
+            response.close()
+            response.release_conn()
+        if len(body) > max_bytes:
+            raise ValueError("artifact exceeds the Workbench evidence limit")
+        if sha256(body).hexdigest() != artifact.sha256:
+            raise ValueError("artifact digest does not match its immutable reference")
+        return body
 
     def put_status(self, run_id: str, status: dict) -> None:
         data = json.dumps(status).encode()

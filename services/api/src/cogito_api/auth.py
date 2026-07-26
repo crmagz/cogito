@@ -14,9 +14,11 @@ from .config import Settings
 
 @dataclass(frozen=True)
 class Principal:
-    """Authenticated operator identity used in immutable approval records."""
+    """Authenticated identity and server-validated Workbench scope."""
 
     subject: str
+    projects: frozenset[str]
+    roles: frozenset[str]
 
 
 class ApprovalAuthenticator:
@@ -35,7 +37,11 @@ class ApprovalAuthenticator:
         if self._settings.auth_mode == "static":
             if not self._settings.auth_static_token or not hmac.compare_digest(token, self._settings.auth_static_token):
                 raise HTTPException(status_code=401, detail="invalid development operator token")
-            return Principal(subject=self._settings.auth_static_subject)
+            return Principal(
+                subject=self._settings.auth_static_subject,
+                projects=frozenset(self._settings.auth_static_projects),
+                roles=frozenset(self._settings.auth_static_roles),
+            )
         if self._settings.auth_mode != "oidc" or self._jwks is None:
             raise HTTPException(status_code=503, detail="approval authentication is not configured")
         try:
@@ -46,9 +52,36 @@ class ApprovalAuthenticator:
         roles = claims.get(self._settings.auth_oidc_role_claim, [])
         if isinstance(roles, str):
             roles = [roles]
-        if not isinstance(subject, str) or not subject or self._settings.auth_oidc_approval_role not in roles:
+        projects = claims.get(self._settings.auth_oidc_project_claim, [])
+        if isinstance(projects, str):
+            projects = [projects]
+        if (
+            not isinstance(subject, str)
+            or not subject
+            or not isinstance(roles, list)
+            or not isinstance(projects, list)
+            or not projects
+            or not all(isinstance(project, str) and project.strip() for project in projects)
+        ):
+            raise HTTPException(status_code=403, detail="operator is not authorized for a project scope")
+        return Principal(subject=subject, projects=frozenset(projects), roles=frozenset(roles))
+
+    def require_viewer(self, principal: Principal) -> None:
+        if not (
+            {
+                self._settings.auth_oidc_viewer_role,
+                self._settings.auth_oidc_approval_role,
+                self._settings.auth_oidc_admin_role,
+            }
+            & principal.roles
+        ):
+            raise HTTPException(status_code=403, detail="operator is not authorized to view Workbench runs")
+
+    def require_approver(self, principal: Principal) -> None:
+        if not (
+            {self._settings.auth_oidc_approval_role, self._settings.auth_oidc_admin_role} & principal.roles
+        ):
             raise HTTPException(status_code=403, detail="operator is not authorized to approve plans")
-        return Principal(subject=subject)
 
     def _decode_oidc_token(self, token: str) -> dict:
         assert self._jwks is not None

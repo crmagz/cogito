@@ -44,6 +44,7 @@ class PlanningRunRecord:
     plan_revision: int = 0
     implementation_artifact: ArtifactReference | None = None
     implementation_revision: int = 0
+    project_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,8 @@ class SupervisorStore(Protocol):
 
     async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]: ...
 
+    async def list_workbench_runs(self, *, project_ids: frozenset[str], limit: int = 50) -> list[PlanningRunRecord]: ...
+
     async def claim_notification_deliveries(self, *, limit: int, lease_seconds: int) -> list[NotificationDelivery]: ...
 
     async def mark_notification_delivered(self, event_id: str) -> None: ...
@@ -253,11 +256,11 @@ class PostgresSupervisorStore:
                     """
                     INSERT INTO supervisor_runs (
                         run_id, status, source_artifact_ref, source_artifact_sha256,
-                        target_repos, spec_set, constraints, priority, submitted_at, submitted_by
+                        target_repos, spec_set, constraints, priority, submitted_at, submitted_by, project_id
                     ) VALUES (
                         :run_id, :status, :source_artifact_ref, :source_artifact_sha256,
                         CAST(:target_repos AS jsonb), :spec_set, CAST(:constraints AS jsonb),
-                        :priority, :submitted_at, :submitted_by
+                        :priority, :submitted_at, :submitted_by, :project_id
                     )
                     """
                 ),
@@ -272,6 +275,7 @@ class PostgresSupervisorStore:
                     "priority": record.priority,
                     "submitted_at": datetime.fromisoformat(record.submitted_at),
                     "submitted_by": record.submitted_by,
+                    "project_id": record.project_id,
                 },
             )
             await connection.execute(
@@ -543,7 +547,7 @@ class PostgresSupervisorStore:
                     SELECT run_id, status, source_artifact_ref, source_artifact_sha256,
                            target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
                            plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
-                           implementation_artifact_ref, implementation_artifact_sha256, implementation_revision
+                           implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id
                     FROM supervisor_runs
                     WHERE run_id = :run_id
                     """
@@ -581,6 +585,7 @@ class PostgresSupervisorStore:
                 else None
             ),
             implementation_revision=row["implementation_revision"],
+            project_id=row["project_id"],
         )
 
     async def attach_generated_plan(
@@ -608,7 +613,7 @@ class PostgresSupervisorStore:
                     RETURNING run_id, status, source_artifact_ref, source_artifact_sha256,
                               target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
                               plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
-                              implementation_artifact_ref, implementation_artifact_sha256, implementation_revision
+                              implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id
                     """
                 ),
                 {
@@ -659,6 +664,7 @@ class PostgresSupervisorStore:
             plan_revision=row["plan_revision"],
             implementation_artifact=None,
             implementation_revision=row["implementation_revision"],
+            project_id=row["project_id"],
         )
 
     async def record_plan_approval(
@@ -1317,6 +1323,26 @@ class PostgresSupervisorStore:
             result = await connection.execute(
                 text("SELECT run_id FROM supervisor_runs ORDER BY submitted_at DESC LIMIT :limit"),
                 {"limit": max(1, min(limit, 100))},
+            )
+            run_ids = [row["run_id"] for row in result.mappings().all()]
+        records = [await self.get_planning_run(run_id) for run_id in run_ids]
+        return [record for record in records if record is not None]
+
+    async def list_workbench_runs(self, *, project_ids: frozenset[str], limit: int = 50) -> list[PlanningRunRecord]:
+        """List only runs whose persisted project scope is authorized."""
+
+        if not project_ids:
+            return []
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT run_id FROM supervisor_runs
+                    WHERE project_id = ANY(CAST(:project_ids AS text[]))
+                    ORDER BY submitted_at DESC LIMIT :limit
+                    """
+                ),
+                {"project_ids": list(project_ids), "limit": max(1, min(limit, 100))},
             )
             run_ids = [row["run_id"] for row in result.mappings().all()]
         records = [await self.get_planning_run(run_id) for run_id in run_ids]

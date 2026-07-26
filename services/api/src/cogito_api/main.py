@@ -41,6 +41,11 @@ from .models import (
     RunEnvelope,
     RunSubmission,
     Violation,
+    WorkbenchArtifactKind,
+    WorkbenchArtifactSummary,
+    WorkbenchEvidenceResponse,
+    WorkbenchRunListResponse,
+    WorkbenchRunResponse,
 )
 from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDispatcher, stop_dispatcher
 from .notifications import NotificationOutboxDispatcher, notification_sink, stop_notification_dispatcher
@@ -303,6 +308,7 @@ def create_app(
             priority=submission.priority,
             submitted_at=submitted_at,
             submitted_by="api",
+            project_id=settings.workbench_default_project_id,
         )
         await supervisor_store.create_planning_run(record)
         response = PlanningRunResponse(
@@ -434,6 +440,11 @@ def create_app(
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
         principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
         request_sha256 = sha256(
             json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -476,6 +487,11 @@ def create_app(
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
         principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
         request_sha256 = sha256(
             json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -535,12 +551,18 @@ def create_app(
         return record
 
     @app.get("/api/v1/planning-runs/{run_id}")
-    async def get_planning_run(run_id: str) -> JSONResponse:
+    async def get_planning_run(
+        run_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
         """Return the authoritative supervisor record for a planning run."""
 
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
-            raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
         response = PlanningRunResponse(
             run_id=record.run_id,
             status=record.status,
@@ -607,6 +629,137 @@ def create_app(
             events=event_responses,
         )
 
+    def require_workbench_scope(record: PlanningRunRecord, principal) -> None:
+        """Fail closed without revealing whether a foreign run exists."""
+
+        if record.project_id is None or record.project_id not in principal.projects:
+            raise HTTPException(status_code=404, detail="planning run not found")
+
+    def workbench_response(record: PlanningRunRecord, principal) -> WorkbenchRunResponse:
+        require_workbench_scope(record, principal)
+        artifacts = [WorkbenchArtifactSummary(kind=WorkbenchArtifactKind.SOURCE, sha256=record.source_artifact.sha256)]
+        if record.plan_artifact is not None:
+            artifacts.append(WorkbenchArtifactSummary(kind=WorkbenchArtifactKind.PLAN, sha256=record.plan_artifact.sha256))
+        if record.implementation_artifact is not None:
+            artifacts.append(
+                WorkbenchArtifactSummary(
+                    kind=WorkbenchArtifactKind.IMPLEMENTATION,
+                    sha256=record.implementation_artifact.sha256,
+                )
+            )
+        active_gate = (
+            CoordinationGate.PLAN
+            if record.status is PlanningRunStatus.AWAITING_PLAN_APPROVAL
+            else CoordinationGate.IMPLEMENTATION
+            if record.status is PlanningRunStatus.AWAITING_IMPLEMENTATION_APPROVAL
+            else None
+        )
+        abilities = ["view"]
+        if {
+            settings.auth_oidc_approval_role,
+            settings.auth_oidc_admin_role,
+        } & principal.roles:
+            abilities.append("approve")
+        workflow = ["planning"]
+        if record.plan_artifact is not None:
+            workflow.append("plan")
+        if record.implementation_artifact is not None:
+            workflow.append("implementation")
+        if active_gate is not None:
+            workflow.append(f"{active_gate.value}_approval")
+        return WorkbenchRunResponse(
+            run_id=record.run_id,
+            project_id=record.project_id,
+            status=record.status,
+            submitted_at=record.submitted_at,
+            active_gate=active_gate,
+            artifacts=artifacts,
+            abilities=abilities,
+            workflow=workflow,
+        )
+
+    def workbench_revision(response: WorkbenchRunListResponse | WorkbenchRunResponse) -> str:
+        return sha256(json.dumps(response.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    @app.get("/api/v1/workbench/runs")
+    async def list_workbench_runs(
+        authorization: str | None = Header(default=None),
+        if_none_match: str | None = Header(default=None, alias="If-None-Match"),
+        limit: int = 50,
+    ) -> JSONResponse:
+        """List only server-authorized run summaries for the Operator Workbench."""
+
+        if limit < 1 or limit > 100:
+            raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        records = await supervisor_store.list_workbench_runs(project_ids=principal.projects, limit=limit)
+        items = [workbench_response(record, principal) for record in records]
+        draft = WorkbenchRunListResponse(items=items, revision="")
+        revision = workbench_revision(draft)
+        if if_none_match == revision:
+            return JSONResponse(status_code=status.HTTP_304_NOT_MODIFIED, content=None, headers={"ETag": revision})
+        response = WorkbenchRunListResponse(items=items, revision=revision)
+        return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": revision})
+
+    @app.get("/api/v1/workbench/runs/{run_id}")
+    async def get_workbench_run(
+        run_id: str,
+        authorization: str | None = Header(default=None),
+        if_none_match: str | None = Header(default=None, alias="If-None-Match"),
+    ) -> JSONResponse:
+        """Return one scope-filtered Workbench detail projection."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        response = workbench_response(record, principal)
+        revision = workbench_revision(response)
+        if if_none_match == revision:
+            return JSONResponse(status_code=status.HTTP_304_NOT_MODIFIED, content=None, headers={"ETag": revision})
+        return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": revision})
+
+    @app.get("/api/v1/workbench/runs/{run_id}/evidence/{kind}")
+    async def get_workbench_evidence(
+        run_id: str,
+        kind: WorkbenchArtifactKind,
+        artifact_sha256: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Read bounded verified evidence selected only by a server-owned run artifact."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        artifact = {
+            WorkbenchArtifactKind.SOURCE: record.source_artifact,
+            WorkbenchArtifactKind.PLAN: record.plan_artifact,
+            WorkbenchArtifactKind.IMPLEMENTATION: record.implementation_artifact,
+        }[kind]
+        if artifact is None or artifact.sha256 != artifact_sha256:
+            raise HTTPException(status_code=404, detail="evidence not found")
+        try:
+            content = store.get_verified_artifact(artifact, max_bytes=100_000).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise HTTPException(status_code=422, detail="evidence is not renderable text") from error
+        except PlanStoreUnavailableError as error:
+            raise HTTPException(status_code=503, detail="evidence storage is temporarily unavailable") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return JSONResponse(
+            content=WorkbenchEvidenceResponse(
+                kind=kind,
+                sha256=artifact.sha256,
+                content_type="application/json",
+                content=content,
+            ).model_dump(mode="json")
+        )
+
     @app.get("/api/v1/planning-runs/{run_id}/coordination")
     async def get_coordination_run(
         run_id: str,
@@ -614,10 +767,12 @@ def create_app(
     ) -> JSONResponse:
         """Return one authenticated Supervisor-owned coordination projection."""
 
-        await authenticator.authenticate(authorization)
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
-            raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
         return JSONResponse(content=(await coordination_response(record)).model_dump(mode="json"))
 
     @app.get("/api/v1/coordination/runs")
@@ -629,8 +784,9 @@ def create_app(
 
         if limit < 1 or limit > 100:
             raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
-        await authenticator.authenticate(authorization)
-        records = await supervisor_store.list_coordination_runs(limit=limit)
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        records = await supervisor_store.list_workbench_runs(project_ids=principal.projects, limit=limit)
         response = CoordinationRunListResponse(items=[await coordination_response(record) for record in records])
         return JSONResponse(content=response.model_dump(mode="json"))
 
@@ -645,6 +801,11 @@ def create_app(
         """Delegate an authenticated normalized action to the existing approval authority."""
 
         principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
         request_sha256 = sha256(

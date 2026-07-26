@@ -42,11 +42,17 @@ data:
   COGITO_LITELLM_PLANNER_TIMEOUT_SECONDS: {{ default 60 $planner.timeoutSeconds | quote }}
   COGITO_AUTH_MODE: {{ default "static" $auth.mode | quote }}
   COGITO_AUTH_STATIC_SUBJECT: {{ default "local-operator" $staticAuth.subject | quote }}
+  COGITO_AUTH_STATIC_PROJECTS: {{ toJson (default (list "default") $staticAuth.projects) | quote }}
+  COGITO_AUTH_STATIC_ROLES: {{ toJson (default (list "cogito-viewer" "cogito-approver") $staticAuth.roles) | quote }}
   COGITO_AUTH_OIDC_ISSUER: {{ default "" $oidcAuth.issuer | quote }}
   COGITO_AUTH_OIDC_AUDIENCE: {{ default "" $oidcAuth.audience | quote }}
   COGITO_AUTH_OIDC_JWKS_URL: {{ default "" $oidcAuth.jwksUrl | quote }}
   COGITO_AUTH_OIDC_ROLE_CLAIM: {{ default "roles" $oidcAuth.roleClaim | quote }}
   COGITO_AUTH_OIDC_APPROVAL_ROLE: {{ default "cogito-approver" $oidcAuth.approvalRole | quote }}
+  COGITO_AUTH_OIDC_PROJECT_CLAIM: {{ default "cogito_projects" $oidcAuth.projectClaim | quote }}
+  COGITO_AUTH_OIDC_VIEWER_ROLE: {{ default "cogito-viewer" $oidcAuth.viewerRole | quote }}
+  COGITO_AUTH_OIDC_ADMIN_ROLE: {{ default "cogito-admin" $oidcAuth.adminRole | quote }}
+  COGITO_WORKBENCH_DEFAULT_PROJECT_ID: {{ default "default" $auth.defaultProjectId | quote }}
   COGITO_REGISTRY_CATALOG_PATH: "/app/components"
   COGITO_NOTIFICATION_ENABLED: {{ default false $notifications.enabled | quote }}
   COGITO_NOTIFICATION_WEBHOOK_URL: {{ default "" $notifications.webhookUrl | quote }}
