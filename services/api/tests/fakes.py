@@ -73,6 +73,21 @@ class InMemoryPlanStore:
         run_id = source_artifact_ref.split("/")[4]
         return self.source_specifications[run_id]
 
+    def get_verified_artifact(self, artifact: ArtifactReference, *, max_bytes: int) -> bytes:
+        if "/source-spec.json" in artifact.ref:
+            run_id = artifact.ref.split("/")[4]
+            body = source_specification_bytes(self.source_specifications[run_id])
+        else:
+            run_id = artifact.ref.split("/")[4]
+            body = plan_snapshot_bytes(self.plans[run_id])
+        if len(body) > max_bytes:
+            raise ValueError("artifact exceeds the Workbench evidence limit")
+        from hashlib import sha256
+
+        if sha256(body).hexdigest() != artifact.sha256:
+            raise ValueError("artifact digest does not match its immutable reference")
+        return body
+
 
 class InMemorySupervisorStore:
     def __init__(self) -> None:
@@ -173,6 +188,7 @@ class InMemorySupervisorStore:
             planner_model=planner_model,
             workflow_id=workflow_id,
             plan_revision=record.plan_revision + 1,
+            project_id=record.project_id,
         )
         self.planning_runs[run_id] = updated
         self._append_coordination_event(
@@ -274,6 +290,7 @@ class InMemorySupervisorStore:
                     planner_model=None if status is PlanningRunStatus.PLANNING else run.planner_model,
                     workflow_id=None if status is PlanningRunStatus.PLANNING else run.workflow_id,
                     plan_revision=run.plan_revision,
+                    project_id=run.project_id,
                 )
                 self.outbox.pop(decision_id, None)
                 self.leased_decision_ids.discard(decision_id)
@@ -460,6 +477,13 @@ class InMemorySupervisorStore:
 
     async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]:
         return sorted(self.planning_runs.values(), key=lambda item: item.submitted_at, reverse=True)[:limit]
+
+    async def list_workbench_runs(self, *, project_ids: frozenset[str], limit: int = 50) -> list[PlanningRunRecord]:
+        return [
+            record
+            for record in sorted(self.planning_runs.values(), key=lambda item: item.submitted_at, reverse=True)
+            if record.project_id in project_ids
+        ][:limit]
 
     async def claim_notification_deliveries(self, *, limit: int, lease_seconds: int) -> list[NotificationDelivery]:
         del lease_seconds
