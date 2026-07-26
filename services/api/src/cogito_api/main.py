@@ -115,6 +115,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        # Validate and persist the non-secret catalog before the API reports
+        # ready. Deferring this until the first submitted run makes a broken
+        # migration or policy look healthy and delays a safe failure boundary.
+        await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments)
         delivery_task = asyncio.create_task(dispatcher.run())
         implementation_delivery_task = asyncio.create_task(implementation_dispatcher.run())
         try:
