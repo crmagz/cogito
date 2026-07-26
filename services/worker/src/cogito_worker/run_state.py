@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any, Protocol
 
 from sqlalchemy import text
@@ -85,7 +86,7 @@ class PostgresRunStateReporter:
         if metadata and "phase_result" in metadata:
             safe_metadata["phase_result"] = "recorded"
         implementation_artifact = metadata.get("implementation_artifact") if metadata else None
-        implementation_gate_event: dict[str, str] | None = None
+        implementation_gate_event: dict[str, object] | None = None
         async with self._engine.begin() as connection:
             result = await connection.execute(
                 text("SELECT status FROM agent_runs WHERE run_id = :run_id FOR UPDATE"),
@@ -147,7 +148,8 @@ class PostgresRunStateReporter:
                     ),
                     {"run_id": run_id, "ref": ref, "sha256": digest},
                 )
-                if artifact_result.mappings().one_or_none() is not None:
+                artifact_row = artifact_result.mappings().one_or_none()
+                if artifact_row is not None:
                     await connection.execute(
                         text(
                             """
@@ -158,7 +160,11 @@ class PostgresRunStateReporter:
                         ),
                         {"run_id": run_id, "ref": ref, "sha256": digest, "created_at": now},
                     )
-                    implementation_gate_event = {"ref": ref, "sha256": digest}
+                    implementation_gate_event = {
+                        "ref": ref,
+                        "sha256": digest,
+                        "revision": artifact_row["implementation_revision"],
+                    }
             pull_request = metadata.get("pull_request") if metadata else None
             if status == "completed" and isinstance(pull_request, dict) and isinstance(implementation_artifact, dict):
                 number = pull_request.get("number")
@@ -213,6 +219,12 @@ class PostgresRunStateReporter:
                 )
             if implementation_gate_event is not None:
                 implementation_event_id = str(uuid.uuid4())
+                implementation_dedupe_key = _coordination_dedupe_key(
+                    run_id,
+                    "implementation_approval_requested",
+                    str(implementation_gate_event["revision"]),
+                    str(implementation_gate_event["sha256"]),
+                )
                 implementation_payload = {
                     "schema_version": "1.0",
                     "event_type": "implementation_approval_requested",
@@ -224,32 +236,38 @@ class PostgresRunStateReporter:
                     "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
                     "action_url": f"/api/v1/coordination/runs/{run_id}/actions/implementation",
                 }
-                await connection.execute(
+                implementation_result = await connection.execute(
                     text(
                         """
                         INSERT INTO coordination_events (event_id, run_id, event_type, dedupe_key, payload, created_at)
                         VALUES (:event_id, :run_id, 'implementation_approval_requested', :dedupe_key,
                                 CAST(:payload AS jsonb), :occurred_at)
+                        ON CONFLICT (dedupe_key) DO NOTHING
+                        RETURNING event_id
                         """
                     ),
                     {
                         "event_id": implementation_event_id,
                         "run_id": run_id,
-                        "dedupe_key": implementation_event_id,
+                        "dedupe_key": implementation_dedupe_key,
                         "payload": json.dumps(implementation_payload, sort_keys=True, separators=(",", ":")),
                         "occurred_at": now,
                     },
                 )
-                await connection.execute(
-                    text(
-                        """
-                        INSERT INTO notification_outbox (event_id, sink_id, created_at)
-                        VALUES (:event_id, 'webhook', :created_at)
-                        """
-                    ),
-                    {"event_id": implementation_event_id, "created_at": now},
-                )
+                if implementation_result.mappings().one_or_none() is not None:
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO notification_outbox (event_id, sink_id, created_at)
+                            VALUES (:event_id, 'webhook', :created_at)
+                            """
+                        ),
+                        {"event_id": implementation_event_id, "created_at": now},
+                    )
             coordination_event_id = str(uuid.uuid4())
+            lifecycle_dedupe_key = _coordination_dedupe_key(
+                run_id, "run_status_changed", previous, target
+            )
             coordination_payload = {
                 "schema_version": "1.0",
                 "event_type": "run_status_changed",
@@ -261,30 +279,33 @@ class PostgresRunStateReporter:
                 "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
                 "action_url": None,
             }
-            await connection.execute(
+            lifecycle_result = await connection.execute(
                 text(
                     """
                     INSERT INTO coordination_events (event_id, run_id, event_type, dedupe_key, payload, created_at)
                     VALUES (:event_id, :run_id, 'run_status_changed', :dedupe_key, CAST(:payload AS jsonb), :occurred_at)
+                    ON CONFLICT (dedupe_key) DO NOTHING
+                    RETURNING event_id
                     """
                 ),
                 {
                     "event_id": coordination_event_id,
                     "run_id": run_id,
-                    "dedupe_key": coordination_event_id,
+                    "dedupe_key": lifecycle_dedupe_key,
                     "payload": json.dumps(coordination_payload, sort_keys=True, separators=(",", ":")),
                     "occurred_at": now,
                 },
             )
-            await connection.execute(
-                text(
-                    """
-                    INSERT INTO notification_outbox (event_id, sink_id, created_at)
-                    VALUES (:event_id, 'webhook', :created_at)
-                    """
-                ),
-                {"event_id": coordination_event_id, "created_at": now},
-            )
+            if lifecycle_result.mappings().one_or_none() is not None:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO notification_outbox (event_id, sink_id, created_at)
+                        VALUES (:event_id, 'webhook', :created_at)
+                        """
+                    ),
+                    {"event_id": coordination_event_id, "created_at": now},
+                )
             await connection.execute(
                 text(
                     """
@@ -310,6 +331,12 @@ def _safe_error(value: str | None) -> str | None:
     if not value:
         return None
     return " ".join(value.split())[:4096]
+
+
+def _coordination_dedupe_key(*parts: str) -> str:
+    """Bind an outbox event to its immutable worker transition identity."""
+
+    return sha256("\x1f".join(parts).encode()).hexdigest()
 
 
 def _repository_from_pull_request_url(url: str) -> str | None:
