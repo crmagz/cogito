@@ -6,7 +6,14 @@ from pathlib import Path
 import pytest
 
 from cogito_api.models import RegistrationManifest
-from cogito_api.registry import canonical_manifest_bytes, load_component_catalog, manifest_sha256, registration_reference
+from cogito_api.registry import (
+    RegistryAuthorizationError,
+    canonical_manifest_bytes,
+    load_component_catalog,
+    manifest_sha256,
+    registration_reference,
+    require_tool,
+)
 from cogito_api.supervisor import RegistryConflictError
 
 from .fakes import InMemorySupervisorStore
@@ -52,6 +59,17 @@ def test_manifest_identity_is_canonical_and_role_reference_is_audit_safe() -> No
     assert reference.version == "1.0.0"
     assert reference.component_id == "planner"
     assert reference.manifest_sha256 == manifest_sha256(manifest)
+    require_tool(reference, "planning_model", "plan_generation")
+
+
+def test_api_tool_guard_rejects_an_ungranted_pinned_tool() -> None:
+    manifest = RegistrationManifest.model_validate(
+        json.loads((_catalog_root() / "agents" / "planner" / "component.json").read_text(encoding="utf-8"))
+    )
+    reference = registration_reference("planner", manifest.model_copy(update={"grants": []}))
+
+    with pytest.raises(RegistryAuthorizationError, match="planning_model"):
+        require_tool(reference, "planning_model", "plan_generation")
 
 
 def test_component_catalog_rejects_agent_grant_to_unknown_tool(tmp_path: Path) -> None:

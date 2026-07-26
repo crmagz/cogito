@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field, model_validator
 from .models import RegistrationManifest, RegistrationReference
 
 
+class RegistryAuthorizationError(RuntimeError):
+    """Raised when a pinned registry role lacks a required tool grant."""
+
+
 class ComponentCatalog(BaseModel):
     """Versioned monorepo definitions that may be registered by the Supervisor."""
 
@@ -70,6 +74,16 @@ def registration_reference(role: str, manifest: RegistrationManifest) -> Registr
         component_id=manifest.component_id,
         component_version=manifest.component_version,
         grants=manifest.grants,
+    )
+
+
+def require_tool(reference: RegistrationReference, tool_id: str, scope: str) -> None:
+    """Require a catalog-validated pinned tool release at an API-side boundary."""
+
+    if any(grant.tool_id == tool_id and grant.scope == scope for grant in reference.grants):
+        return
+    raise RegistryAuthorizationError(
+        f"role '{reference.role}' is not granted tool '{tool_id}' scope '{scope}'"
     )
 
 

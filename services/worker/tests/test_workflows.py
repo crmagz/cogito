@@ -10,10 +10,12 @@ from cogito_worker.activities import WorkerActivities
 from cogito_worker.models import (
     ExecutionWorkspace,
     PhaseResult,
+    RegistrationReference,
     ReviewFinding,
     ReviewResult,
     RunEnvelope,
     RunResult,
+    ToolGrant,
 )
 from cogito_worker.workflows import (
     DeveloperRunWorkflow,
@@ -128,6 +130,56 @@ async def test_workflow_runs_activities_and_reports_completion(
     assert [workspace.run_id for workspace in workspaces.cleaned] == ["run-1"]
     assert harness.requests[0].max_turns == 25
     assert store.statuses["run-1"]["phase_results"][0]["turns_used"] == 3
+
+
+async def test_resolved_run_rejects_missing_developer_before_workspace_provisioning(
+    env: WorkflowEnvironment,
+):
+    store = InMemoryRunStore()
+    plan_ref = "s3://plans/plans/run-missing-developer/plan.json"
+    spec_ref = "typescript-backend@v2.1#sha256=" + "a" * 64
+    store.plans[plan_ref] = _single_phase_plan(spec_ref, [])
+    plan_sha256 = hashlib.sha256(
+        json.dumps(store.plans[plan_ref], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    workspaces = InMemoryExecutionWorkspaces()
+    activities = WorkerActivities(store, workspaces, InMemoryHarness())
+    task_queue = f"test-queue-{uuid.uuid4()}"
+    planner = RegistrationReference(
+        role="planner",
+        registration_id="planner",
+        version="1.0.0",
+        manifest_sha256="a" * 64,
+        component_id="planner",
+        component_version="1.0.0",
+        grants=[ToolGrant(tool_id="planning_model", tool_version="1.0.0", scope="plan_generation")],
+    )
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[DeveloperRunWorkflow],
+        activities=[
+            activities.load_plan,
+            activities.report_status,
+            activities.provision_execution_workspace,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            DeveloperRunWorkflow.run,
+            RunEnvelope(
+                run_id="run-missing-developer",
+                plan_ref=plan_ref,
+                plan_sha256=plan_sha256,
+                spec_ref=spec_ref,
+                registry_resolutions=[planner],
+            ),
+            id=f"test-workflow-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+    assert result == RunResult(run_id="run-missing-developer", status="failed")
+    assert workspaces.provisioned == []
 
 
 async def test_workflow_runs_dependency_ordered_phases_in_one_workspace(

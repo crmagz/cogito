@@ -39,7 +39,7 @@ def test_resolved_role_rejects_an_ungranted_tool() -> None:
         require_tool(resolution, "planning_model", "plan_generation")
 
 
-def test_resolved_role_accepts_a_typed_pinned_tool_grant() -> None:
+def test_resolved_role_accepts_a_typed_pinned_tool_grant_at_any_catalog_version() -> None:
     reference = _reference("planner")
     resolution = RegistrationReference(
         role=reference.role,
@@ -48,7 +48,7 @@ def test_resolved_role_accepts_a_typed_pinned_tool_grant() -> None:
         manifest_sha256=reference.manifest_sha256,
         component_id=reference.component_id,
         component_version=reference.component_version,
-        grants=[ToolGrant(tool_id="planning_model", tool_version="1.0.0", scope="plan_generation")],
+        grants=[ToolGrant(tool_id="planning_model", tool_version="1.1.0", scope="plan_generation")],
     )
 
     require_tool(resolution, "planning_model", "plan_generation")

@@ -105,6 +105,42 @@ def test_generate_plan_persists_validated_artifact_and_enters_approval_state(
     assert supervisor_store.planning_runs[run_id].plan_artifact is not None
 
 
+def test_generate_plan_rejects_a_planner_without_the_model_grant(
+    valid_plan: dict, planner: FakePlanner, starter: FakeRunStarter
+) -> None:
+    class GrantRevokingStore(InMemorySupervisorStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.planner_resolutions = 0
+
+        async def resolve_run_registration(self, *args, **kwargs):
+            resolution = await super().resolve_run_registration(*args, **kwargs)
+            if resolution.role == "planner":
+                self.planner_resolutions += 1
+                if self.planner_resolutions > 1:
+                    return resolution.model_copy(update={"grants": []})
+            return resolution
+
+    store = InMemoryPlanStore()
+    supervisor_store = GrantRevokingStore()
+    app = create_app(
+        store=store,
+        settings=make_settings(),
+        starter=starter,
+        supervisor_store=supervisor_store,
+        planner=planner,
+    )
+    client = TestClient(app)
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+
+    response = client.post(f"/api/v1/planning-runs/{submitted.json()['run_id']}/generate-plan")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "planner registry grant is unavailable"
+    assert planner.contexts == []
+    assert starter.started_runs == []
+
+
 def test_generate_plan_retries_workflow_start_without_regenerating_artifact(
     client: TestClient, valid_plan: dict, planner: FakePlanner, starter: FakeRunStarter
 ) -> None:
