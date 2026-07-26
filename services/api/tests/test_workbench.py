@@ -1,0 +1,104 @@
+"""Scoped Operator Workbench contract and evidence-reader coverage."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from fastapi.testclient import TestClient
+
+from cogito_api.main import create_app
+from cogito_api.models import AiPlan, PlanningRunStatus
+
+from .conftest import make_settings
+from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
+from .test_approvals import _awaiting_plan
+
+
+def _headers(key: str = "workbench-action") -> dict[str, str]:
+    return {"Authorization": "Bearer operator-test-token", "Idempotency-Key": key}
+
+
+def test_workbench_queue_filters_to_authorized_project(client, valid_plan, supervisor_store) -> None:
+    allowed_run, _ = _awaiting_plan(client, valid_plan)
+    foreign_run, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store.planning_runs[allowed_run] = replace(
+        supervisor_store.planning_runs[allowed_run], project_id="default"
+    )
+    supervisor_store.planning_runs[foreign_run] = replace(
+        supervisor_store.planning_runs[foreign_run], project_id="other-project"
+    )
+
+    response = client.get("/api/v1/workbench/runs", headers=_headers())
+
+    assert response.status_code == 200
+    assert [item["run_id"] for item in response.json()["items"]] == [allowed_run]
+    assert response.json()["items"][0]["active_gate"] == "plan"
+    assert "ref" not in str(response.json())
+
+
+def test_workbench_detail_and_evidence_are_scope_and_digest_bound(client, valid_plan, supervisor_store) -> None:
+    run_id, digest = _awaiting_plan(client, valid_plan)
+    supervisor_store.planning_runs[run_id] = replace(supervisor_store.planning_runs[run_id], project_id="default")
+
+    detail = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    evidence = client.get(
+        f"/api/v1/workbench/runs/{run_id}/evidence/plan",
+        params={"artifact_sha256": digest},
+        headers=_headers(),
+    )
+    forged = client.get(
+        f"/api/v1/workbench/runs/{run_id}/evidence/plan",
+        params={"artifact_sha256": "0" * 64},
+        headers=_headers(),
+    )
+
+    assert detail.status_code == 200
+    assert detail.json()["artifacts"] == [
+        {"kind": "source", "sha256": supervisor_store.planning_runs[run_id].source_artifact.sha256},
+        {"kind": "plan", "sha256": digest},
+    ]
+    assert evidence.status_code == 200
+    assert evidence.json()["sha256"] == digest
+    assert '"title"' in evidence.json()["content"]
+    assert forged.status_code == 404
+
+
+def test_workbench_returns_not_modified_for_matching_revision(client, valid_plan) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+
+    first = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    second = client.get(
+        f"/api/v1/workbench/runs/{run_id}",
+        headers={"Authorization": "Bearer operator-test-token", "If-None-Match": first.headers["etag"]},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 304
+    assert second.headers["etag"] == first.headers["etag"]
+
+
+def test_workbench_hides_foreign_detail_and_rejects_viewer_actions(valid_plan) -> None:
+    store = InMemoryPlanStore()
+    supervisor_store = InMemorySupervisorStore()
+    app = create_app(
+        store=store,
+        settings=make_settings(auth_static_projects=("alpha",), auth_static_roles=("cogito-viewer",)),
+        starter=FakeRunStarter(),
+        supervisor_store=supervisor_store,
+        planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+    )
+    client = TestClient(app)
+    run_id, digest = _awaiting_plan(client, valid_plan)
+    supervisor_store.planning_runs[run_id] = replace(
+        supervisor_store.planning_runs[run_id], project_id="beta", status=PlanningRunStatus.AWAITING_PLAN_APPROVAL
+    )
+
+    detail = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    action = client.post(
+        f"/api/v1/coordination/runs/{run_id}/actions/plan",
+        json={"decision": "approve", "artifact_sha256": digest},
+        headers=_headers(),
+    )
+
+    assert detail.status_code == 404
+    assert action.status_code == 403

@@ -77,7 +77,10 @@ def test_get_planning_run_returns_authoritative_supervisor_record(
 ) -> None:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
 
-    response = client.get(f"/api/v1/planning-runs/{submitted.json()['run_id']}")
+    response = client.get(
+        f"/api/v1/planning-runs/{submitted.json()['run_id']}",
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
 
     assert response.status_code == 200
     assert response.json() == submitted.json()
@@ -214,7 +217,9 @@ def test_revision_reopens_planning_with_a_new_artifact_and_workflow(
     )
 
     assert revision.status_code == 202
-    reopened = client.get(f"/api/v1/planning-runs/{run_id}").json()
+    reopened = client.get(
+        f"/api/v1/planning-runs/{run_id}", headers={"Authorization": "Bearer operator-test-token"}
+    ).json()
     assert reopened["status"] == "planning"
     assert reopened["plan_artifact"] is None
     revised_plan = copy.deepcopy(valid_plan)
@@ -250,7 +255,9 @@ def test_revision_scopes_workflow_and_idempotency_when_plan_content_is_identical
     )
 
     assert revision.status_code == 202
-    assert client.get(f"/api/v1/planning-runs/{run_id}").json()["plan_artifact"] is None
+    assert client.get(
+        f"/api/v1/planning-runs/{run_id}", headers={"Authorization": "Bearer operator-test-token"}
+    ).json()["plan_artifact"] is None
     second = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
     assert second.status_code == 200
     assert second.json()["plan_artifact"]["sha256"] == digest
