@@ -91,7 +91,7 @@ class WorkerActivities:
             if phase.get("succeeded") is not True:
                 return ValidationResult(status="failed", checked_phases=0, reason="phase_not_succeeded")
             verification = phase.get("verification")
-            if not isinstance(verification, list) or not all(
+            if not verification or not isinstance(verification, list) or not all(
                 isinstance(item, dict) and item.get("passed") is True for item in verification
             ):
                 return ValidationResult(status="failed", checked_phases=0, reason="verification_not_passed")

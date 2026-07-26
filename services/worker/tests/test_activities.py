@@ -93,14 +93,16 @@ async def test_validator_accepts_converged_evidence_with_passing_verification(
     assert result.checked_phases == 1
 
 
+@pytest.mark.parametrize("verification", [[], [{"passed": False}]])
 async def test_validator_rejects_missing_or_failed_verification(
+    verification: list[dict],
     env: ActivityEnvironment, activities: WorkerActivities
 ) -> None:
     result = await env.run(
         activities.validate_implementation,
         ValidationRequest(
             run_id="run-1",
-            phase_results=[{"succeeded": True, "verification": [{"passed": False}]}],
+            phase_results=[{"succeeded": True, "verification": verification}],
             review={"status": "converged"},
         ),
     )
