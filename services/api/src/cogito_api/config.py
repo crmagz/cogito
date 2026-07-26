@@ -83,6 +83,8 @@ def load_settings() -> Settings:
         or not all(isinstance(host, str) and host.strip() for host in allowed_hosts)
     ):
         raise ValueError("COGITO_ALLOWED_GIT_HOSTS must be a non-empty JSON string array")
+    static_projects = _json_string_array("COGITO_AUTH_STATIC_PROJECTS", '["default"]')
+    static_roles = _json_string_array("COGITO_AUTH_STATIC_ROLES", '["cogito-viewer", "cogito-approver"]')
     settings = Settings(
         minio_endpoint=os.environ.get("MINIO_ENDPOINT", "localhost:9000"),
         minio_access_key=os.environ.get("MINIO_ACCESS_KEY", "minioadmin"),
@@ -114,10 +116,8 @@ def load_settings() -> Settings:
         auth_mode=os.environ.get("COGITO_AUTH_MODE", "static"),
         auth_static_token=os.environ.get("COGITO_AUTH_STATIC_TOKEN", ""),
         auth_static_subject=os.environ.get("COGITO_AUTH_STATIC_SUBJECT", "local-operator"),
-        auth_static_projects=tuple(json.loads(os.environ.get("COGITO_AUTH_STATIC_PROJECTS", '["default"]'))),
-        auth_static_roles=tuple(
-            json.loads(os.environ.get("COGITO_AUTH_STATIC_ROLES", '["cogito-viewer", "cogito-approver"]'))
-        ),
+        auth_static_projects=static_projects,
+        auth_static_roles=static_roles,
         auth_oidc_issuer=os.environ.get("COGITO_AUTH_OIDC_ISSUER", ""),
         auth_oidc_audience=os.environ.get("COGITO_AUTH_OIDC_AUDIENCE", ""),
         auth_oidc_jwks_url=os.environ.get("COGITO_AUTH_OIDC_JWKS_URL", ""),
@@ -147,6 +147,18 @@ def _default_registry_catalog_path() -> Path:
     return local_catalog if local_catalog.is_dir() else Path("/app/components")
 
 
+def _json_string_array(name: str, default: str) -> tuple[str, ...]:
+    """Read a bounded JSON string-array configuration value without coercion."""
+
+    try:
+        value = json.loads(os.environ.get(name, default))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{name} must be a JSON string array") from error
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item.strip() for item in value):
+        raise ValueError(f"{name} must be a non-empty JSON string array")
+    return tuple(value)
+
+
 def _validate_auth_configuration(settings: Settings) -> None:
     """Fail closed for invalid operator-approval authentication configuration."""
 
@@ -160,12 +172,8 @@ def _validate_auth_configuration(settings: Settings) -> None:
         (settings.auth_oidc_issuer, settings.auth_oidc_audience, settings.auth_oidc_jwks_url)
     ):
         raise ValueError("OIDC approval authentication requires issuer, audience, and JWKS URL")
-    if not settings.workbench_default_project_id.strip():
+    if not 1 <= len(settings.workbench_default_project_id) <= 128 or not settings.workbench_default_project_id.strip():
         raise ValueError("COGITO_WORKBENCH_DEFAULT_PROJECT_ID must not be empty")
-    if not settings.auth_static_projects or not all(project.strip() for project in settings.auth_static_projects):
-        raise ValueError("COGITO_AUTH_STATIC_PROJECTS must be a non-empty JSON string array")
-    if not settings.auth_static_roles or not all(role.strip() for role in settings.auth_static_roles):
-        raise ValueError("COGITO_AUTH_STATIC_ROLES must be a non-empty JSON string array")
     if settings.notification_timeout_seconds <= 0 or settings.notification_timeout_seconds > 60:
         raise ValueError("COGITO_NOTIFICATION_TIMEOUT_SECONDS must be greater than zero and at most 60")
     if not settings.notification_enabled:
