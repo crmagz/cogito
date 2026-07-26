@@ -9,12 +9,13 @@ from cogito_worker.run_state import PostgresRunStateReporter
 @dataclass
 class _Result:
     previous_status: str
+    implementation_revision: int = 1
 
     def mappings(self) -> _Result:
         return self
 
-    def one_or_none(self) -> dict[str, str]:
-        return {"status": self.previous_status}
+    def one_or_none(self) -> dict[str, str | int]:
+        return {"status": self.previous_status, "implementation_revision": self.implementation_revision}
 
 
 class _Connection:
@@ -114,3 +115,23 @@ async def test_running_run_can_enter_implementation_approval_and_register_artifa
     assert '"sha256":"' + "a" * 64 + '"' in gate_parameters["payload"]
     assert "run_status_changed" in lifecycle_statement
     assert '"lifecycle_status":"WAITING_FOR_APPROVAL"' in lifecycle_parameters["payload"]
+
+
+async def test_coordination_event_dedupe_keys_are_deterministic() -> None:
+    connection = _Connection(previous_status="RUNNING")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.report(
+        "run-1",
+        "awaiting_implementation_approval",
+        None,
+        {"implementation_artifact": {"ref": "s3://plans/implementation.json", "sha256": "a" * 64}},
+    )
+
+    gate_statement, gate_parameters = connection.calls[4]
+    lifecycle_statement, lifecycle_parameters = connection.calls[6]
+    assert "ON CONFLICT (dedupe_key) DO NOTHING" in gate_statement
+    assert "ON CONFLICT (dedupe_key) DO NOTHING" in lifecycle_statement
+    assert gate_parameters["dedupe_key"] != gate_parameters["event_id"]
+    assert lifecycle_parameters["dedupe_key"] != lifecycle_parameters["event_id"]
