@@ -30,6 +30,7 @@ jobs:
           tag-prefix: api/
           pathspecs: |
             services/api
+            components
             .python-version
 
   api-publish:
@@ -76,6 +77,7 @@ jobs:
           previous-tag: ${{ needs.api-version.outputs.previous-tag }}
           pathspecs: |
             services/api
+            components
             .python-version
           token: ${{ secrets.GITHUB_TOKEN }}
 
