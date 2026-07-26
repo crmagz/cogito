@@ -14,7 +14,7 @@ from cogito_api.registry import (
     registration_reference,
     require_tool,
 )
-from cogito_api.supervisor import RegistryConflictError
+from cogito_api.supervisor import PostgresSupervisorStore, RegistryConflictError
 
 from .fakes import InMemorySupervisorStore
 
@@ -107,3 +107,83 @@ async def test_run_resolution_rejects_unselected_or_changed_release() -> None:
 
     with pytest.raises(RegistryConflictError, match="does not select"):
         await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
+
+
+async def test_postgres_resolution_converges_when_a_concurrent_insert_wins() -> None:
+    catalog = load_component_catalog(_catalog_root())
+    planner = next(item for item in catalog.components if item.registration_id == "planner")
+    expected = registration_reference("planner", planner)
+
+    class Result:
+        def __init__(self, row):
+            self.row = row
+
+        def mappings(self):
+            return self
+
+        def one_or_none(self):
+            return self.row
+
+    class Connection:
+        def __init__(self) -> None:
+            self.run_resolution_reads = 0
+            self.queries: list[str] = []
+
+        async def execute(self, statement, _parameters):
+            query = str(statement)
+            self.queries.append(query)
+            if "FROM run_registration_resolutions" in query:
+                self.run_resolution_reads += 1
+                if self.run_resolution_reads == 1:
+                    return Result(None)
+                return Result(
+                    {
+                        "registration_id": expected.registration_id,
+                        "registration_version": expected.version,
+                        "manifest_sha256": expected.manifest_sha256,
+                        "component_id": expected.component_id,
+                        "component_version": expected.component_version,
+                        "policy_revision": "phase12_initial",
+                    }
+                )
+            if "FROM registry_policy_revisions" in query:
+                return Result({"assignments": {"planner": "planner@1.0.0"}})
+            if "FROM registry_registrations" in query:
+                return Result(
+                    {
+                        "lifecycle": "active",
+                        "manifest_sha256": expected.manifest_sha256,
+                        "component_id": expected.component_id,
+                        "component_version": expected.component_version,
+                    }
+                )
+            if "INSERT INTO run_registration_resolutions" in query:
+                return Result(None)
+            raise AssertionError(f"unexpected query: {query}")
+
+    class Transaction:
+        def __init__(self, connection: Connection) -> None:
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_):
+            return False
+
+    class Engine:
+        def __init__(self, connection: Connection) -> None:
+            self.connection = connection
+
+        def begin(self):
+            return Transaction(self.connection)
+
+    connection = Connection()
+    store = object.__new__(PostgresSupervisorStore)
+    store._engine = Engine(connection)
+
+    resolved = await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
+
+    assert resolved == expected
+    assert connection.run_resolution_reads == 2
+    assert any("ON CONFLICT (run_id, role) DO NOTHING" in query for query in connection.queries)

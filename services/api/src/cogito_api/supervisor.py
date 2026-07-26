@@ -6,7 +6,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Mapping, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -106,6 +106,21 @@ class ApprovalConflictError(Exception):
 
 class RegistryConflictError(Exception):
     """Raised when a registry release or pinned run resolution is unsafe."""
+
+
+def _matches_registration_resolution(
+    resolution: Mapping[str, Any], expected: RegistrationReference, policy_revision: str
+) -> bool:
+    """Return whether durable resolution evidence matches the requested immutable pin."""
+
+    return (
+        resolution["registration_id"] == expected.registration_id
+        and resolution["registration_version"] == expected.version
+        and resolution["manifest_sha256"] == expected.manifest_sha256
+        and resolution["component_id"] == expected.component_id
+        and resolution["component_version"] == expected.component_version
+        and resolution["policy_revision"] == policy_revision
+    )
 
 
 class SupervisorStore(Protocol):
@@ -400,7 +415,8 @@ class PostgresSupervisorStore:
             existing = await connection.execute(
                 text(
                     """
-                    SELECT registration_id, registration_version, manifest_sha256, component_id, component_version
+                    SELECT registration_id, registration_version, manifest_sha256, component_id, component_version,
+                           policy_revision
                     FROM run_registration_resolutions WHERE run_id = :run_id AND role = :role FOR UPDATE
                     """
                 ),
@@ -408,11 +424,7 @@ class PostgresSupervisorStore:
             )
             current = existing.mappings().one_or_none()
             if current is not None:
-                if (
-                    current["registration_id"] != expected.registration_id
-                    or current["registration_version"] != expected.version
-                    or current["manifest_sha256"] != expected.manifest_sha256
-                ):
+                if not _matches_registration_resolution(current, expected, policy_revision):
                     raise RegistryConflictError("run role is already pinned to a different registration release")
                 return expected
             policy = await connection.execute(
@@ -445,7 +457,7 @@ class PostgresSupervisorStore:
                 or row["component_version"] != expected.component_version
             ):
                 raise RegistryConflictError("registration release does not match its declared manifest")
-            await connection.execute(
+            inserted = await connection.execute(
                 text(
                     """
                     INSERT INTO run_registration_resolutions (
@@ -454,7 +466,8 @@ class PostgresSupervisorStore:
                     ) VALUES (
                         :run_id, :role, :registration_id, :registration_version, :manifest_sha256,
                         :component_id, :component_version, :policy_revision, now()
-                    )
+                    ) ON CONFLICT (run_id, role) DO NOTHING
+                    RETURNING run_id
                     """
                 ),
                 {
@@ -468,6 +481,23 @@ class PostgresSupervisorStore:
                     "policy_revision": policy_revision,
                 },
             )
+            if inserted.mappings().one_or_none() is None:
+                # `FOR UPDATE` cannot lock a missing row. A concurrent first
+                # resolver may have committed the same immutable pin while
+                # this transaction was validating it, so converge on that row.
+                persisted = await connection.execute(
+                    text(
+                        """
+                        SELECT registration_id, registration_version, manifest_sha256, component_id, component_version,
+                               policy_revision
+                        FROM run_registration_resolutions WHERE run_id = :run_id AND role = :role
+                        """
+                    ),
+                    {"run_id": run_id, "role": role},
+                )
+                current = persisted.mappings().one_or_none()
+                if current is None or not _matches_registration_resolution(current, expected, policy_revision):
+                    raise RegistryConflictError("run role is already pinned to a different registration release")
         return expected
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
