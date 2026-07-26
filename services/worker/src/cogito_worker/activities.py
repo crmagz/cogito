@@ -19,6 +19,8 @@ from .models import (
     ReviewResult,
     ReviewRevisionRequest,
     ReviewRevisionResult,
+    ValidationRequest,
+    ValidationResult,
 )
 from .observability import WorkerTelemetry
 from .review import LiteLLMReviewHarness
@@ -75,6 +77,25 @@ class WorkerActivities:
 
         activity.logger.info("freezing implementation artifact", extra={"run_id": run_id})
         return self._store.put_implementation_artifact(run_id, evidence)
+
+    @activity.defn
+    async def validate_implementation(self, request: ValidationRequest) -> ValidationResult:
+        """Evaluate only durable implementation evidence without mutating a repository."""
+
+        activity.logger.info("validating implementation evidence", extra={"run_id": request.run_id})
+        if request.review.get("status") != "converged":
+            return ValidationResult(status="failed", checked_phases=0, reason="review_not_converged")
+        if not request.phase_results:
+            return ValidationResult(status="failed", checked_phases=0, reason="no_phase_results")
+        for phase in request.phase_results:
+            if phase.get("succeeded") is not True:
+                return ValidationResult(status="failed", checked_phases=0, reason="phase_not_succeeded")
+            verification = phase.get("verification")
+            if not isinstance(verification, list) or not all(
+                isinstance(item, dict) and item.get("passed") is True for item in verification
+            ):
+                return ValidationResult(status="failed", checked_phases=0, reason="verification_not_passed")
+        return ValidationResult(status="passed", checked_phases=len(request.phase_results))
 
     @activity.defn
     async def open_pull_request(self, artifact_sha256: str, evidence: dict[str, Any]) -> PullRequestResult:

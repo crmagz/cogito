@@ -25,7 +25,7 @@ def require_tool(resolution: RegistrationReference | None, tool_id: str, scope: 
 
     if resolution is None:
         return
-    for granted_tool_id, granted_version, granted_scope in resolution.grants:
-        if (granted_tool_id, granted_version, granted_scope) == (tool_id, "1.0.0", scope):
+    for grant in resolution.grants:
+        if (grant.tool_id, grant.tool_version, grant.scope) == (tool_id, "1.0.0", scope):
             return
     raise RegistryAuthorizationError(f"role '{resolution.role}' is not granted tool '{tool_id}' scope '{scope}'")

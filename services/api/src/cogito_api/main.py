@@ -359,7 +359,10 @@ def create_app(
         try:
             carrier: dict[str, str] = {}
             telemetry.inject(carrier)
-            resolutions = await resolve_roles(updated.run_id, ["planner", "developer", "reviewer", "pull_request_publisher"])
+            resolutions = await resolve_roles(
+                updated.run_id,
+                ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
+            )
             await starter.start_run(
                 RunEnvelope(
                     run_id=updated.run_id,

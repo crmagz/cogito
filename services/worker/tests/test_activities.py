@@ -5,7 +5,7 @@ from temporalio.testing import ActivityEnvironment
 
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.execution import ExecutionJobSettings, ExecutionWorkspaceService
-from cogito_worker.models import ExecutionRequest
+from cogito_worker.models import ExecutionRequest, ValidationRequest
 from cogito_worker.run_state import RunStateReporter
 
 from .fakes import (
@@ -75,6 +75,38 @@ async def test_report_status_forwards_only_bounded_transition_metadata(env: Acti
     await env.run(activities.report_status, "run-1", "completed", None, {"phase_result": {"summary": "secret"}})
 
     assert reporter.calls == [("run-1", "completed", None, {"phase_result": {"summary": "secret"}})]
+
+
+async def test_validator_accepts_converged_evidence_with_passing_verification(
+    env: ActivityEnvironment, activities: WorkerActivities
+) -> None:
+    result = await env.run(
+        activities.validate_implementation,
+        ValidationRequest(
+            run_id="run-1",
+            phase_results=[{"succeeded": True, "verification": [{"passed": True}]}],
+            review={"status": "converged"},
+        ),
+    )
+
+    assert result.status == "passed"
+    assert result.checked_phases == 1
+
+
+async def test_validator_rejects_missing_or_failed_verification(
+    env: ActivityEnvironment, activities: WorkerActivities
+) -> None:
+    result = await env.run(
+        activities.validate_implementation,
+        ValidationRequest(
+            run_id="run-1",
+            phase_results=[{"succeeded": True, "verification": [{"passed": False}]}],
+            review={"status": "converged"},
+        ),
+    )
+
+    assert result.status == "failed"
+    assert result.reason == "verification_not_passed"
 
 
 async def test_execution_workspace_activities_manage_only_the_current_run(
