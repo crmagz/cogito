@@ -44,6 +44,13 @@ approval into a lost instruction. A persisted plan's workflow start is also
 safe to retry without regenerating the plan. Local kind uses an explicit
 development credential; production requires OIDC bearer-token validation.
 
+The coordination plane exposes authenticated, provider-neutral run and gate
+views for the future Operator Workbench. It can deliver allow-listed,
+versioned event snapshots to an explicitly enabled HMAC-signed webhook using
+an independent leased outbox; notification delivery never has authority to
+approve work or signal Temporal directly. Slack and GitHub Issues adapters are
+not part of this release.
+
 The Helm chart declares three stable role policies: `planner`, `developer`,
 and `reviewer`. Each names one model alias, a positive LiteLLM virtual-key
 budget ceiling and reset period, and a toolset label. Keys are provisioned by

@@ -48,6 +48,10 @@ def make_settings(**overrides) -> Settings:
         auth_oidc_role_claim="roles",
         auth_oidc_approval_role="cogito-approver",
         registry_catalog_path=str(Path(__file__).parents[3] / "components"),
+        notification_enabled=False,
+        notification_webhook_url="",
+        notification_webhook_hmac_secret="",
+        notification_timeout_seconds=10.0,
     )
     defaults.update(overrides)
     return Settings(**defaults)

@@ -6,6 +6,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from typing import Any, Mapping, Protocol
 
 from sqlalchemy import text
@@ -81,6 +82,30 @@ class OutboxDelivery:
     run_id: str
     workflow_id: str
     payload: dict[str, str]
+    attempt_count: int
+
+
+@dataclass(frozen=True)
+class CoordinationEvent:
+    """Immutable, non-secret notification snapshot owned by the Supervisor."""
+
+    event_id: str
+    run_id: str
+    event_type: str
+    occurred_at: str
+    gate: str | None
+    artifact_ref: str | None
+    artifact_sha256: str | None
+    decision: str | None
+    lifecycle_status: str | None
+    payload: dict[str, object]
+
+
+@dataclass(frozen=True)
+class NotificationDelivery:
+    """A leased provider-neutral delivery of one immutable coordination event."""
+
+    event: CoordinationEvent
     attempt_count: int
 
 
@@ -203,6 +228,16 @@ class SupervisorStore(Protocol):
         policy_revision: str,
         manifest: RegistrationManifest,
     ) -> RegistrationReference: ...
+
+    async def list_coordination_events(self, run_id: str, *, limit: int = 100) -> list[tuple[CoordinationEvent, bool, int, str | None]]: ...
+
+    async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]: ...
+
+    async def claim_notification_deliveries(self, *, limit: int, lease_seconds: int) -> list[NotificationDelivery]: ...
+
+    async def mark_notification_delivered(self, event_id: str) -> None: ...
+
+    async def release_notification_delivery(self, event_id: str, *, retry_seconds: int, error: str) -> None: ...
 
 
 class PostgresSupervisorStore:
@@ -597,6 +632,13 @@ class PostgresSupervisorStore:
                 ),
                 {"run_id": run_id, "ref": plan_artifact.ref, "sha256": plan_artifact.sha256},
             )
+            await self._append_coordination_event(
+                connection,
+                run_id=run_id,
+                event_type="plan_approval_requested",
+                gate="plan",
+                artifact=plan_artifact,
+            )
         return PlanningRunRecord(
             run_id=row["run_id"],
             status=PlanningRunStatus(row["status"]),
@@ -633,7 +675,7 @@ class PostgresSupervisorStore:
             run = await connection.execute(
                 text(
                     """
-                    SELECT status, plan_artifact_sha256, active_workflow_id, plan_revision
+                    SELECT status, plan_artifact_ref, plan_artifact_sha256, active_workflow_id, plan_revision
                     FROM supervisor_runs
                     WHERE run_id = :run_id
                     FOR UPDATE
@@ -720,6 +762,16 @@ class PostgresSupervisorStore:
                     ),
                     "created_at": created_at,
                 },
+            )
+            await self._append_coordination_event(
+                connection,
+                run_id=run_id,
+                event_type="plan_approval_recorded",
+                gate="plan",
+                artifact=ArtifactReference(
+                    ref=run_row["plan_artifact_ref"], sha256=artifact_sha256
+                ),
+                decision=decision.value,
             )
         return ApprovalRecord(
             decision_id=decision_id,
@@ -916,6 +968,13 @@ class PostgresSupervisorStore:
                 ),
                 {"run_id": run_id, "ref": artifact.ref, "sha256": artifact.sha256},
             )
+            await self._append_coordination_event(
+                connection,
+                run_id=run_id,
+                event_type="implementation_approval_requested",
+                gate="implementation",
+                artifact=artifact,
+            )
 
     async def record_implementation_approval(
         self,
@@ -933,7 +992,8 @@ class PostgresSupervisorStore:
             result = await connection.execute(
                 text(
                     """
-                    SELECT status, implementation_artifact_sha256, active_workflow_id, implementation_revision
+                    SELECT status, implementation_artifact_ref, implementation_artifact_sha256,
+                           active_workflow_id, implementation_revision
                     FROM supervisor_runs WHERE run_id = :run_id FOR UPDATE
                     """
                 ),
@@ -1012,6 +1072,16 @@ class PostgresSupervisorStore:
                     ),
                     "created_at": created_at,
                 },
+            )
+            await self._append_coordination_event(
+                connection,
+                run_id=run_id,
+                event_type="implementation_approval_recorded",
+                gate="implementation",
+                artifact=ArtifactReference(
+                    ref=run["implementation_artifact_ref"], sha256=artifact_sha256
+                ),
+                decision=decision.value,
             )
         return ImplementationApprovalRecord(
             decision_id=decision_id,
@@ -1148,6 +1218,179 @@ class PostgresSupervisorStore:
                 {"decision_id": decision_id, "retry_seconds": retry_seconds, "error": error[:1024]},
             )
 
+    async def _append_coordination_event(
+        self,
+        connection: Any,
+        *,
+        run_id: str,
+        event_type: str,
+        gate: str | None = None,
+        artifact: ArtifactReference | None = None,
+        decision: str | None = None,
+        lifecycle_status: str | None = None,
+    ) -> None:
+        """Append one safe event and its generic notification delivery in the current transaction."""
+
+        artifact_payload = (
+            {"ref": artifact.ref, "sha256": artifact.sha256} if artifact is not None and artifact.ref else None
+        )
+        payload: dict[str, object] = {
+            "schema_version": "1.0",
+            "event_type": event_type,
+            "run_id": run_id,
+            "gate": gate,
+            "artifact": artifact_payload,
+            "decision": decision,
+            "lifecycle_status": lifecycle_status,
+            "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
+            "action_url": f"/api/v1/coordination/runs/{run_id}/actions/{gate}" if gate else None,
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        dedupe_key = sha256(canonical.encode()).hexdigest()
+        event_id = str(uuid.uuid4())
+        created_at = datetime.now().astimezone()
+        result = await connection.execute(
+            text(
+                """
+                INSERT INTO coordination_events (event_id, run_id, event_type, dedupe_key, payload, created_at)
+                VALUES (:event_id, :run_id, :event_type, :dedupe_key, CAST(:payload AS jsonb), :created_at)
+                ON CONFLICT (dedupe_key) DO NOTHING
+                RETURNING event_id
+                """
+            ),
+            {
+                "event_id": event_id,
+                "run_id": run_id,
+                "event_type": event_type,
+                "dedupe_key": dedupe_key,
+                "payload": canonical,
+                "created_at": created_at,
+            },
+        )
+        if result.mappings().one_or_none() is None:
+            return
+        await connection.execute(
+            text(
+                """
+                INSERT INTO notification_outbox (event_id, sink_id, created_at)
+                VALUES (:event_id, 'webhook', :created_at)
+                """
+            ),
+            {"event_id": event_id, "created_at": created_at},
+        )
+
+    async def list_coordination_events(
+        self, run_id: str, *, limit: int = 100
+    ) -> list[tuple[CoordinationEvent, bool, int, str | None]]:
+        """Read bounded, newest-first event and reconciliation snapshots for one run."""
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT e.event_id, e.run_id, e.event_type, e.payload, e.created_at,
+                           o.delivered_at, o.attempt_count, o.last_error
+                    FROM coordination_events AS e
+                    LEFT JOIN notification_outbox AS o USING (event_id)
+                    WHERE e.run_id = :run_id
+                    ORDER BY e.created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"run_id": run_id, "limit": max(1, min(limit, 100))},
+            )
+            rows = result.mappings().all()
+        return [
+            (
+                _coordination_event(row),
+                row["delivered_at"] is not None,
+                int(row["attempt_count"] or 0),
+                row["last_error"],
+            )
+            for row in rows
+        ]
+
+    async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]:
+        """List bounded newest-first planning runs for authenticated coordination clients."""
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text("SELECT run_id FROM supervisor_runs ORDER BY submitted_at DESC LIMIT :limit"),
+                {"limit": max(1, min(limit, 100))},
+            )
+            run_ids = [row["run_id"] for row in result.mappings().all()]
+        records = [await self.get_planning_run(run_id) for run_id in run_ids]
+        return [record for record in records if record is not None]
+
+    async def claim_notification_deliveries(self, *, limit: int, lease_seconds: int) -> list[NotificationDelivery]:
+        """Lease due webhook events without racing API replicas."""
+
+        if limit < 1:
+            return []
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT e.event_id, e.run_id, e.event_type, e.payload, e.created_at, o.attempt_count
+                    FROM notification_outbox AS o
+                    JOIN coordination_events AS e ON e.event_id = o.event_id
+                    WHERE o.sink_id = 'webhook' AND o.delivered_at IS NULL AND o.next_attempt_at <= now()
+                      AND (o.lease_until IS NULL OR o.lease_until <= now())
+                    ORDER BY o.created_at FOR UPDATE OF o SKIP LOCKED LIMIT :limit
+                    """
+                ),
+                {"limit": limit},
+            )
+            rows = result.mappings().all()
+            for row in rows:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE notification_outbox
+                        SET attempt_count = attempt_count + 1,
+                            lease_until = now() + (:lease_seconds * interval '1 second')
+                        WHERE event_id = :event_id AND sink_id = 'webhook'
+                        """
+                    ),
+                    {"event_id": row["event_id"], "lease_seconds": lease_seconds},
+                )
+        return [
+            NotificationDelivery(event=_coordination_event(row), attempt_count=int(row["attempt_count"]) + 1)
+            for row in rows
+        ]
+
+    async def mark_notification_delivered(self, event_id: str) -> None:
+        """Persist one successful webhook acknowledgement without touching workflow state."""
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE notification_outbox
+                    SET delivered_at = now(), lease_until = NULL, last_error = NULL
+                    WHERE event_id = :event_id AND sink_id = 'webhook' AND delivered_at IS NULL
+                    """
+                ),
+                {"event_id": event_id},
+            )
+
+    async def release_notification_delivery(self, event_id: str, *, retry_seconds: int, error: str) -> None:
+        """Release a failed notification lease with a non-secret retry category."""
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE notification_outbox
+                    SET lease_until = NULL,
+                        next_attempt_at = now() + (:retry_seconds * interval '1 second'),
+                        last_error = :error
+                    WHERE event_id = :event_id AND sink_id = 'webhook' AND delivered_at IS NULL
+                    """
+                ),
+                {"event_id": event_id, "retry_seconds": retry_seconds, "error": error[:1024]},
+            )
+
     async def close(self) -> None:
         """Dispose the pool during application shutdown."""
 
@@ -1183,6 +1426,27 @@ def _implementation_approval_record(row: object) -> ImplementationApprovalRecord
         created_at=values["created_at"].isoformat(),  # type: ignore[index]
         delivered=values["delivered_at"] is not None,  # type: ignore[index]
         implementation_revision=values["implementation_revision"],  # type: ignore[index]
+    )
+
+
+def _coordination_event(row: object) -> CoordinationEvent:
+    """Build a safe immutable event from a SQL mapping row."""
+
+    values = row
+    payload = dict(values["payload"])  # type: ignore[index]
+    return CoordinationEvent(
+        event_id=values["event_id"],  # type: ignore[index]
+        run_id=values["run_id"],  # type: ignore[index]
+        event_type=values["event_type"],  # type: ignore[index]
+        occurred_at=values["created_at"].isoformat(),  # type: ignore[index]
+        gate=payload.get("gate") if isinstance(payload.get("gate"), str) else None,
+        artifact_ref=(payload.get("artifact") or {}).get("ref") if isinstance(payload.get("artifact"), dict) else None,
+        artifact_sha256=(payload.get("artifact") or {}).get("sha256")
+        if isinstance(payload.get("artifact"), dict)
+        else None,
+        decision=payload.get("decision") if isinstance(payload.get("decision"), str) else None,
+        lifecycle_status=payload.get("lifecycle_status") if isinstance(payload.get("lifecycle_status"), str) else None,
+        payload=payload,
     )
 
 

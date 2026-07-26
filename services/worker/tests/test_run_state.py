@@ -58,9 +58,12 @@ async def test_successful_backup_stop_is_a_terminal_timed_out_lifecycle() -> Non
     await reporter.report("run-1", "stopped_with_backup", None, {"ceiling": "cost"})
 
     _, update_parameters = connection.calls[1]
-    _, event_parameters = connection.calls[2]
+    coordination_statement, coordination_parameters = connection.calls[3]
+    _, event_parameters = connection.calls[5]
     assert update_parameters["status"] == "TIMED_OUT"
     assert update_parameters["terminal"] is True
+    assert "INSERT INTO coordination_events" in coordination_statement
+    assert '"lifecycle_status":"TIMED_OUT"' in coordination_parameters["payload"]
     assert event_parameters["to_status"] == "TIMED_OUT"
 
 
@@ -74,6 +77,18 @@ async def test_review_escalation_is_a_terminal_successful_lifecycle() -> None:
     _, update_parameters = connection.calls[1]
     assert update_parameters["status"] == "SUCCEEDED"
     assert update_parameters["terminal"] is True
+
+
+async def test_failed_workflow_closes_the_supervisor_projection() -> None:
+    connection = _Connection(previous_status="RUNNING")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.report("run-1", "failed", "execution unavailable", None)
+
+    supervisor_statement, supervisor_parameters = connection.calls[2]
+    assert "SET status = 'planning_failed'" in supervisor_statement
+    assert supervisor_parameters["run_id"] == "run-1"
 
 
 async def test_running_run_can_enter_implementation_approval_and_register_artifact() -> None:
@@ -93,3 +108,9 @@ async def test_running_run_can_enter_implementation_approval_and_register_artifa
     assert agent_update["status"] == "WAITING_FOR_APPROVAL"
     assert "SET status = 'awaiting_implementation_approval'" in artifact_statement
     assert artifact_update["sha256"] == "a" * 64
+    gate_statement, gate_parameters = connection.calls[4]
+    lifecycle_statement, lifecycle_parameters = connection.calls[6]
+    assert "implementation_approval_requested" in gate_statement
+    assert '"sha256":"' + "a" * 64 + '"' in gate_parameters["payload"]
+    assert "run_status_changed" in lifecycle_statement
+    assert '"lifecycle_status":"WAITING_FOR_APPROVAL"' in lifecycle_parameters["payload"]

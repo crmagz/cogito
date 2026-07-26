@@ -5,6 +5,7 @@
 {{- $plannerRole := required "litellm.rolePolicies.planner is required" $rolePolicies.planner }}
 {{- $auth := default (dict) .Values.api.auth }}
 {{- $staticAuth := default (dict) $auth.static }}
+{{- $notifications := default (dict) .Values.api.notifications }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -70,6 +71,13 @@ spec:
                 secretKeyRef:
                   name: {{ default "cogito-operator-auth" $staticAuth.existingSecret }}
                   key: {{ default "token" $staticAuth.tokenKey }}
+            {{- end }}
+            {{- if $notifications.enabled }}
+            - name: COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "api.notifications.existingSecret is required when notifications are enabled" $notifications.existingSecret }}
+                  key: {{ required "api.notifications.hmacSecretKey is required when notifications are enabled" $notifications.hmacSecretKey }}
             {{- end }}
             {{- if .Values.observability.otlp.existingSecret }}
             - name: COGITO_TELEMETRY_OTLP_HEADERS

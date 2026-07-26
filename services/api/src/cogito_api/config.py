@@ -4,7 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,10 @@ class Settings:
     auth_oidc_role_claim: str
     auth_oidc_approval_role: str
     registry_catalog_path: str
+    notification_enabled: bool
+    notification_webhook_url: str
+    notification_webhook_hmac_secret: str
+    notification_timeout_seconds: float
 
     @property
     def supervisor_database_url(self) -> str:
@@ -113,6 +117,10 @@ def load_settings() -> Settings:
             "COGITO_REGISTRY_CATALOG_PATH",
             str(_default_registry_catalog_path()),
         ),
+        notification_enabled=os.environ.get("COGITO_NOTIFICATION_ENABLED", "false").lower() == "true",
+        notification_webhook_url=os.environ.get("COGITO_NOTIFICATION_WEBHOOK_URL", ""),
+        notification_webhook_hmac_secret=os.environ.get("COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET", ""),
+        notification_timeout_seconds=float(os.environ.get("COGITO_NOTIFICATION_TIMEOUT_SECONDS", "10")),
     )
     _validate_auth_configuration(settings)
     return settings
@@ -138,3 +146,16 @@ def _validate_auth_configuration(settings: Settings) -> None:
         (settings.auth_oidc_issuer, settings.auth_oidc_audience, settings.auth_oidc_jwks_url)
     ):
         raise ValueError("OIDC approval authentication requires issuer, audience, and JWKS URL")
+    if settings.notification_timeout_seconds <= 0 or settings.notification_timeout_seconds > 60:
+        raise ValueError("COGITO_NOTIFICATION_TIMEOUT_SECONDS must be greater than zero and at most 60")
+    if not settings.notification_enabled:
+        return
+    if not settings.notification_webhook_hmac_secret:
+        raise ValueError("COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET is required when notifications are enabled")
+    parsed = urlparse(settings.notification_webhook_url)
+    if parsed.username or parsed.password or not parsed.hostname or parsed.fragment:
+        raise ValueError("COGITO_NOTIFICATION_WEBHOOK_URL must be an absolute URL without credentials or a fragment")
+    if settings.deployment_mode == "production" and parsed.scheme != "https":
+        raise ValueError("production notification webhook URL must use HTTPS")
+    if settings.deployment_mode == "development" and parsed.scheme not in {"http", "https"}:
+        raise ValueError("development notification webhook URL must use HTTP or HTTPS")

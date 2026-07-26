@@ -491,6 +491,18 @@ api:
       jwksUrl: ""
       roleClaim: roles
       approvalRole: cogito-approver
+  ## @param api.notifications.enabled Enable the optional provider-neutral webhook sink. Disabled by default.
+  ## @param api.notifications.webhookUrl HTTPS endpoint for signed event delivery (HTTP is permitted only in local development).
+  ## @param api.notifications.existingSecret Existing Secret containing the webhook HMAC key; the chart never creates it.
+  ## @param api.notifications.hmacSecretKey Key in api.notifications.existingSecret that holds the HMAC signing material.
+  ## @param api.notifications.timeoutSeconds Bounded webhook delivery timeout.
+  ##
+  notifications:
+    enabled: false
+    webhookUrl: ""
+    existingSecret: ""
+    hmacSecretKey: hmac-secret
+    timeoutSeconds: 10
 
 ## @section Worker
 ## Temporal worker: runs DeveloperRunWorkflow and its activities.

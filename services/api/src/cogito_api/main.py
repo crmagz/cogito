@@ -22,8 +22,17 @@ from .models import (
     AgentRunResponse,
     AgentRunStatus,
     ArtifactReference,
+    CoordinationApprovalActionRequest,
+    CoordinationArtifactReference,
+    CoordinationDeliveryResponse,
+    CoordinationEventResponse,
+    CoordinationGate,
+    CoordinationRunListResponse,
+    CoordinationRunResponse,
+    ImplementationApprovalDecision,
     ImplementationApprovalRequest,
     ImplementationApprovalResponse,
+    PlanApprovalDecision,
     PlanApprovalRequest,
     PlanApprovalResponse,
     PlanningRunResponse,
@@ -34,6 +43,7 @@ from .models import (
     Violation,
 )
 from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDispatcher, stop_dispatcher
+from .notifications import NotificationOutboxDispatcher, notification_sink, stop_notification_dispatcher
 from .observability import Telemetry, TelemetrySettings
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
@@ -102,6 +112,8 @@ def create_app(
 
     dispatcher = PlanApprovalOutboxDispatcher(supervisor_store, starter)
     implementation_dispatcher = ImplementationApprovalOutboxDispatcher(supervisor_store, starter)
+    sink = notification_sink(settings)
+    notification_dispatcher = NotificationOutboxDispatcher(supervisor_store, sink) if sink is not None else None
 
     async def resolve_roles(run_id: str, roles: list[str]):
         await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments)
@@ -121,11 +133,15 @@ def create_app(
         await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments)
         delivery_task = asyncio.create_task(dispatcher.run())
         implementation_delivery_task = asyncio.create_task(implementation_dispatcher.run())
+        notification_delivery_task = (
+            asyncio.create_task(notification_dispatcher.run()) if notification_dispatcher is not None else None
+        )
         try:
             yield
         finally:
             await stop_dispatcher(delivery_task)
             await stop_dispatcher(implementation_delivery_task)
+            await stop_notification_dispatcher(notification_delivery_task)
             telemetry.shutdown()
             close = getattr(supervisor_store, "close", None)
             if close is not None:
@@ -534,6 +550,148 @@ def create_app(
             submitted_at=record.submitted_at,
         )
         return JSONResponse(content=response.model_dump(mode="json"))
+
+    async def coordination_response(record: PlanningRunRecord) -> CoordinationRunResponse:
+        """Build a bounded authenticated projection without exposing artifact contents."""
+
+        events = await supervisor_store.list_coordination_events(record.run_id)
+        event_responses = []
+        for event, delivered, attempts, last_error in events:
+            artifact = (
+                CoordinationArtifactReference(ref=event.artifact_ref, sha256=event.artifact_sha256)
+                if event.artifact_ref and event.artifact_sha256
+                else None
+            )
+            event_responses.append(
+                CoordinationEventResponse(
+                    event_id=event.event_id,
+                    event_type=event.event_type,
+                    run_id=event.run_id,
+                    occurred_at=event.occurred_at,
+                    gate=CoordinationGate(event.gate) if event.gate else None,
+                    artifact=artifact,
+                    decision=PlanApprovalDecision(event.decision) if event.decision else None,
+                    lifecycle_status=AgentRunStatus(event.lifecycle_status) if event.lifecycle_status else None,
+                    delivery=CoordinationDeliveryResponse(
+                        delivered=delivered,
+                        attempt_count=attempts,
+                        last_error=last_error,
+                    ),
+                )
+            )
+        active_gate = (
+            CoordinationGate.PLAN
+            if record.status is PlanningRunStatus.AWAITING_PLAN_APPROVAL
+            else CoordinationGate.IMPLEMENTATION
+            if record.status is PlanningRunStatus.AWAITING_IMPLEMENTATION_APPROVAL
+            else None
+        )
+        return CoordinationRunResponse(
+            run_id=record.run_id,
+            status=record.status,
+            submitted_at=record.submitted_at,
+            plan_artifact=(
+                CoordinationArtifactReference(ref=record.plan_artifact.ref, sha256=record.plan_artifact.sha256)
+                if record.plan_artifact is not None
+                else None
+            ),
+            implementation_artifact=(
+                CoordinationArtifactReference(
+                    ref=record.implementation_artifact.ref,
+                    sha256=record.implementation_artifact.sha256,
+                )
+                if record.implementation_artifact is not None
+                else None
+            ),
+            active_gate=active_gate,
+            events=event_responses,
+        )
+
+    @app.get("/api/v1/planning-runs/{run_id}/coordination")
+    async def get_coordination_run(
+        run_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Return one authenticated Supervisor-owned coordination projection."""
+
+        await authenticator.authenticate(authorization)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
+        return JSONResponse(content=(await coordination_response(record)).model_dump(mode="json"))
+
+    @app.get("/api/v1/coordination/runs")
+    async def list_coordination_runs(
+        authorization: str | None = Header(default=None),
+        limit: int = 50,
+    ) -> JSONResponse:
+        """Return a bounded authenticated coordination queue for a future Workbench."""
+
+        if limit < 1 or limit > 100:
+            raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+        await authenticator.authenticate(authorization)
+        records = await supervisor_store.list_coordination_runs(limit=limit)
+        response = CoordinationRunListResponse(items=[await coordination_response(record) for record in records])
+        return JSONResponse(content=response.model_dump(mode="json"))
+
+    @app.post("/api/v1/coordination/runs/{run_id}/actions/{gate}")
+    async def submit_coordination_action(
+        run_id: str,
+        gate: CoordinationGate,
+        request_body: CoordinationApprovalActionRequest,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """Delegate an authenticated normalized action to the existing approval authority."""
+
+        principal = await authenticator.authenticate(authorization)
+        if not idempotency_key or len(idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
+        request_sha256 = sha256(
+            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        try:
+            if gate is CoordinationGate.PLAN:
+                recorded = await supervisor_store.record_plan_approval(
+                    run_id=run_id,
+                    artifact_sha256=request_body.artifact_sha256,
+                    decision=request_body.decision,
+                    actor_id=principal.subject,
+                    comment=request_body.comment,
+                    idempotency_key=idempotency_key,
+                    request_sha256=request_sha256,
+                )
+                delivered = recorded.delivered or recorded.decision_id in await dispatcher.deliver_once(
+                    decision_id=recorded.decision_id, limit=1
+                )
+            else:
+                recorded = await supervisor_store.record_implementation_approval(
+                    run_id=run_id,
+                    artifact_sha256=request_body.artifact_sha256,
+                    decision=ImplementationApprovalDecision(request_body.decision.value),
+                    actor_id=principal.subject,
+                    comment=request_body.comment,
+                    idempotency_key=idempotency_key,
+                    request_sha256=request_sha256,
+                )
+                delivered = recorded.delivered or recorded.decision_id in await implementation_dispatcher.deliver_once(
+                    decision_id=recorded.decision_id, limit=1
+                )
+        except ApprovalConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "decision_id": recorded.decision_id,
+                "run_id": recorded.run_id,
+                "gate": gate.value,
+                "decision": recorded.decision.value,
+                "artifact_sha256": recorded.artifact_sha256,
+                "actor_id": recorded.actor_id,
+                "delivered": delivered,
+                "created_at": recorded.created_at,
+            },
+        )
 
     return app
 
