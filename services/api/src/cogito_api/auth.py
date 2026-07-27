@@ -82,7 +82,7 @@ class ApprovalAuthenticator:
         if not (
             {self._settings.auth_oidc_approval_role, self._settings.auth_oidc_admin_role} & principal.roles
         ):
-            raise HTTPException(status_code=403, detail="operator is not authorized to approve plans")
+            raise HTTPException(status_code=403, detail="operator is not authorized to perform this operation")
 
     def _decode_oidc_token(self, token: str) -> dict:
         assert self._jwks is not None

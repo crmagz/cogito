@@ -174,6 +174,10 @@ def _validate_auth_configuration(settings: Settings) -> None:
         raise ValueError("OIDC approval authentication requires issuer, audience, and JWKS URL")
     if not 1 <= len(settings.workbench_default_project_id) <= 128 or not settings.workbench_default_project_id.strip():
         raise ValueError("COGITO_WORKBENCH_DEFAULT_PROJECT_ID must not be empty")
+    if settings.auth_mode == "static" and settings.workbench_default_project_id not in settings.auth_static_projects:
+        raise ValueError(
+            "COGITO_WORKBENCH_DEFAULT_PROJECT_ID must be included in COGITO_AUTH_STATIC_PROJECTS for static auth"
+        )
     if settings.notification_timeout_seconds <= 0 or settings.notification_timeout_seconds > 60:
         raise ValueError("COGITO_NOTIFICATION_TIMEOUT_SECONDS must be greater than zero and at most 60")
     if not settings.notification_enabled:
