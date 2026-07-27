@@ -17,12 +17,40 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 pytestmark = pytest.mark.kind_e2e
+
+
+def helm_image_overrides(component: str, image: str) -> tuple[str, ...]:
+    """Render Helm overrides that preserve a running workload image exactly."""
+    if "@" in image:
+        repository, digest = image.split("@", maxsplit=1)
+        if not repository or not digest.startswith("sha256:"):
+            pytest.fail(f"unsupported {component} image reference: {image}")
+        return (
+            "--set-string", f"{component}.image.repository={repository}",
+            "--set-string", f"{component}.image.digest={digest}",
+            "--set-string", f"{component}.image.tag=",
+        )
+
+    last_slash = image.rfind("/")
+    last_colon = image.rfind(":")
+    if last_colon > last_slash:
+        repository, tag = image[:last_colon], image[last_colon + 1 :]
+    else:
+        repository, tag = image, "latest"
+    if not repository or not tag:
+        pytest.fail(f"unsupported {component} image reference: {image}")
+    return (
+        "--set-string", f"{component}.image.repository={repository}",
+        "--set-string", f"{component}.image.tag={tag}",
+        "--set-string", f"{component}.image.digest=",
+    )
 
 
 @dataclass(frozen=True)
@@ -35,12 +63,17 @@ class KindConfig:
     target_repo: str
     timeout: int
     existing_run_id: str | None
+    values_file: Path | None
 
     @classmethod
     def load(cls) -> KindConfig:
         spec_ref = os.environ.get("COGITO_E2E_SPEC_REF")
         if not spec_ref:
             pytest.fail("COGITO_E2E_SPEC_REF is required and must be immutable")
+        values_file = os.environ.get("COGITO_E2E_VALUES_FILE")
+        resolved_values_file = Path(values_file).resolve() if values_file else None
+        if resolved_values_file and not resolved_values_file.is_file():
+            pytest.fail(f"COGITO_E2E_VALUES_FILE does not exist: {resolved_values_file}")
         return cls(
             context=os.environ.get("COGITO_E2E_CONTEXT", "kind-cogito-observability"),
             namespace=os.environ.get("COGITO_E2E_NAMESPACE", "cogito"),
@@ -53,6 +86,7 @@ class KindConfig:
             ),
             timeout=int(os.environ.get("COGITO_E2E_TIMEOUT_SECONDS", "900")),
             existing_run_id=os.environ.get("COGITO_E2E_EXISTING_RUN_ID") or None,
+            values_file=resolved_values_file,
         )
 
 
@@ -64,6 +98,8 @@ class KindControlPlane:
         self.receiver = f"{config.release}-phase13-receiver"
         self.receiver_secret = f"{config.release}-phase13-notification-hmac"
         self.hmac_secret = secrets.token_urlsafe(32)
+        self._litellm_was_enabled: bool | None = None
+        self.run_id: str | None = None
 
     def command(self, *args: str, input_text: str | None = None, check: bool = True) -> str:
         result = subprocess.run(args, cwd=REPO_ROOT, input=input_text, text=True, capture_output=True, check=False)
@@ -73,6 +109,108 @@ class KindControlPlane:
 
     def kubectl(self, *args: str, input_text: str | None = None, check: bool = True) -> str:
         return self.command("kubectl", "--context", self.config.context, *args, input_text=input_text, check=check)
+
+    def running_image(self, component: str) -> str:
+        image = self.kubectl(
+            "-n", self.config.namespace, "get", f"deployment/{self.config.release}-{component}",
+            "-o", f"jsonpath={{.spec.template.spec.containers[?(@.name==\"{component}\")].image}}",
+        ).strip()
+        if not image or " " in image:
+            pytest.fail(f"unable to resolve exactly one running {component} image: {image!r}")
+        return image
+
+    def workload_image_overrides(self) -> tuple[str, ...]:
+        return (*helm_image_overrides("api", self.running_image("api")), *helm_image_overrides("worker", self.running_image("worker")))
+
+    def values_file_arguments(self) -> tuple[str, ...]:
+        return ("--values", str(self.config.values_file)) if self.config.values_file else ()
+
+    def github_repository(self) -> str:
+        source = self.config.target_repo.partition("#")[0]
+        parsed = urlparse(source.removesuffix(".git"))
+        parts = [part for part in parsed.path.split("/") if part]
+        if parsed.scheme != "https" or parsed.hostname != "github.com" or len(parts) != 2:
+            pytest.fail(f"E2E target repository is not a GitHub HTTPS repository: {self.config.target_repo}")
+        return "/".join(parts)
+
+    def assert_github_pr_access(self) -> None:
+        code = """
+import os, sys, urllib.error, urllib.request
+headers = {
+    "Accept": "application/vnd.github+json",
+    "Authorization": "Bearer " + os.environ["COGITO_GITHUB_PULL_REQUEST_TOKEN"].strip(),
+    "X-GitHub-Api-Version": "2022-11-28",
+}
+request = urllib.request.Request(
+    os.environ["COGITO_GITHUB_API_URL"].rstrip("/") + "/repos/" + sys.argv[1] + "/pulls?state=all&per_page=1",
+    headers=headers,
+)
+try:
+    print(urllib.request.urlopen(request, timeout=30).status)
+except urllib.error.HTTPError as error:
+    print(error.code)
+"""
+        status = self.kubectl(
+            "-n", self.config.namespace, "exec", f"deployment/{self.config.release}-worker", "--",
+            "python", "-c", code, self.github_repository(),
+        ).strip()
+        if status != "200":
+            pytest.fail(
+                "GitHub pull-request credential cannot list the E2E fixture repository "
+                f"(HTTP {status or 'no response'}); refresh cogito-github-pull-request/token"
+            )
+
+    def restart_worker(self) -> None:
+        selector = f"app.kubernetes.io/instance={self.config.release},app.kubernetes.io/name=worker"
+        previous_pods = self.kubectl(
+            "-n", self.config.namespace, "get", "pods", "-l", selector, "-o", "jsonpath={range .items[*]}{.metadata.name}{'\\n'}{end}"
+        ).splitlines()
+        self.kubectl("-n", self.config.namespace, "rollout", "restart", f"deployment/{self.config.release}-worker")
+        self.kubectl("-n", self.config.namespace, "rollout", "status", f"deployment/{self.config.release}-worker", "--timeout=180s")
+        deadline = time.monotonic() + 180
+        remaining = set(previous_pods)
+        while remaining and time.monotonic() < deadline:
+            remaining = {
+                pod for pod in remaining
+                if self.kubectl("-n", self.config.namespace, "get", "pod", pod, "-o", "name", check=False).strip()
+            }
+            if remaining:
+                time.sleep(1)
+        if remaining:
+            pytest.fail(f"worker restart did not terminate old pods: {', '.join(sorted(remaining))}")
+
+    def litellm_overrides(self, *, restore: bool = False) -> tuple[str, ...]:
+        if restore:
+            return ("--set", "litellm.enabled=false") if self._litellm_was_enabled is False else ()
+        values = json.loads(
+            self.command("helm", "get", "values", self.config.release, "--namespace", self.config.namespace, "--all", "--output", "json")
+        )
+        litellm = dict(values.get("litellm", {}))
+        planner_policy = dict(dict(litellm.get("rolePolicies", {})).get("planner", {}))
+        planner_model = str(planner_policy.get("model", ""))
+        provider = os.environ.get(
+            "COGITO_E2E_LITELLM_PROVIDER",
+            str(dict(dict(litellm.get("tiers", {})).get(planner_model, {})).get("provider", "")),
+        ).upper()
+        provider_secret = str(litellm.get("existingSecret", ""))
+        required_keys = (
+            ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION")
+            if provider == "BEDROCK"
+            else (f"{provider}_API_KEY",)
+        )
+        missing_keys = [
+            key for key in required_keys
+            if not provider_secret or not self.kubectl(
+                "-n", self.config.namespace, "get", "secret", provider_secret, "-o", f"jsonpath={{.data.{key}}}"
+            ).strip()
+        ]
+        if not provider or missing_keys:
+            pytest.fail(
+                "full Kind E2E requires non-empty "
+                f"{', '.join(missing_keys) or '<PROVIDER>_API_KEY'} in secret {provider_secret or '<litellm secret>'}"
+            )
+        self._litellm_was_enabled = bool(dict(values.get("litellm", {})).get("enabled", False))
+        return () if self._litellm_was_enabled else ("--set", "litellm.enabled=true")
 
     def setup(self) -> None:
         contexts = self.command("kubectl", "config", "get-contexts", "-o", "name").splitlines()
@@ -86,25 +224,41 @@ class KindControlPlane:
         self.kubectl("-n", self.config.namespace, "label", "secret", self.receiver_secret, "cogito.dev/phase13-e2e=true", "--overwrite")
         self.kubectl("-n", self.config.namespace, "apply", "-f", "-", input_text=self.receiver_manifest())
         self.kubectl("-n", self.config.namespace, "rollout", "status", f"deployment/{self.receiver}", "--timeout=180s")
+        image_overrides = self.workload_image_overrides()
+        litellm_overrides = self.litellm_overrides()
         self.command(
             "helm", "upgrade", self.config.release, str(REPO_ROOT / "charts"), "--kube-context", self.config.context,
             "--namespace", self.config.namespace, "--reuse-values", "--wait", "--timeout", "10m",
-            "--set", "api.image.repository=cogito-api", "--set", "api.image.tag=phase13",
-            "--set", "worker.image.repository=cogito-worker", "--set", "worker.image.tag=phase13",
+            *self.values_file_arguments(),
+            *image_overrides,
+            *litellm_overrides,
             "--set", "api.notifications.enabled=true",
             "--set", f"api.notifications.webhookUrl=http://{self.receiver}.{self.config.namespace}.svc:8080/events",
             "--set", f"api.notifications.existingSecret={self.receiver_secret}",
             "--set", "api.notifications.hmacSecretKey=hmac-secret",
         )
+        self.restart_worker()
+        self.assert_github_pr_access()
 
     def cleanup(self) -> None:
-        self.command(
-            "helm", "upgrade", self.config.release, str(REPO_ROOT / "charts"), "--kube-context", self.config.context,
-            "--namespace", self.config.namespace, "--reuse-values", "--wait", "--timeout", "10m",
-            "--set", "api.notifications.enabled=false", "--set", "api.notifications.webhookUrl=",
-            "--set", "api.notifications.existingSecret=", check=False,
-        )
+        if self._litellm_was_enabled is not None:
+            image_overrides = self.workload_image_overrides()
+            self.command(
+                "helm", "upgrade", self.config.release, str(REPO_ROOT / "charts"), "--kube-context", self.config.context,
+                "--namespace", self.config.namespace, "--reuse-values", "--wait", "--timeout", "10m",
+                *self.values_file_arguments(),
+                *image_overrides,
+                *self.litellm_overrides(restore=True),
+                "--set", "api.notifications.enabled=false", "--set", "api.notifications.webhookUrl=",
+                "--set", "api.notifications.existingSecret=", check=False,
+            )
         self.kubectl("-n", self.config.namespace, "delete", "deployment,service,secret", "-l", "cogito.dev/phase13-e2e=true", "--ignore-not-found", check=False)
+        if self.run_id:
+            run_hash = hashlib.sha256(self.run_id.encode()).hexdigest()[:20]
+            self.kubectl(
+                "-n", self.config.execution_namespace, "delete", "jobs,pods,secrets",
+                "-l", f"cogito.dev/run-hash={run_hash}", "--ignore-not-found", check=False,
+            )
 
     def api(self, method: str, path: str, body: dict[str, object] | None = None, *, authenticated: bool = True) -> tuple[int, dict[str, object]]:
         code = """
@@ -137,6 +291,8 @@ except urllib.error.HTTPError as error:
             assert status == 200, latest
             if latest["status"] == expected:
                 return latest
+            if latest["status"] in {"completed", "planning_failed", "rejected", "revision_requested"}:
+                pytest.fail(f"run reached terminal status {latest['status']} while waiting for {expected}: {latest}")
             time.sleep(5)
         pytest.fail(f"timed out waiting for {expected}: {latest}")
 
@@ -230,14 +386,14 @@ def test_provider_neutral_coordination_end_to_end(control_plane: KindControlPlan
         assert status == 202, submission
         run_id = str(submission["run_id"])
         status, generated = control_plane.api("POST", f"/api/v1/planning-runs/{run_id}/generate-plan", {})
-        assert status == 202, generated
+        assert status == 200, generated
         planning = control_plane.wait_for_status(run_id, "awaiting_plan_approval")
         control_plane.wait_for_event("plan_approval_requested")
 
     run_id = str(planning["run_id"])
+    control_plane.run_id = run_id
     plan_sha256 = str(dict(planning["plan_artifact"])["sha256"])
-    control_plane.kubectl("-n", config.namespace, "rollout", "restart", f"deployment/{config.release}-worker")
-    control_plane.kubectl("-n", config.namespace, "rollout", "status", f"deployment/{config.release}-worker", "--timeout=180s")
+    control_plane.restart_worker()
     status, coordination = control_plane.api("GET", f"/api/v1/planning-runs/{run_id}/coordination")
     assert status == 200 and coordination["active_gate"] == "plan"
     assert sum(event["event_type"] == "plan_approval_requested" for event in coordination["events"]) == 1
