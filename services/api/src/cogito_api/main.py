@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from minio import Minio
 from opentelemetry.context import attach, detach
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import ApprovalAuthenticator
 from .config import Settings, load_settings
@@ -44,6 +45,8 @@ from .models import (
     WorkbenchArtifactKind,
     WorkbenchArtifactSummary,
     WorkbenchEvidenceResponse,
+    WorkbenchProjectListResponse,
+    WorkbenchProjectResponse,
     WorkbenchRunListResponse,
     WorkbenchRunResponse,
 )
@@ -82,6 +85,36 @@ def _schema_violations(exc: RequestValidationError) -> list[Violation]:
         field_path = ".".join(str(p) for p in error["loc"] if p != "body")
         violations.append(Violation(field=field_path or "body", message=error["msg"]))
     return violations
+
+
+class TraceRequestMiddleware:
+    """Record request telemetry without converting no-content responses to streams."""
+
+    def __init__(self, app: ASGIApp, telemetry: Telemetry):
+        self.app = app
+        self.telemetry = telemetry
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
+        parent = self.telemetry.extract(dict(request.headers))
+        token = attach(parent)
+
+        async def send_response(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                status_code = int(message["status"])
+                self.telemetry.request(request.method, status_code)
+                self.telemetry.event("cogito.api.response", {"http.response.status_code": str(status_code)})
+            await send(message)
+
+        try:
+            with self.telemetry.span("cogito.api.request", {"http.request.method": request.method}):
+                await self.app(scope, receive, send_response)
+        finally:
+            detach(token)
 
 
 def create_app(
@@ -153,19 +186,7 @@ def create_app(
                 await close()
 
     app = FastAPI(title="Cogito API", lifespan=lifespan)
-
-    @app.middleware("http")
-    async def trace_request(request: Request, call_next):
-        parent = telemetry.extract(dict(request.headers))
-        token = attach(parent)
-        try:
-            with telemetry.span("cogito.api.request", {"http.request.method": request.method}):
-                response = await call_next(request)
-                telemetry.request(request.method, response.status_code)
-                telemetry.event("cogito.api.response", {"http.response.status_code": str(response.status_code)})
-                return response
-        finally:
-            detach(token)
+    app.add_middleware(TraceRequestMiddleware, telemetry=telemetry)
 
     @app.exception_handler(RequestValidationError)
     async def handle_schema_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -699,6 +720,7 @@ def create_app(
         authorization: str | None = Header(default=None),
         if_none_match: str | None = Header(default=None, alias="If-None-Match"),
         limit: int = 50,
+        project_id: str | None = None,
     ) -> Response:
         """List only server-authorized run summaries for the Operator Workbench."""
 
@@ -706,7 +728,10 @@ def create_app(
             raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
         principal = await authenticator.authenticate(authorization)
         authenticator.require_viewer(principal)
-        records = await supervisor_store.list_workbench_runs(project_ids=principal.projects, limit=limit)
+        if project_id is not None and project_id not in principal.projects:
+            raise HTTPException(status_code=404, detail="Workbench project not found")
+        project_ids = frozenset((project_id,)) if project_id is not None else principal.projects
+        records = await supervisor_store.list_workbench_runs(project_ids=project_ids, limit=limit)
         items = [workbench_response(record, principal) for record in records]
         draft = WorkbenchRunListResponse(items=items, revision="")
         revision = workbench_revision(draft)
@@ -714,6 +739,17 @@ def create_app(
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": revision})
         response = WorkbenchRunListResponse(items=items, revision=revision)
         return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": revision})
+
+    @app.get("/api/v1/workbench/projects")
+    async def list_workbench_projects(authorization: str | None = Header(default=None)) -> JSONResponse:
+        """List only projects that the authenticated Workbench principal may select."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        response = WorkbenchProjectListResponse(
+            items=[WorkbenchProjectResponse(project_id=project_id) for project_id in sorted(principal.projects)]
+        )
+        return JSONResponse(content=response.model_dump(mode="json"))
 
     @app.get("/api/v1/workbench/runs/{run_id}")
     async def get_workbench_run(

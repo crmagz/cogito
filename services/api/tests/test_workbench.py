@@ -36,6 +36,62 @@ def test_workbench_queue_filters_to_authorized_project(client, valid_plan, super
     assert "ref" not in str(response.json())
 
 
+def test_workbench_project_inventory_and_selected_project_are_scope_filtered(client, valid_plan, supervisor_store) -> None:
+    allowed_run, _ = _awaiting_plan(client, valid_plan)
+    foreign_run, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store.planning_runs[allowed_run] = replace(
+        supervisor_store.planning_runs[allowed_run], project_id="default"
+    )
+    supervisor_store.planning_runs[foreign_run] = replace(
+        supervisor_store.planning_runs[foreign_run], project_id="other-project"
+    )
+
+    projects = client.get("/api/v1/workbench/projects", headers=_headers())
+    selected = client.get("/api/v1/workbench/runs?project_id=default", headers=_headers())
+    forged = client.get("/api/v1/workbench/runs?project_id=other-project", headers=_headers())
+
+    assert projects.status_code == 200
+    assert projects.json() == {"items": [{"project_id": "default"}]}
+    assert selected.status_code == 200
+    assert [item["run_id"] for item in selected.json()["items"]] == [allowed_run]
+    assert forged.status_code == 404
+
+
+def test_workbench_multiple_authorized_projects_return_only_the_selected_scope(valid_plan) -> None:
+    store = InMemoryPlanStore()
+    supervisor_store = InMemorySupervisorStore()
+    writer = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(),
+            starter=FakeRunStarter(),
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+    alpha_run, _ = _awaiting_plan(writer, valid_plan)
+    beta_run, _ = _awaiting_plan(writer, valid_plan)
+    supervisor_store.planning_runs[alpha_run] = replace(supervisor_store.planning_runs[alpha_run], project_id="alpha")
+    supervisor_store.planning_runs[beta_run] = replace(supervisor_store.planning_runs[beta_run], project_id="beta")
+    app = create_app(
+        store=store,
+        settings=make_settings(auth_static_projects=("alpha", "beta")),
+        starter=FakeRunStarter(),
+        supervisor_store=supervisor_store,
+        planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+    )
+    reader = TestClient(app, headers={"Authorization": "Bearer operator-test-token"})
+
+    projects = reader.get("/api/v1/workbench/projects", headers=_headers())
+    alpha = reader.get("/api/v1/workbench/runs?project_id=alpha", headers=_headers())
+    beta = reader.get("/api/v1/workbench/runs?project_id=beta", headers=_headers())
+
+    assert projects.json() == {"items": [{"project_id": "alpha"}, {"project_id": "beta"}]}
+    assert [item["run_id"] for item in alpha.json()["items"]] == [alpha_run]
+    assert [item["run_id"] for item in beta.json()["items"]] == [beta_run]
+
+
 def test_workbench_detail_and_evidence_are_scope_and_digest_bound(client, valid_plan, supervisor_store) -> None:
     run_id, digest = _awaiting_plan(client, valid_plan)
     supervisor_store.planning_runs[run_id] = replace(supervisor_store.planning_runs[run_id], project_id="default")

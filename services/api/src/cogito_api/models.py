@@ -468,6 +468,18 @@ class WorkbenchRunResponse(BaseModel):
     workflow: list[str] = Field(default_factory=list, description="Authoritative ordered stage and gate labels")
 
 
+class WorkbenchProjectResponse(BaseModel):
+    """A project the authenticated principal may select in the Workbench."""
+
+    project_id: str = Field(min_length=1, description="Server-authorized project identifier")
+
+
+class WorkbenchProjectListResponse(BaseModel):
+    """Bounded Workbench project inventory for the authenticated principal."""
+
+    items: list[WorkbenchProjectResponse] = Field(description="Projects authorized for the current principal")
+
+
 class WorkbenchRunListResponse(BaseModel):
     """Bounded Workbench inventory with a representation revision."""
 
