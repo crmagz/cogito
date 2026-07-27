@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -187,3 +188,71 @@ async def test_postgres_resolution_converges_when_a_concurrent_insert_wins() -> 
     assert resolved == expected
     assert connection.run_resolution_reads == 2
     assert any("ON CONFLICT (run_id, role) DO NOTHING" in query for query in connection.queries)
+
+
+async def test_workbench_list_materializes_authorized_runs_with_one_database_query() -> None:
+    """The Workbench queue must not issue one planning-run query per listed row."""
+
+    row = {
+        "run_id": "run-1",
+        "status": "planning",
+        "source_artifact_ref": "s3://plans/run-1/source.json",
+        "source_artifact_sha256": "a" * 64,
+        "target_repos": ["https://github.com/acme/service.git#0123456789abcdef0123456789abcdef01234567"],
+        "spec_set": "python@1#sha256=" + "b" * 64,
+        "constraints": {},
+        "priority": "normal",
+        "submitted_at": datetime(2026, 7, 26, tzinfo=timezone.utc),
+        "submitted_by": "operator-1",
+        "plan_artifact_ref": None,
+        "plan_artifact_sha256": None,
+        "planner_model": None,
+        "active_workflow_id": None,
+        "plan_revision": 0,
+        "implementation_artifact_ref": None,
+        "implementation_artifact_sha256": None,
+        "implementation_revision": 0,
+        "project_id": "default",
+    }
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [row]
+
+    class Connection:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def execute(self, statement, _parameters):
+            self.queries.append(str(statement))
+            return Result()
+
+    class Session:
+        def __init__(self, connection: Connection) -> None:
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_):
+            return False
+
+    class Engine:
+        def __init__(self, connection: Connection) -> None:
+            self.connection = connection
+
+        def connect(self):
+            return Session(self.connection)
+
+    connection = Connection()
+    store = object.__new__(PostgresSupervisorStore)
+    store._engine = Engine(connection)
+
+    records = await store.list_workbench_runs(project_ids=frozenset({"default"}), limit=50)
+
+    assert [record.run_id for record in records] == ["run-1"]
+    assert len(connection.queries) == 1
+    assert "source_artifact_ref" in connection.queries[0]

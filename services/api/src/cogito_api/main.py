@@ -11,7 +11,7 @@ from hashlib import sha256
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from minio import Minio
 from opentelemetry.context import attach, detach
 
@@ -699,7 +699,7 @@ def create_app(
         authorization: str | None = Header(default=None),
         if_none_match: str | None = Header(default=None, alias="If-None-Match"),
         limit: int = 50,
-    ) -> JSONResponse:
+    ) -> Response:
         """List only server-authorized run summaries for the Operator Workbench."""
 
         if limit < 1 or limit > 100:
@@ -711,7 +711,7 @@ def create_app(
         draft = WorkbenchRunListResponse(items=items, revision="")
         revision = workbench_revision(draft)
         if if_none_match == revision:
-            return JSONResponse(status_code=status.HTTP_304_NOT_MODIFIED, content=None, headers={"ETag": revision})
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": revision})
         response = WorkbenchRunListResponse(items=items, revision=revision)
         return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": revision})
 
@@ -720,7 +720,7 @@ def create_app(
         run_id: str,
         authorization: str | None = Header(default=None),
         if_none_match: str | None = Header(default=None, alias="If-None-Match"),
-    ) -> JSONResponse:
+    ) -> Response:
         """Return one scope-filtered Workbench detail projection."""
 
         principal = await authenticator.authenticate(authorization)
@@ -731,7 +731,7 @@ def create_app(
         response = workbench_response(record, principal)
         revision = workbench_revision(response)
         if if_none_match == revision:
-            return JSONResponse(status_code=status.HTTP_304_NOT_MODIFIED, content=None, headers={"ETag": revision})
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": revision})
         return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": revision})
 
     @app.get("/api/v1/workbench/runs/{run_id}/evidence/{kind}")

@@ -75,6 +75,22 @@ def test_workbench_returns_not_modified_for_matching_revision(client, valid_plan
     assert first.status_code == 200
     assert second.status_code == 304
     assert second.headers["etag"] == first.headers["etag"]
+    assert second.content == b""
+
+
+def test_workbench_queue_returns_bodyless_not_modified_response(client, valid_plan) -> None:
+    _awaiting_plan(client, valid_plan)
+
+    first = client.get("/api/v1/workbench/runs", headers=_headers())
+    second = client.get(
+        "/api/v1/workbench/runs",
+        headers={"Authorization": "Bearer operator-test-token", "If-None-Match": first.headers["etag"]},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 304
+    assert second.headers["etag"] == first.headers["etag"]
+    assert second.content == b""
 
 
 def test_workbench_hides_foreign_detail_and_rejects_viewer_actions(valid_plan) -> None:

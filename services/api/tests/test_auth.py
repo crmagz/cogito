@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from cogito_api.auth import ApprovalAuthenticator
+from cogito_api.auth import ApprovalAuthenticator, Principal
 
 from .conftest import make_settings
 
@@ -37,3 +37,17 @@ async def test_oidc_rejects_non_string_roles(monkeypatch: pytest.MonkeyPatch) ->
 
     assert error.value.status_code == 403
     assert error.value.detail == "operator is not authorized for a project scope"
+
+
+def test_approver_authorization_error_is_operation_neutral() -> None:
+    """Privilege failures must not imply the denied operation is plan approval."""
+
+    authenticator = ApprovalAuthenticator(make_settings())
+
+    with pytest.raises(HTTPException) as error:
+        authenticator.require_approver(
+            Principal(subject="viewer-1", projects=frozenset({"default"}), roles=frozenset({"cogito-viewer"}))
+        )
+
+    assert error.value.status_code == 403
+    assert error.value.detail == "operator is not authorized to perform this operation"

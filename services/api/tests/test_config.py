@@ -38,6 +38,15 @@ def test_static_scope_configuration_requires_json_string_arrays(monkeypatch: pyt
         load_settings()
 
 
+def test_static_auth_requires_the_default_workbench_project_in_its_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COGITO_AUTH_MODE", "static")
+    monkeypatch.setenv("COGITO_AUTH_STATIC_PROJECTS", '["other-project"]')
+    monkeypatch.setenv("COGITO_WORKBENCH_DEFAULT_PROJECT_ID", "default")
+
+    with pytest.raises(ValueError, match="DEFAULT_PROJECT_ID must be included in COGITO_AUTH_STATIC_PROJECTS"):
+        load_settings()
+
+
 def test_enabled_notifications_require_a_signing_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COGITO_NOTIFICATION_ENABLED", "true")
     monkeypatch.setenv("COGITO_NOTIFICATION_WEBHOOK_URL", "https://receiver.example.test/events")
