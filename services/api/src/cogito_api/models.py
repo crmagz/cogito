@@ -455,6 +455,48 @@ class WorkbenchArtifactSummary(BaseModel):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class WorkbenchApprovalSummary(BaseModel):
+    """Immutable operator decision history shown only to scoped approvers."""
+
+    decision_id: str
+    gate: CoordinationGate
+    decision: str
+    artifact_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    actor_id: str
+    created_at: str
+    delivered: bool
+
+
+class WorkbenchBudgetSummary(BaseModel):
+    """Server-owned run limits; actual spend is unavailable until frozen evidence exists."""
+
+    max_cost_usd: float
+    max_wall_clock_minutes: int
+    max_review_rounds: int
+    actual_cost_usd: float | None = None
+    turns_used: int | None = None
+
+
+class WorkbenchExecutionSummary(BaseModel):
+    """Bounded, typed facts extracted from the immutable implementation artifact."""
+
+    phase_count: int
+    succeeded_phase_count: int
+    failed_phase_count: int
+    verification_passed: int
+    verification_failed: int
+    review_status: str | None = None
+    validation_status: str | None = None
+
+
+class WorkbenchExternalLink(BaseModel):
+    """A server-owned external destination, never a browser-provided URL."""
+
+    kind: str
+    label: str
+    url: str
+
+
 class WorkbenchRunResponse(BaseModel):
     """Scope-filtered, authoritative run projection for the Operator Workbench."""
 
@@ -466,6 +508,11 @@ class WorkbenchRunResponse(BaseModel):
     artifacts: list[WorkbenchArtifactSummary] = Field(default_factory=list)
     abilities: list[str] = Field(default_factory=list)
     workflow: list[str] = Field(default_factory=list, description="Authoritative ordered stage and gate labels")
+    budget: WorkbenchBudgetSummary
+    approval_history_available: bool = False
+    approval_history: list[WorkbenchApprovalSummary] = Field(default_factory=list)
+    execution: WorkbenchExecutionSummary | None = None
+    external_links: list[WorkbenchExternalLink] = Field(default_factory=list)
 
 
 class WorkbenchProjectResponse(BaseModel):
