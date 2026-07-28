@@ -25,6 +25,7 @@ from cogito_api.supervisor import (
     NotificationDelivery,
     OutboxDelivery,
     PlanningRunRecord,
+    WorkbenchApprovalRecord,
     RegistryConflictError,
 )
 
@@ -34,6 +35,7 @@ class InMemoryPlanStore:
         self.plans: dict[str, AiPlan] = {}
         self.statuses: dict[str, dict] = {}
         self.source_specifications: dict[str, str] = {}
+        self.artifacts: dict[str, bytes] = {}
 
     def put_plan(self, run_id: str, plan: AiPlan) -> PlanSnapshot:
         self.plans[run_id] = plan
@@ -69,12 +71,22 @@ class InMemoryPlanStore:
             sha256=sha256(source_specification_bytes(initial_specification)).hexdigest(),
         )
 
+    def put_artifact(self, ref: str, content: bytes) -> ArtifactReference:
+        """Store a test-only immutable artifact with its matching digest."""
+
+        from hashlib import sha256
+
+        self.artifacts[ref] = content
+        return ArtifactReference(ref=ref, sha256=sha256(content).hexdigest())
+
     def get_source_specification(self, source_artifact_ref: str) -> str:
         run_id = source_artifact_ref.split("/")[4]
         return self.source_specifications[run_id]
 
     def get_verified_artifact(self, artifact: ArtifactReference, *, max_bytes: int) -> bytes:
-        if "/source-spec.json" in artifact.ref:
+        if artifact.ref in self.artifacts:
+            body = self.artifacts[artifact.ref]
+        elif "/source-spec.json" in artifact.ref:
             run_id = artifact.ref.split("/")[4]
             body = source_specification_bytes(self.source_specifications[run_id])
         else:
@@ -474,6 +486,38 @@ class InMemorySupervisorStore:
             (event, *self.notification_deliveries[event.event_id])
             for event in events[:limit]
         ]
+
+    async def list_workbench_approvals(self, run_id: str, *, limit: int = 100) -> list[WorkbenchApprovalRecord]:
+        """Provide the same normalized immutable approval history as PostgreSQL."""
+
+        records = [
+            WorkbenchApprovalRecord(
+                decision_id=item.decision_id,
+                run_id=item.run_id,
+                gate="plan",
+                decision=item.decision.value,
+                artifact_sha256=item.artifact_sha256,
+                actor_id=item.actor_id,
+                created_at=item.created_at,
+                delivered=item.delivered,
+            )
+            for item in self.approvals.values()
+            if item.run_id == run_id
+        ] + [
+            WorkbenchApprovalRecord(
+                decision_id=item.decision_id,
+                run_id=item.run_id,
+                gate="implementation",
+                decision=item.decision.value,
+                artifact_sha256=item.artifact_sha256,
+                actor_id=item.actor_id,
+                created_at=item.created_at,
+                delivered=item.delivered,
+            )
+            for item in self.implementation_approvals.values()
+            if item.run_id == run_id
+        ]
+        return sorted(records, key=lambda item: (item.created_at, item.decision_id), reverse=True)[:max(1, min(limit, 100))]
 
     async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]:
         return sorted(self.planning_runs.values(), key=lambda item: item.submitted_at, reverse=True)[:limit]

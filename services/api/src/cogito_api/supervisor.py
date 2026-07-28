@@ -76,6 +76,20 @@ class ImplementationApprovalRecord:
 
 
 @dataclass(frozen=True)
+class WorkbenchApprovalRecord:
+    """Normalized immutable decision history for the scoped Workbench projection."""
+
+    decision_id: str
+    run_id: str
+    gate: str
+    decision: str
+    artifact_sha256: str
+    actor_id: str
+    created_at: str
+    delivered: bool
+
+
+@dataclass(frozen=True)
 class OutboxDelivery:
     """A short-lived lease over an immutable plan approval decision."""
 
@@ -264,6 +278,8 @@ class SupervisorStore(Protocol):
     ) -> RegistrationReference: ...
 
     async def list_coordination_events(self, run_id: str, *, limit: int = 100) -> list[tuple[CoordinationEvent, bool, int, str | None]]: ...
+
+    async def list_workbench_approvals(self, run_id: str, *, limit: int = 100) -> list[WorkbenchApprovalRecord]: ...
 
     async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]: ...
 
@@ -1295,6 +1311,43 @@ class PostgresSupervisorStore:
                 row["delivered_at"] is not None,
                 int(row["attempt_count"] or 0),
                 row["last_error"],
+            )
+            for row in rows
+        ]
+
+    async def list_workbench_approvals(self, run_id: str, *, limit: int = 100) -> list[WorkbenchApprovalRecord]:
+        """Return one bounded newest-first view across both approval gates."""
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT decision_id, run_id, 'plan' AS gate, decision, artifact_sha256, actor_id, created_at,
+                           delivered_at
+                    FROM plan_approval_decisions
+                    WHERE run_id = :run_id
+                    UNION ALL
+                    SELECT decision_id, run_id, 'implementation' AS gate, decision, artifact_sha256, actor_id,
+                           created_at, delivered_at
+                    FROM implementation_approval_decisions
+                    WHERE run_id = :run_id
+                    ORDER BY created_at DESC, decision_id DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"run_id": run_id, "limit": max(1, min(limit, 100))},
+            )
+            rows = result.mappings().all()
+        return [
+            WorkbenchApprovalRecord(
+                decision_id=row["decision_id"],
+                run_id=row["run_id"],
+                gate=row["gate"],
+                decision=row["decision"],
+                artifact_sha256=row["artifact_sha256"],
+                actor_id=row["actor_id"],
+                created_at=row["created_at"].isoformat(),
+                delivered=row["delivered_at"] is not None,
             )
             for row in rows
         ]

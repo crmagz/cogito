@@ -8,6 +8,8 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
+from math import isfinite
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -44,7 +46,11 @@ from .models import (
     Violation,
     WorkbenchArtifactKind,
     WorkbenchArtifactSummary,
+    WorkbenchApprovalSummary,
+    WorkbenchBudgetSummary,
     WorkbenchEvidenceResponse,
+    WorkbenchExecutionSummary,
+    WorkbenchExternalLink,
     WorkbenchProjectListResponse,
     WorkbenchProjectResponse,
     WorkbenchRunListResponse,
@@ -710,6 +716,117 @@ def create_app(
             artifacts=artifacts,
             abilities=abilities,
             workflow=workflow,
+            budget=WorkbenchBudgetSummary(
+                max_cost_usd=record.constraints.max_cost_usd,
+                max_wall_clock_minutes=record.constraints.max_wall_clock_minutes,
+                max_review_rounds=record.constraints.max_review_rounds,
+            ),
+            approval_history_available="approve" in abilities,
+            external_links=workbench_external_links(record),
+        )
+
+    def workbench_external_links(record: PlanningRunRecord) -> list[WorkbenchExternalLink]:
+        """Expose only repository destinations derived from a validated run target."""
+
+        links: list[WorkbenchExternalLink] = []
+        for target in record.target_repos:
+            parsed = urlparse(target)
+            try:
+                port = parsed.port
+            except ValueError:
+                continue
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname not in settings.allowed_git_hosts
+                or port not in {None, 443}
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or not parsed.path
+            ):
+                continue
+            url = f"https://{parsed.netloc}{parsed.path.removesuffix('.git')}"
+            links.append(WorkbenchExternalLink(kind="repository", label="Repository", url=url))
+        return links[:10]
+
+    def workbench_execution(record: PlanningRunRecord) -> tuple[WorkbenchExecutionSummary | None, float | None, int | None]:
+        """Read only bounded fields from verified immutable implementation evidence.
+
+        A storage or parse problem intentionally leaves the summary unavailable;
+        an operational inventory request must not fail because a detail artifact
+        cannot currently be read.
+        """
+
+        artifact = record.implementation_artifact
+        if artifact is None:
+            return None, None, None
+        try:
+            document = json.loads(store.get_verified_artifact(artifact, max_bytes=100_000).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, PlanStoreUnavailableError, ValueError):
+            return None, None, None
+        if not isinstance(document, dict) or document.get("run_id") != record.run_id:
+            return None, None, None
+        phases = document.get("phase_results")
+        if not isinstance(phases, list):
+            return None, None, None
+        safe_phases = [item for item in phases if isinstance(item, dict) and isinstance(item.get("phase_id"), str)]
+        succeeded = sum(item.get("succeeded") is True for item in safe_phases)
+        failed = sum(item.get("succeeded") is False for item in safe_phases)
+        verification: list[dict[str, bool]] = []
+        for item in safe_phases:
+            checks = item.get("verification")
+            if not isinstance(checks, list):
+                continue
+            verification.extend(
+                check for check in checks if isinstance(check, dict) and isinstance(check.get("passed"), bool)
+            )
+        review = document.get("review")
+        validation = document.get("validation")
+        cost = document.get("cost_usd")
+        turns = document.get("turns_used")
+        return (
+            WorkbenchExecutionSummary(
+                phase_count=len(safe_phases),
+                succeeded_phase_count=succeeded,
+                failed_phase_count=failed,
+                verification_passed=sum(item["passed"] is True for item in verification),
+                verification_failed=sum(item["passed"] is False for item in verification),
+                review_status=review.get("status") if isinstance(review, dict) and isinstance(review.get("status"), str) else None,
+                validation_status=(
+                    validation.get("status") if isinstance(validation, dict) and isinstance(validation.get("status"), str) else None
+                ),
+            ),
+            (
+                float(cost)
+                if isinstance(cost, (int, float)) and not isinstance(cost, bool) and isfinite(cost) and cost >= 0
+                else None
+            ),
+            turns if isinstance(turns, int) and not isinstance(turns, bool) and turns >= 0 else None,
+        )
+
+    async def workbench_detail_response(record: PlanningRunRecord, principal) -> WorkbenchRunResponse:
+        """Enrich one already-authorized run with durable audit and evidence facts."""
+
+        base = workbench_response(record, principal)
+        approvals = await supervisor_store.list_workbench_approvals(record.run_id) if base.approval_history_available else []
+        execution, actual_cost_usd, turns_used = workbench_execution(record)
+        return base.model_copy(
+            update={
+                "approval_history": [
+                    WorkbenchApprovalSummary(
+                        decision_id=item.decision_id,
+                        gate=CoordinationGate(item.gate),
+                        decision=item.decision,
+                        artifact_sha256=item.artifact_sha256,
+                        actor_id=item.actor_id,
+                        created_at=item.created_at,
+                        delivered=item.delivered,
+                    )
+                    for item in approvals
+                ],
+                "execution": execution,
+                "budget": base.budget.model_copy(update={"actual_cost_usd": actual_cost_usd, "turns_used": turns_used}),
+            }
         )
 
     def workbench_revision(response: WorkbenchRunListResponse | WorkbenchRunResponse) -> str:
@@ -764,7 +881,7 @@ def create_app(
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
-        response = workbench_response(record, principal)
+        response = await workbench_detail_response(record, principal)
         revision = workbench_revision(response)
         if if_none_match == revision:
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": revision})

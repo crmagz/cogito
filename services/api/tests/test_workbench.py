@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
 from fastapi.testclient import TestClient
 
@@ -132,6 +133,151 @@ def test_workbench_returns_not_modified_for_matching_revision(client, valid_plan
     assert second.status_code == 304
     assert second.headers["etag"] == first.headers["etag"]
     assert second.content == b""
+
+
+def test_workbench_detail_projects_bounded_execution_budget_and_approval_history(
+    client, valid_plan, store, supervisor_store
+) -> None:
+    run_id, digest = _awaiting_plan(client, valid_plan)
+    approved = client.post(
+        f"/api/v1/runs/{run_id}/approvals/plan",
+        json={"decision": "approve", "artifact_sha256": digest},
+        headers=_headers("workbench-history"),
+    )
+    assert approved.status_code == 202
+    evidence = {
+        "version": 1,
+        "run_id": run_id,
+        "phase_results": [
+            {"phase_id": "one", "succeeded": True, "verification": [{"passed": True}, {"passed": False}]},
+            {"phase_id": "two", "succeeded": False, "verification": []},
+        ],
+        "review": {"status": "converged"},
+        "validation": {"status": "passed"},
+        "cost_usd": 1.25,
+        "turns_used": 42,
+    }
+    artifact = store.put_artifact(
+        f"s3://plans/runs/{run_id}/implementation.json", json.dumps(evidence).encode()
+    )
+    supervisor_store.planning_runs[run_id] = replace(
+        supervisor_store.planning_runs[run_id],
+        implementation_artifact=artifact,
+        status=PlanningRunStatus.AWAITING_IMPLEMENTATION_APPROVAL,
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["budget"] == {
+        "max_cost_usd": 3.0,
+        "max_wall_clock_minutes": 45,
+        "max_review_rounds": 2,
+        "actual_cost_usd": 1.25,
+        "turns_used": 42,
+    }
+    assert body["execution"] == {
+        "phase_count": 2,
+        "succeeded_phase_count": 1,
+        "failed_phase_count": 1,
+        "verification_passed": 1,
+        "verification_failed": 1,
+        "review_status": "converged",
+        "validation_status": "passed",
+    }
+    assert body["approval_history"] == [
+        {
+            "decision_id": approved.json()["decision_id"],
+            "gate": "plan",
+            "decision": "approve",
+            "artifact_sha256": digest,
+            "actor_id": "test-operator",
+            "created_at": approved.json()["created_at"],
+            "delivered": True,
+        }
+    ]
+    assert body["external_links"] == [{"kind": "repository", "label": "Repository", "url": "https://github.com/acme/api-gateway"}]
+
+
+def test_workbench_omits_nonstandard_port_repository_link(client, valid_plan, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store.planning_runs[run_id] = replace(
+        supervisor_store.planning_runs[run_id],
+        target_repos=["https://github.com:444/acme/api-gateway.git#0123456789abcdef0123456789abcdef01234567"],
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json()["external_links"] == []
+
+
+def test_workbench_detail_treats_malformed_execution_evidence_as_unavailable(client, valid_plan, store, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    artifact = store.put_artifact(f"s3://plans/runs/{run_id}/implementation.json", b"not-json")
+    supervisor_store.planning_runs[run_id] = replace(
+        supervisor_store.planning_runs[run_id], implementation_artifact=artifact
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json()["execution"] is None
+    assert response.json()["budget"]["actual_cost_usd"] is None
+
+
+def test_workbench_detail_omits_non_finite_actual_cost(client, valid_plan, store, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    evidence = {"run_id": run_id, "phase_results": [], "cost_usd": float("inf"), "turns_used": 0}
+    artifact = store.put_artifact(f"s3://plans/runs/{run_id}/implementation.json", json.dumps(evidence).encode())
+    supervisor_store.planning_runs[run_id] = replace(
+        supervisor_store.planning_runs[run_id], implementation_artifact=artifact
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json()["budget"]["actual_cost_usd"] is None
+
+
+def test_workbench_detail_does_not_leak_approval_history_to_viewers(valid_plan) -> None:
+    store = InMemoryPlanStore()
+    supervisor_store = InMemorySupervisorStore()
+    writer = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(),
+            starter=FakeRunStarter(),
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+    run_id, digest = _awaiting_plan(writer, valid_plan)
+    decision = writer.post(
+        f"/api/v1/runs/{run_id}/approvals/plan",
+        json={"decision": "approve", "artifact_sha256": digest},
+        headers=_headers("viewer-history"),
+    )
+    assert decision.status_code == 202
+    viewer = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(auth_static_roles=("cogito-viewer",)),
+            starter=FakeRunStarter(),
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    response = viewer.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json()["approval_history_available"] is False
+    assert response.json()["approval_history"] == []
+    assert "test-operator" not in response.text
 
 
 def test_workbench_queue_returns_bodyless_not_modified_response(client, valid_plan) -> None:
