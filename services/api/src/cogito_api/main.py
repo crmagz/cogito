@@ -55,6 +55,15 @@ from .models import (
     WorkbenchProjectResponse,
     WorkbenchRunListResponse,
     WorkbenchRunResponse,
+    WorkbenchStageAvailability,
+    WorkbenchStageState,
+    WorkbenchStageSummary,
+    WorkbenchWorkflowEdge,
+    WorkbenchWorkflowGraph,
+    WorkbenchWorkflowNode,
+    WorkbenchWorkflowNodeType,
+    WorkbenchTimelineEvent,
+    WorkbenchTimelineResponse,
 )
 from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDispatcher, stop_dispatcher
 from .notifications import NotificationOutboxDispatcher, notification_sink, stop_notification_dispatcher
@@ -707,11 +716,15 @@ def create_app(
             workflow.append("implementation")
         if active_gate is not None:
             workflow.append(f"{active_gate.value}_approval")
+        stages = workbench_stages(record, active_gate)
         return WorkbenchRunResponse(
             run_id=record.run_id,
             project_id=record.project_id,
             status=record.status,
             submitted_at=record.submitted_at,
+            workflow_id=record.workflow_id,
+            stages=stages,
+            workflow_graph=workbench_graph(stages),
             active_gate=active_gate,
             artifacts=artifacts,
             abilities=abilities,
@@ -724,6 +737,167 @@ def create_app(
             approval_history_available="approve" in abilities,
             external_links=workbench_external_links(record),
         )
+
+    def workbench_graph(stages: list[WorkbenchStageSummary]) -> WorkbenchWorkflowGraph:
+        """Return the server-owned relay topology for the lifecycle stages it exposes."""
+
+        nodes = [
+            WorkbenchWorkflowNode(
+                **stage.model_dump(),
+                node_type=(
+                    WorkbenchWorkflowNodeType.GATE
+                    if stage.stage_id.endswith("_approval")
+                    else WorkbenchWorkflowNodeType.QUEUE
+                    if stage.stage_id == "specification"
+                    else WorkbenchWorkflowNodeType.AGENT
+                ),
+            )
+            for stage in stages
+        ]
+        return WorkbenchWorkflowGraph(
+            nodes=nodes,
+            edges=[
+                WorkbenchWorkflowEdge(source_node_id=stages[index].stage_id, target_node_id=stage.stage_id)
+                for index, stage in enumerate(stages[1:])
+            ],
+        )
+
+    def workbench_stages(
+        record: PlanningRunRecord, active_gate: CoordinationGate | None
+    ) -> list[WorkbenchStageSummary]:
+        """Project only per-stage facts that the supervisor record can prove."""
+
+        status = record.status
+        planning_state = (
+            WorkbenchStageState.IN_PROGRESS
+            if status is PlanningRunStatus.PLANNING
+            else WorkbenchStageState.FAILED
+            if status is PlanningRunStatus.PLANNING_FAILED
+            else WorkbenchStageState.COMPLETED
+            if record.plan_artifact is not None
+            else WorkbenchStageState.UNAVAILABLE
+        )
+        planning_reason = (
+            "The supervisor records planning in progress."
+            if planning_state is WorkbenchStageState.IN_PROGRESS
+            else "The supervisor records planning as failed."
+            if planning_state is WorkbenchStageState.FAILED
+            else "An immutable generated plan is recorded."
+            if planning_state is WorkbenchStageState.COMPLETED
+            else "No durable planning result is available."
+        )
+        plan_gate_state = (
+            WorkbenchStageState.AWAITING_OPERATOR
+            if active_gate is CoordinationGate.PLAN
+            else WorkbenchStageState.NEEDS_REVISION
+            if status is PlanningRunStatus.REVISION_REQUESTED
+            and record.implementation_artifact is None
+            else WorkbenchStageState.FAILED
+            if status is PlanningRunStatus.REJECTED
+            and record.implementation_artifact is None
+            else WorkbenchStageState.COMPLETED
+            if record.implementation_artifact is not None
+            or (
+                record.plan_artifact is not None
+                and status
+                in {
+                    PlanningRunStatus.IMPLEMENTING,
+                    PlanningRunStatus.AWAITING_IMPLEMENTATION_APPROVAL,
+                    PlanningRunStatus.FINALIZING,
+                    PlanningRunStatus.COMPLETED,
+                }
+            )
+            else WorkbenchStageState.UNAVAILABLE
+        )
+        implementation_state = (
+            WorkbenchStageState.IN_PROGRESS
+            if status is PlanningRunStatus.IMPLEMENTING
+            else WorkbenchStageState.COMPLETED
+            if record.implementation_artifact is not None
+            else WorkbenchStageState.UNAVAILABLE
+        )
+        implementation_gate_state = (
+            WorkbenchStageState.AWAITING_OPERATOR
+            if active_gate is CoordinationGate.IMPLEMENTATION
+            else WorkbenchStageState.NEEDS_REVISION
+            if status is PlanningRunStatus.REVISION_REQUESTED
+            and record.implementation_artifact is not None
+            else WorkbenchStageState.FAILED
+            if status is PlanningRunStatus.REJECTED
+            and record.implementation_artifact is not None
+            else WorkbenchStageState.COMPLETED
+            if record.implementation_artifact is not None
+            and status in {PlanningRunStatus.FINALIZING, PlanningRunStatus.COMPLETED}
+            else WorkbenchStageState.UNAVAILABLE
+        )
+        return [
+            WorkbenchStageSummary(
+                stage_id="specification",
+                label="Specification",
+                state=WorkbenchStageState.COMPLETED,
+                availability=WorkbenchStageAvailability.AUTHORITATIVE,
+                reason="An immutable submitted specification is recorded.",
+                artifact_kind=WorkbenchArtifactKind.SOURCE,
+            ),
+            WorkbenchStageSummary(
+                stage_id="planning",
+                label="Planning",
+                state=planning_state,
+                availability=(WorkbenchStageAvailability.UNAVAILABLE if planning_state is WorkbenchStageState.UNAVAILABLE else WorkbenchStageAvailability.AUTHORITATIVE),
+                reason=planning_reason,
+                artifact_kind=WorkbenchArtifactKind.PLAN if record.plan_artifact is not None else None,
+            ),
+            WorkbenchStageSummary(
+                stage_id="plan_approval",
+                label="Plan approval",
+                state=plan_gate_state,
+                availability=(WorkbenchStageAvailability.UNAVAILABLE if plan_gate_state is WorkbenchStageState.UNAVAILABLE else WorkbenchStageAvailability.AUTHORITATIVE),
+                reason=(
+                    "An operator decision on the immutable plan is required."
+                    if plan_gate_state is WorkbenchStageState.AWAITING_OPERATOR
+                    else "An operator rejected the immutable plan."
+                    if plan_gate_state is WorkbenchStageState.FAILED
+                    else "An operator requested revision of the immutable plan."
+                    if plan_gate_state is WorkbenchStageState.NEEDS_REVISION
+                    else "The supervisor advanced beyond the plan approval gate."
+                    if plan_gate_state is WorkbenchStageState.COMPLETED
+                    else "No durable plan-gate resolution is available."
+                ),
+                artifact_kind=WorkbenchArtifactKind.PLAN if record.plan_artifact is not None else None,
+            ),
+            WorkbenchStageSummary(
+                stage_id="implementation",
+                label="Implementation",
+                state=implementation_state,
+                availability=(WorkbenchStageAvailability.UNAVAILABLE if implementation_state is WorkbenchStageState.UNAVAILABLE else WorkbenchStageAvailability.AUTHORITATIVE),
+                reason=(
+                    "The supervisor records implementation in progress."
+                    if implementation_state is WorkbenchStageState.IN_PROGRESS
+                    else "An immutable implementation result is recorded."
+                    if implementation_state is WorkbenchStageState.COMPLETED
+                    else "No durable implementation result is available."
+                ),
+                artifact_kind=WorkbenchArtifactKind.IMPLEMENTATION if record.implementation_artifact is not None else None,
+            ),
+            WorkbenchStageSummary(
+                stage_id="implementation_approval",
+                label="Implementation approval",
+                state=implementation_gate_state,
+                availability=(WorkbenchStageAvailability.UNAVAILABLE if implementation_gate_state is WorkbenchStageState.UNAVAILABLE else WorkbenchStageAvailability.AUTHORITATIVE),
+                reason=(
+                    "An operator decision on the immutable implementation result is required."
+                    if implementation_gate_state is WorkbenchStageState.AWAITING_OPERATOR
+                    else "An operator rejected the immutable implementation result."
+                    if implementation_gate_state is WorkbenchStageState.FAILED
+                    else "An operator requested revision of the immutable implementation result."
+                    if implementation_gate_state is WorkbenchStageState.NEEDS_REVISION
+                    else "The supervisor advanced beyond the implementation approval gate."
+                    if implementation_gate_state is WorkbenchStageState.COMPLETED
+                    else "No durable implementation-gate resolution is available."
+                ),
+                artifact_kind=WorkbenchArtifactKind.IMPLEMENTATION if record.implementation_artifact is not None else None,
+            ),
+        ]
 
     def workbench_external_links(record: PlanningRunRecord) -> list[WorkbenchExternalLink]:
         """Expose only repository destinations derived from a validated run target."""
@@ -829,8 +1003,68 @@ def create_app(
             }
         )
 
-    def workbench_revision(response: WorkbenchRunListResponse | WorkbenchRunResponse) -> str:
+    def workbench_revision(response: object) -> str:
+        """Derive a stable ETag from a fully scoped Workbench representation."""
+
+        if not hasattr(response, "model_dump"):
+            raise TypeError("Workbench revisions require a Pydantic response model")
         return sha256(json.dumps(response.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def workbench_etag_matches(if_none_match: str | None, revision: str) -> bool:
+        """Use weak ETag comparison for a GET representation without trusting header syntax."""
+
+        if not if_none_match:
+            return False
+        for validator in if_none_match.split(","):
+            candidate = validator.strip()
+            if candidate == "*":
+                return True
+            if candidate.lower().startswith("w/"):
+                candidate = candidate[2:].strip()
+            if len(candidate) >= 2 and candidate.startswith('"') and candidate.endswith('"'):
+                candidate = candidate[1:-1]
+            if candidate == revision:
+                return True
+        return False
+
+    def workbench_gate(value: str | None) -> CoordinationGate | None:
+        try:
+            return CoordinationGate(value) if value else None
+        except ValueError:
+            return None
+
+    def workbench_plan_decision(value: str | None) -> PlanApprovalDecision | None:
+        try:
+            return PlanApprovalDecision(value) if value else None
+        except ValueError:
+            return None
+
+    def workbench_agent_status(value: str | None) -> AgentRunStatus | None:
+        try:
+            return AgentRunStatus(value) if value else None
+        except ValueError:
+            return None
+
+    async def workbench_timeline_response(record: PlanningRunRecord) -> WorkbenchTimelineResponse:
+        """Build a bounded timeline without exposing storage references or sink errors."""
+
+        events = await supervisor_store.list_coordination_events(record.run_id, limit=100)
+        items = [
+            WorkbenchTimelineEvent(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                occurred_at=event.occurred_at,
+                gate=workbench_gate(event.gate),
+                artifact_sha256=event.artifact_sha256,
+                decision=workbench_plan_decision(event.decision),
+                lifecycle_status=workbench_agent_status(event.lifecycle_status),
+                delivered=delivered,
+                delivery_attempt_count=attempts,
+            )
+            for event, delivered, attempts, _last_error in events
+        ]
+        draft = WorkbenchTimelineResponse(items=items, revision="")
+        return draft.model_copy(update={"revision": workbench_revision(draft)})
 
     @app.get("/api/v1/workbench/runs")
     async def list_workbench_runs(
@@ -852,7 +1086,7 @@ def create_app(
         items = [workbench_response(record, principal) for record in records]
         draft = WorkbenchRunListResponse(items=items, revision="")
         revision = workbench_revision(draft)
-        if if_none_match == revision:
+        if workbench_etag_matches(if_none_match, revision):
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": revision})
         response = WorkbenchRunListResponse(items=items, revision=revision)
         return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": revision})
@@ -883,7 +1117,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="planning run not found")
         response = await workbench_detail_response(record, principal)
         revision = workbench_revision(response)
-        if if_none_match == revision:
+        if workbench_etag_matches(if_none_match, revision):
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": revision})
         return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": revision})
 
@@ -925,6 +1159,25 @@ def create_app(
                 content=content,
             ).model_dump(mode="json")
         )
+
+    @app.get("/api/v1/workbench/runs/{run_id}/timeline")
+    async def get_workbench_timeline(
+        run_id: str,
+        authorization: str | None = Header(default=None),
+        if_none_match: str | None = Header(default=None, alias="If-None-Match"),
+    ) -> Response:
+        """Return one bounded, scoped lifecycle timeline for an authorized Workbench run."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        response = await workbench_timeline_response(record)
+        if workbench_etag_matches(if_none_match, response.revision):
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": response.revision})
+        return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": response.revision})
 
     @app.get("/api/v1/planning-runs/{run_id}/coordination")
     async def get_coordination_run(

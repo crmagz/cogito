@@ -448,6 +448,81 @@ class WorkbenchArtifactKind(StrEnum):
     IMPLEMENTATION = "implementation"
 
 
+class WorkbenchStageState(StrEnum):
+    """Truthful lifecycle state for one Workbench workflow-map node."""
+
+    COMPLETED = "completed"
+    IN_PROGRESS = "in_progress"
+    AWAITING_OPERATOR = "awaiting_operator"
+    NEEDS_REVISION = "needs_revision"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"
+
+
+class WorkbenchStageAvailability(StrEnum):
+    """Whether a stage value is backed by a durable authoritative source."""
+
+    AUTHORITATIVE = "authoritative"
+    UNAVAILABLE = "unavailable"
+
+
+class WorkbenchWorkflowNodeType(StrEnum):
+    """Semantic node role for the Workbench relay graph."""
+
+    AGENT = "agent"
+    GATE = "gate"
+    QUEUE = "queue"
+
+
+class WorkbenchWorkflowEdgeStyle(StrEnum):
+    """Rendering class for a durable graph dependency."""
+
+    SOLID = "solid"
+    DASHED = "dashed"
+
+
+class WorkbenchWorkflowEdgeEmphasis(StrEnum):
+    """Relative visual prominence for a durable graph dependency."""
+
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+
+
+class WorkbenchStageSummary(BaseModel):
+    """Server-owned state for one visible Workflow Map node."""
+
+    stage_id: str = Field(description="Stable workflow-map node identifier")
+    label: str = Field(description="Operator-facing workflow-map node label")
+    state: WorkbenchStageState = Field(description="Explicit lifecycle state for this node")
+    availability: WorkbenchStageAvailability = Field(description="Whether the state is durably authoritative")
+    reason: str = Field(description="Bounded explanation for the displayed state")
+    artifact_kind: WorkbenchArtifactKind | None = Field(
+        default=None, description="Verified evidence kind associated with this node when available"
+    )
+
+
+class WorkbenchWorkflowNode(WorkbenchStageSummary):
+    """A typed, server-owned relay graph node without presentation coordinates."""
+
+    node_type: WorkbenchWorkflowNodeType = Field(description="Semantic role used to render the relay node")
+
+
+class WorkbenchWorkflowEdge(BaseModel):
+    """One directed, server-owned dependency in the relay graph."""
+
+    source_node_id: str = Field(description="Stable upstream node identifier")
+    target_node_id: str = Field(description="Stable downstream node identifier")
+    style: WorkbenchWorkflowEdgeStyle = Field(default=WorkbenchWorkflowEdgeStyle.SOLID, description="Authoritative edge rendering hint")
+    emphasis: WorkbenchWorkflowEdgeEmphasis = Field(default=WorkbenchWorkflowEdgeEmphasis.PRIMARY, description="Authoritative edge emphasis hint")
+
+
+class WorkbenchWorkflowGraph(BaseModel):
+    """A per-run graph contract; layout remains a client presentation concern."""
+
+    nodes: list[WorkbenchWorkflowNode] = Field(default_factory=list)
+    edges: list[WorkbenchWorkflowEdge] = Field(default_factory=list)
+
+
 class WorkbenchArtifactSummary(BaseModel):
     """Immutable evidence identity that deliberately omits its object-store location."""
 
@@ -497,6 +572,29 @@ class WorkbenchExternalLink(BaseModel):
     url: str
 
 
+class WorkbenchTimelineEvent(BaseModel):
+    """Bounded, scope-filtered lifecycle event safe for Workbench rendering."""
+
+    event_id: str = Field(description="Immutable coordination event identifier")
+    event_type: str = Field(description="Versioned lifecycle or approval event kind")
+    occurred_at: str = Field(description="Authoritative ISO 8601 event timestamp")
+    gate: CoordinationGate | None = Field(default=None, description="Approval gate when the event concerns one")
+    artifact_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", description="Immutable artifact digest when available"
+    )
+    decision: PlanApprovalDecision | None = Field(default=None, description="Recorded gate decision when available")
+    lifecycle_status: AgentRunStatus | None = Field(default=None, description="Persisted lifecycle status when available")
+    delivered: bool = Field(description="Whether the configured delivery sink acknowledged the event")
+    delivery_attempt_count: int = Field(ge=0, description="Bounded reconciliation attempt count")
+
+
+class WorkbenchTimelineResponse(BaseModel):
+    """One bounded timeline page with a representation revision."""
+
+    items: list[WorkbenchTimelineEvent] = Field(description="Newest-first scoped Workbench timeline events")
+    revision: str = Field(description="Opaque ETag-compatible representation revision")
+
+
 class WorkbenchRunResponse(BaseModel):
     """Scope-filtered, authoritative run projection for the Operator Workbench."""
 
@@ -504,6 +602,9 @@ class WorkbenchRunResponse(BaseModel):
     project_id: str
     status: PlanningRunStatus
     submitted_at: str
+    workflow_id: str | None = Field(default=None, description="Authoritative workflow execution identity when available")
+    stages: list[WorkbenchStageSummary] = Field(default_factory=list, description="Ordered authoritative Workflow Map nodes")
+    workflow_graph: WorkbenchWorkflowGraph = Field(default_factory=WorkbenchWorkflowGraph, description="Typed relay graph for this run")
     active_gate: CoordinationGate | None = None
     artifacts: list[WorkbenchArtifactSummary] = Field(default_factory=list)
     abilities: list[str] = Field(default_factory=list)
