@@ -120,6 +120,184 @@ def test_workbench_detail_and_evidence_are_scope_and_digest_bound(client, valid_
     assert forged.status_code == 404
 
 
+def test_workbench_projects_authoritative_workflow_identity_and_scoped_timeline(client, valid_plan, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store.planning_runs[run_id] = replace(
+        supervisor_store.planning_runs[run_id], project_id="default", workflow_id="planning-run-42-revision-1"
+    )
+
+    detail = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    timeline = client.get(f"/api/v1/workbench/runs/{run_id}/timeline", headers=_headers())
+    unchanged = client.get(
+        f"/api/v1/workbench/runs/{run_id}/timeline",
+        headers={"Authorization": "Bearer operator-test-token", "If-None-Match": timeline.headers["etag"]},
+    )
+
+    assert detail.status_code == 200
+    assert detail.json()["workflow_id"] == "planning-run-42-revision-1"
+    assert timeline.status_code == 200
+    assert timeline.json()["items"]
+    assert "artifact_ref" not in timeline.text
+    assert "last_error" not in timeline.text
+    assert unchanged.status_code == 304
+    assert unchanged.content == b""
+
+
+def test_workbench_timeline_tolerates_unknown_persisted_enum_values(client, valid_plan, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    event_id, event = next(iter(supervisor_store.coordination_events.items()))
+    supervisor_store.coordination_events[event_id] = replace(
+        event, gate="future-gate", decision="future-decision", lifecycle_status="future-status"
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}/timeline", headers=_headers())
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["gate"] is None
+    assert item["decision"] is None
+    assert item["lifecycle_status"] is None
+
+
+def test_workbench_timeline_accepts_quoted_and_weak_etags(client, valid_plan) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    first = client.get(f"/api/v1/workbench/runs/{run_id}/timeline", headers=_headers())
+    etag = first.headers["etag"]
+
+    quoted = client.get(
+        f"/api/v1/workbench/runs/{run_id}/timeline",
+        headers={"Authorization": "Bearer operator-test-token", "If-None-Match": f'"{etag}"'},
+    )
+    weak = client.get(
+        f"/api/v1/workbench/runs/{run_id}/timeline",
+        headers={"Authorization": "Bearer operator-test-token", "If-None-Match": f'W/"{etag}"'},
+    )
+
+    assert first.status_code == 200
+    assert quoted.status_code == 304
+    assert weak.status_code == 304
+
+
+def test_workbench_stage_projection_is_typed_and_never_copies_terminal_run_state(client, valid_plan, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store.planning_runs[run_id] = replace(
+        supervisor_store.planning_runs[run_id], status=PlanningRunStatus.COMPLETED, plan_artifact=None,
+        implementation_artifact=None
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    stages = {item["stage_id"]: item for item in response.json()["stages"]}
+    assert stages["specification"] == {
+        "stage_id": "specification",
+        "label": "Specification",
+        "state": "completed",
+        "availability": "authoritative",
+        "reason": "An immutable submitted specification is recorded.",
+        "artifact_kind": "source",
+    }
+    assert stages["planning"]["state"] == "unavailable"
+    assert stages["plan_approval"]["state"] == "unavailable"
+    assert stages["implementation"]["state"] == "unavailable"
+    assert stages["implementation_approval"]["state"] == "unavailable"
+    graph = response.json()["workflow_graph"]
+    assert [(node["stage_id"], node["node_type"]) for node in graph["nodes"]] == [
+        ("specification", "queue"),
+        ("planning", "agent"),
+        ("plan_approval", "gate"),
+        ("implementation", "agent"),
+        ("implementation_approval", "gate"),
+    ]
+    assert [(edge["source_node_id"], edge["target_node_id"]) for edge in graph["edges"]] == [
+        ("specification", "planning"),
+        ("planning", "plan_approval"),
+        ("plan_approval", "implementation"),
+        ("implementation", "implementation_approval"),
+    ]
+
+
+def test_workbench_stage_projection_attributes_rejections_only_when_artifacts_prove_the_gate(
+    client, valid_plan, supervisor_store
+) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    original = supervisor_store.planning_runs[run_id]
+
+    supervisor_store.planning_runs[run_id] = replace(
+        original, status=PlanningRunStatus.REJECTED, implementation_artifact=None
+    )
+    plan_rejected = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    assert plan_rejected.status_code == 200
+    plan_stages = {item["stage_id"]: item for item in plan_rejected.json()["stages"]}
+    assert plan_stages["plan_approval"]["state"] == "failed"
+    assert plan_stages["implementation_approval"]["state"] == "unavailable"
+
+    supervisor_store.planning_runs[run_id] = replace(
+        original,
+        status=PlanningRunStatus.REJECTED,
+        implementation_artifact=original.plan_artifact,
+    )
+    implementation_rejected = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    assert implementation_rejected.status_code == 200
+    implementation_stages = {item["stage_id"]: item for item in implementation_rejected.json()["stages"]}
+    assert implementation_stages["plan_approval"]["state"] == "completed"
+    assert implementation_stages["implementation"]["state"] == "completed"
+    assert implementation_stages["implementation_approval"]["state"] == "failed"
+
+    supervisor_store.planning_runs[run_id] = replace(
+        original, status=PlanningRunStatus.REVISION_REQUESTED, implementation_artifact=None
+    )
+    plan_revision = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    assert plan_revision.status_code == 200
+    plan_revision_stages = {item["stage_id"]: item for item in plan_revision.json()["stages"]}
+    assert plan_revision_stages["plan_approval"]["state"] == "needs_revision"
+    assert plan_revision_stages["plan_approval"]["availability"] == "authoritative"
+    assert plan_revision_stages["implementation_approval"]["state"] == "unavailable"
+
+    supervisor_store.planning_runs[run_id] = replace(
+        original,
+        status=PlanningRunStatus.REVISION_REQUESTED,
+        implementation_artifact=original.plan_artifact,
+    )
+    implementation_revision = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    assert implementation_revision.status_code == 200
+    implementation_revision_stages = {item["stage_id"]: item for item in implementation_revision.json()["stages"]}
+    assert implementation_revision_stages["plan_approval"]["state"] == "completed"
+    assert implementation_revision_stages["implementation_approval"]["state"] == "needs_revision"
+
+
+def test_workbench_timeline_hides_foreign_run_without_disclosing_events(valid_plan) -> None:
+    store = InMemoryPlanStore()
+    supervisor_store = InMemorySupervisorStore()
+    writer = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(),
+            starter=FakeRunStarter(),
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+    run_id, _ = _awaiting_plan(writer, valid_plan)
+    supervisor_store.planning_runs[run_id] = replace(supervisor_store.planning_runs[run_id], project_id="foreign")
+    reader = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(auth_static_projects=("default",)),
+            starter=FakeRunStarter(),
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    response = reader.get(f"/api/v1/workbench/runs/{run_id}/timeline", headers=_headers())
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "planning run not found"}
+
+
 def test_workbench_returns_not_modified_for_matching_revision(client, valid_plan) -> None:
     run_id, _ = _awaiting_plan(client, valid_plan)
 
