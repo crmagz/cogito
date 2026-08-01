@@ -45,7 +45,7 @@ safe to retry without regenerating the plan. Local kind uses an explicit
 development credential; production requires OIDC bearer-token validation.
 
 The coordination plane exposes authenticated, provider-neutral run and gate
-views for the future Operator Workbench. It can deliver allow-listed,
+views for the Operator Workbench. It can deliver allow-listed,
 versioned event snapshots to an explicitly enabled HMAC-signed webhook using
 an independent leased outbox; notification delivery never has authority to
 approve work or signal Temporal directly. Slack and GitHub Issues adapters are
@@ -122,11 +122,11 @@ run-private Secret in the execution namespace, and cleanup removes that
 Secret with the run key and Job. The execution namespace therefore contains no
 long-lived Git credential.
 
-Delegated A2A sub-agents, semantic tool discovery, MCP tool execution,
-adversarial implementation review, the final implementation gate, and the
-operator UI are deliberately not represented as completed features yet. They
-are the next product layers on top of this execution substrate, not implicit
-behavior hidden in the current worker.
+Delegated A2A sub-agents, semantic tool discovery, and MCP tool execution are
+deliberately not represented as completed features yet. The Operator Workbench
+is an independently deployable, evidence-first UI over the scoped API; it does
+not add authority to the worker or browser client. Its production promotion
+still requires an environment-owned OIDC session relay and production values.
 
 ## Target agentic ecosystem
 
