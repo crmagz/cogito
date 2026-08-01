@@ -80,6 +80,7 @@ temporal:
 
 # Production LiteLLM settings
 litellm:
+  enabled: true
   replicaCount: 2
   existingSecret: cogito-litellm-credentials
   rolePolicies:
@@ -91,13 +92,11 @@ litellm:
       existingSecret: cogito-reviewer-primary-key
     reviewerSecondary:
       existingSecret: cogito-reviewer-secondary-key
-  # When a deployment selects the `bedrock` provider, IRSA grants LiteLLM AWS
-  # credentials without static keys. Scope the role to the selected models'
-  # bedrock:InvokeModel and bedrock:InvokeModelWithResponseStream actions.
+  # Configure provider-specific workload identity in private values when needed.
   serviceAccount:
-    create: true
-    annotations:
-      eks.amazonaws.com/role-arn: "arn:aws:iam::xxxxxxxxxxxx:role/cogito-litellm-bedrock"
+    create: false
+    name: ""
+    annotations: {}
   database:
     host: "cogito.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com"
     user: cogito

@@ -25,15 +25,34 @@ Cogito deploys as an umbrella Helm chart with the following components:
 
 ### Production
 
-Disable in-cluster PostgreSQL and MinIO, point Temporal at RDS and S3:
+`charts/values-production.yaml` is a non-deployable contract template, not a
+set of credentials or environment values. Before deploying, an environment
+owner must supply a private values file with immutable image digests, real
+external database and object-store endpoints, TLS/ingress, and OIDC issuer,
+audience, and JWKS values. They must also provision these outside Helm:
+
+- a LiteLLM Secret containing `LITELLM_MASTER_KEY` and the selected provider's
+  key, or a provider workload identity attached to the LiteLLM ServiceAccount;
+- separate, least-privilege LiteLLM role-key Secrets for planner, developer,
+  and reviewers;
+- external database, object-store, and GitHub pull-request credential Secrets;
+- the Workbench's environment-owned OIDC session relay.
+
+The chart never reads a local cloud profile or creates provider credentials.
+After the owner has supplied those inputs, render and review the manifest
+before applying it:
 
 ```bash
-helm upgrade --install cogito charts/ \
+helm template cogito charts/ \
   -f charts/values.yaml \
-  -f charts/values-production.yaml
+  -f charts/values-production.yaml \
+  -f /secure/path/cogito-production.yaml
 ```
 
-See [values.yaml](charts/values.yaml) for all configurable parameters and [values-production.yaml](charts/values-production.yaml) for a production overlay example.
+Then use the same files with `helm upgrade --install`. See
+[values.yaml](charts/values.yaml) for the full configuration contract and
+[values-production.yaml](charts/values-production.yaml) for the public
+template.
 
 ## Full local Kind E2E
 
@@ -42,27 +61,23 @@ then validates planning, both approval gates, execution, and cleanup against
 the selected Kind release without replacing its deployed API or worker images:
 
 ```sh
-COGITO_E2E_CONFIRM=1 bash .claude/scripts/run-kind-e2e-phase13.sh
+COGITO_E2E_ENABLED=1 COGITO_E2E_CONFIRM=1 \
+  uv run --project services/api pytest -q -m kind_e2e \
+  services/api/tests/integration/test_kind_e2e_phase13.py
 ```
 
-It uses configured provider and fixture-repository credentials, so run it only
-against the disposable local Kind environment. If the gateway is disabled, the
-test enables LiteLLM for its duration and restores its original setting during
-cleanup. The configured provider key must be valid. Set `COGITO_E2E_CONTEXT`,
-`COGITO_E2E_TIMEOUT_SECONDS`, or `COGITO_E2E_TARGET_REPO` to override the
-defaults when needed.
+It uses operator-managed provider and fixture-repository credentials, so run
+it only against a disposable local Kind environment. Provision the selected
+provider identity in the configured LiteLLM Kubernetes Secret before starting;
+Kind does not establish cloud workload identity. Do not pass provider
+credentials, a cloud profile, or a token to the launcher. The test checks only
+that the required Secret keys exist and never prints their values. If the
+gateway is disabled, the test enables LiteLLM for its duration and restores its
+original setting during cleanup.
 
-To route the local E2E through AWS Bedrock using a short-lived named AWS
-profile instead of a direct provider key, opt in explicitly:
-
-```sh
-COGITO_E2E_CONFIRM=1 COGITO_E2E_AWS_PROFILE=<named-aws-profile> \
-  bash .claude/scripts/run-kind-e2e-phase13.sh
-```
-
-This refreshes only the AWS credential fields in the existing local LiteLLM
-Secret, selects the local Bedrock overlay, and never prints or commits values.
-
-If `GITHUB_TOKEN`, `GH_TOKEN`, or `COGITO_E2E_GITHUB_TOKEN` is exported, the
-launcher safely refreshes the local PR-publisher Secret and verifies it can
-list the fixture repository before starting the workflow.
+The test creates its own uniquely versioned, immutable fixture unless
+`COGITO_E2E_SPEC_REF` supplies one. The fixture repository credential must
+already be present in `cogito-github-pull-request`. Set `COGITO_E2E_CONTEXT`,
+`COGITO_E2E_TIMEOUT_SECONDS`, `COGITO_E2E_TARGET_REPO`, or
+`COGITO_E2E_VALUES_FILE` to select a disposable environment; none of those
+options source credentials from the local machine.

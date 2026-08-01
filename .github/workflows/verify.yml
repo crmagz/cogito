@@ -50,3 +50,9 @@ jobs:
             --set worker.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
             --set litellm.image.digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
             > /dev/null
+      - name: Render external LiteLLM service account
+        run: |
+          helm template cogito charts \
+            --set litellm.serviceAccount.create=false \
+            --set-string litellm.serviceAccount.name=cogito-litellm-existing \
+            | grep -qx '      serviceAccountName: cogito-litellm-existing'
