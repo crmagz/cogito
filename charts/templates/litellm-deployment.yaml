@@ -20,7 +20,7 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/litellm-configmap.yaml") . | sha256sum }}
     spec:
-      {{- if .Values.litellm.serviceAccount.create }}
+      {{- if or .Values.litellm.serviceAccount.create .Values.litellm.serviceAccount.name }}
       serviceAccountName: {{ .Values.litellm.serviceAccount.name | default (printf "%s-litellm" .Release.Name) }}
       {{- end }}
       containers:

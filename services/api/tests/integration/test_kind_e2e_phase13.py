@@ -10,9 +10,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
+import tarfile
+import tempfile
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -21,9 +24,39 @@ from urllib.parse import urlparse
 
 import pytest
 
+from cogito_api.dag import validate_spec_reference
+
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 pytestmark = pytest.mark.kind_e2e
+
+
+def require_e2e_confirmation() -> None:
+    """Require an explicit acknowledgement before mutable Kind validation."""
+
+    if os.environ.get("COGITO_E2E_CONFIRM") != "1":
+        pytest.skip("set COGITO_E2E_CONFIRM=1 to allow the mutable Kind integration test")
+
+
+def provider_secret_key_names(provider: str) -> tuple[str, ...]:
+    """Return required non-secret key names for a LiteLLM provider.
+
+    Args:
+        provider: Configured LiteLLM provider name.
+
+    Returns:
+        Key names that must be present in the configured provider Secret.
+
+    Raises:
+        ValueError: If the provider name is empty or unsafe for a Secret key.
+    """
+
+    normalized = provider.strip().upper()
+    if not normalized or not re.fullmatch(r"[A-Z][A-Z0-9_]*", normalized):
+        raise ValueError("provider must contain only uppercase letters, digits, and underscores")
+    if normalized == "BEDROCK":
+        return ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION")
+    return (f"{normalized}_API_KEY",)
 
 
 def helm_image_overrides(component: str, image: str) -> tuple[str, ...]:
@@ -59,7 +92,7 @@ class KindConfig:
     namespace: str
     execution_namespace: str
     release: str
-    spec_ref: str
+    spec_ref: str | None
     target_repo: str
     timeout: int
     existing_run_id: str | None
@@ -68,8 +101,8 @@ class KindConfig:
     @classmethod
     def load(cls) -> KindConfig:
         spec_ref = os.environ.get("COGITO_E2E_SPEC_REF")
-        if not spec_ref:
-            pytest.fail("COGITO_E2E_SPEC_REF is required and must be immutable")
+        if spec_ref and validate_spec_reference(spec_ref):
+            pytest.fail("COGITO_E2E_SPEC_REF must be an immutable name@version#sha256=<digest> reference")
         values_file = os.environ.get("COGITO_E2E_VALUES_FILE")
         resolved_values_file = Path(values_file).resolve() if values_file else None
         if resolved_values_file and not resolved_values_file.is_file():
@@ -79,7 +112,7 @@ class KindConfig:
             namespace=os.environ.get("COGITO_E2E_NAMESPACE", "cogito"),
             execution_namespace=os.environ.get("COGITO_E2E_EXECUTION_NAMESPACE", "cogito-executions"),
             release=os.environ.get("COGITO_E2E_RELEASE", "cogito"),
-            spec_ref=spec_ref,
+            spec_ref=spec_ref or None,
             target_repo=os.environ.get(
                 "COGITO_E2E_TARGET_REPO",
                 "https://github.com/crmagz/cogito-kind-e2e-fixture.git#7d1ddc14c1cbaf666641c7235c89fa937bb1bd50",
@@ -100,14 +133,25 @@ class KindControlPlane:
         self.hmac_secret = secrets.token_urlsafe(32)
         self._litellm_was_enabled: bool | None = None
         self.run_id: str | None = None
+        self.spec_ref = config.spec_ref
 
-    def command(self, *args: str, input_text: str | None = None, check: bool = True) -> str:
-        result = subprocess.run(args, cwd=REPO_ROOT, input=input_text, text=True, capture_output=True, check=False)
+    def command(self, *args: str, input_text: str | bytes | None = None, check: bool = True) -> str:
+        uses_binary_input = isinstance(input_text, bytes)
+        result = subprocess.run(
+            args,
+            cwd=REPO_ROOT,
+            input=input_text,
+            text=not uses_binary_input,
+            capture_output=True,
+            check=False,
+        )
+        stdout = result.stdout.decode() if uses_binary_input else result.stdout
+        stderr = result.stderr.decode() if uses_binary_input else result.stderr
         if check and result.returncode:
-            pytest.fail(f"command failed ({result.returncode}): {' '.join(args)}\n{result.stderr[-4000:]}")
-        return result.stdout
+            pytest.fail(f"command failed ({result.returncode}): {' '.join(args)}\n{stderr[-4000:]}")
+        return stdout
 
-    def kubectl(self, *args: str, input_text: str | None = None, check: bool = True) -> str:
+    def kubectl(self, *args: str, input_text: str | bytes | None = None, check: bool = True) -> str:
         return self.command("kubectl", "--context", self.config.context, *args, input_text=input_text, check=check)
 
     def running_image(self, component: str) -> str:
@@ -124,6 +168,101 @@ class KindControlPlane:
 
     def values_file_arguments(self) -> tuple[str, ...]:
         return ("--values", str(self.config.values_file)) if self.config.values_file else ()
+
+    def secret_key_present(self, secret_name: str, key: str) -> bool:
+        """Return whether Secret metadata declares a non-empty key.
+
+        Args:
+            secret_name: Kubernetes Secret to inspect.
+            key: Required data key name.
+
+        Returns:
+            True when `kubectl describe` reports the key with a positive size.
+        """
+
+        description = self.kubectl(
+            "-n", self.config.namespace, "describe", "secret", secret_name, check=False
+        )
+        return any(
+            fields[0] == f"{key}:" and len(fields) >= 3 and fields[1] != "0" and fields[2] == "bytes"
+            for line in description.splitlines()
+            if (fields := line.split())
+        )
+
+    def ensure_immutable_spec_fixture(self) -> str:
+        """Return an immutable fixture reference, uploading one when absent.
+
+        Returns:
+            Immutable spec-set reference for the disposable Kind E2E.
+        """
+
+        if self.spec_ref:
+            return self.spec_ref
+
+        spec_name = "kind-e2e"
+        spec_version = f"v1-{int(time.time())}-{secrets.token_hex(4)}"
+        object_name = f"{spec_name}@{spec_version}"
+        with tempfile.TemporaryDirectory(prefix="cogito-kind-e2e-") as temporary_directory:
+            fixture_directory = Path(temporary_directory)
+            rules_directory = fixture_directory / "rules"
+            rules_directory.mkdir()
+            (fixture_directory / "manifest.yaml").write_text(
+                "\n".join(
+                    (
+                        f"name: {spec_name}",
+                        f"version: {spec_version}",
+                        "rules:",
+                        "  - path: rules/e2e.md",
+                        "    scope: always",
+                        "    priority: high",
+                        "",
+                    )
+                )
+            )
+            (rules_directory / "e2e.md").write_text(
+                "Perform only the approved disposable Kind E2E task.\n"
+                "Do not expose credentials or modify Kubernetes resources.\n"
+            )
+            archive = fixture_directory / "spec-set.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                tar.add(fixture_directory / "manifest.yaml", arcname="manifest.yaml")
+                tar.add(rules_directory, arcname="rules")
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            minio_pod = self.kubectl(
+                "-n",
+                self.config.namespace,
+                "get",
+                "pod",
+                "-l",
+                f"app=minio,release={self.config.release}",
+                "-o",
+                "jsonpath={.items[0].metadata.name}",
+            ).strip()
+            if not minio_pod:
+                pytest.fail("MinIO pod not found for immutable Kind fixture upload")
+            self.kubectl(
+                "-n",
+                self.config.namespace,
+                "exec",
+                "-i",
+                minio_pod,
+                "--",
+                "sh",
+                "-ec",
+                """
+                export MC_CONFIG_DIR=/tmp/cogito-e2e-mc
+                trap 'rm -rf "$MC_CONFIG_DIR"' EXIT
+                mc alias set local http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
+                mc mb --ignore-existing local/specs >/dev/null
+                mc pipe "local/specs/$1/$2/spec-set.tar.gz" >/dev/null
+                """,
+                "--",
+                "specs",
+                object_name,
+                input_text=archive.read_bytes(),
+            )
+        self.spec_ref = f"{spec_name}@{spec_version}#sha256={digest}"
+        return self.spec_ref
 
     def github_repository(self) -> str:
         source = self.config.target_repo.partition("#")[0]
@@ -193,18 +332,20 @@ except urllib.error.HTTPError as error:
             str(dict(dict(litellm.get("tiers", {})).get(planner_model, {})).get("provider", "")),
         ).upper()
         provider_secret = str(litellm.get("existingSecret", ""))
-        required_keys = (
-            ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION")
-            if provider == "BEDROCK"
-            else (f"{provider}_API_KEY",)
-        )
+        if not provider:
+            pytest.fail(
+                "full Kind E2E requires a configured LiteLLM planner provider "
+                f"and provider Secret; configured Secret is {provider_secret or '<missing>'}"
+            )
+        try:
+            required_keys = provider_secret_key_names(provider)
+        except ValueError:
+            pytest.fail("full Kind E2E requires a configured provider name containing only letters, digits, and underscores")
         missing_keys = [
             key for key in required_keys
-            if not provider_secret or not self.kubectl(
-                "-n", self.config.namespace, "get", "secret", provider_secret, "-o", f"jsonpath={{.data.{key}}}"
-            ).strip()
+            if not provider_secret or not self.secret_key_present(provider_secret, key)
         ]
-        if not provider or missing_keys:
+        if missing_keys:
             pytest.fail(
                 "full Kind E2E requires non-empty "
                 f"{', '.join(missing_keys) or '<PROVIDER>_API_KEY'} in secret {provider_secret or '<litellm secret>'}"
@@ -216,6 +357,9 @@ except urllib.error.HTTPError as error:
         contexts = self.command("kubectl", "config", "get-contexts", "-o", "name").splitlines()
         if self.config.context not in contexts:
             pytest.skip(f"Kind context unavailable: {self.config.context}")
+        image_overrides = self.workload_image_overrides()
+        litellm_overrides = self.litellm_overrides()
+        self.ensure_immutable_spec_fixture()
         secret = self.kubectl(
             "-n", self.config.namespace, "create", "secret", "generic", self.receiver_secret,
             f"--from-literal=hmac-secret={self.hmac_secret}", "--dry-run=client", "-o", "yaml",
@@ -224,8 +368,6 @@ except urllib.error.HTTPError as error:
         self.kubectl("-n", self.config.namespace, "label", "secret", self.receiver_secret, "cogito.dev/phase13-e2e=true", "--overwrite")
         self.kubectl("-n", self.config.namespace, "apply", "-f", "-", input_text=self.receiver_manifest())
         self.kubectl("-n", self.config.namespace, "rollout", "status", f"deployment/{self.receiver}", "--timeout=180s")
-        image_overrides = self.workload_image_overrides()
-        litellm_overrides = self.litellm_overrides()
         self.command(
             "helm", "upgrade", self.config.release, str(REPO_ROOT / "charts"), "--kube-context", self.config.context,
             "--namespace", self.config.namespace, "--reuse-values", "--wait", "--timeout", "10m",
@@ -358,6 +500,7 @@ spec:
 def control_plane() -> Iterator[KindControlPlane]:
     if os.environ.get("COGITO_E2E_ENABLED") != "1":
         pytest.skip("set COGITO_E2E_ENABLED=1 to run Kind integration coverage")
+    require_e2e_confirmation()
     missing = [name for name in ("kubectl", "helm") if shutil.which(name) is None]
     if missing:
         pytest.skip(f"missing Kind integration prerequisites: {', '.join(missing)}")
@@ -379,7 +522,7 @@ def test_provider_neutral_coordination_end_to_end(control_plane: KindControlPlan
         marker = f".cogito-phase13-{secrets.token_hex(6)}"
         status, submission = control_plane.api("POST", "/api/v1/planning-runs", {
             "initial_specification": f"Create exactly one phase that creates {marker} containing phase-13. Verify only with test -f {marker}.",
-            "target_repos": [config.target_repo], "spec_set": config.spec_ref,
+            "target_repos": [config.target_repo], "spec_set": control_plane.ensure_immutable_spec_fixture(),
             "constraints": {"max_wall_clock_minutes": 8, "max_cost_usd": 3.0, "max_review_rounds": 1, "max_turns_per_phase": 50, "backup_reserve_turns": 20},
             "priority": "normal",
         })
