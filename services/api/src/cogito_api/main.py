@@ -1099,8 +1099,8 @@ def create_app(
         except ValueError:
             return None
 
-    def workbench_stage_id(event_type: str, payload: dict[str, object]) -> str | None:
-        """Project only canonical, server-owned stage attribution into the Workbench contract."""
+    def workbench_stage_ids(event_type: str, payload: dict[str, object], decision: str | None) -> list[str]:
+        """Project all materially affected, canonical stages into the Workbench timeline contract."""
 
         explicit_stage = payload.get("stage_id")
         if explicit_stage in {
@@ -1110,35 +1110,47 @@ def create_app(
             "implementation",
             "implementation_approval",
         }:
-            return explicit_stage
-        return {
-            "specification_recorded": "specification",
-            "planning_started": "planning",
-            "plan_approval_requested": "plan_approval",
-            "plan_approval_recorded": "plan_approval",
-            "implementation_approval_requested": "implementation_approval",
-            "implementation_approval_recorded": "implementation_approval",
-        }.get(event_type)
+            return [explicit_stage]
+        if event_type == "specification_recorded":
+            return ["specification"]
+        if event_type == "planning_started":
+            return ["planning"]
+        if event_type == "plan_approval_requested":
+            return ["planning", "plan_approval"]
+        if event_type == "plan_approval_recorded":
+            return {
+                "approve": ["plan_approval", "implementation"],
+                "request_revision": ["plan_approval", "planning"],
+                "reject": ["plan_approval"],
+            }.get(decision, ["plan_approval"])
+        if event_type == "implementation_approval_requested":
+            return ["implementation", "implementation_approval"]
+        if event_type == "implementation_approval_recorded":
+            return ["implementation_approval"]
+        return []
 
     async def workbench_timeline_response(record: PlanningRunRecord) -> WorkbenchTimelineResponse:
         """Build a bounded timeline without exposing storage references or sink errors."""
 
         events = await supervisor_store.list_coordination_events(record.run_id, limit=100)
-        items = [
-            WorkbenchTimelineEvent(
-                event_id=event.event_id,
-                event_type=event.event_type,
-                occurred_at=event.occurred_at,
-                stage_id=workbench_stage_id(event.event_type, event.payload),
-                gate=workbench_gate(event.gate),
-                artifact_sha256=event.artifact_sha256,
-                decision=workbench_plan_decision(event.decision),
-                lifecycle_status=workbench_agent_status(event.lifecycle_status),
-                delivered=delivered,
-                delivery_attempt_count=attempts,
+        items = []
+        for event, delivered, attempts, _last_error in events:
+            stage_ids = workbench_stage_ids(event.event_type, event.payload, event.decision)
+            items.append(
+                WorkbenchTimelineEvent(
+                    event_id=event.event_id,
+                    event_type=event.event_type,
+                    occurred_at=event.occurred_at,
+                    stage_id=stage_ids[-1] if stage_ids else None,
+                    stage_ids=stage_ids,
+                    gate=workbench_gate(event.gate),
+                    artifact_sha256=event.artifact_sha256,
+                    decision=workbench_plan_decision(event.decision),
+                    lifecycle_status=workbench_agent_status(event.lifecycle_status),
+                    delivered=delivered,
+                    delivery_attempt_count=attempts,
+                )
             )
-            for event, delivered, attempts, _last_error in events
-        ]
         draft = WorkbenchTimelineResponse(items=items, revision="")
         return draft.model_copy(update={"revision": workbench_revision(draft)})
 
