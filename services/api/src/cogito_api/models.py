@@ -644,6 +644,50 @@ class WorkbenchEvidenceResponse(BaseModel):
     content: str
 
 
+class WorkbenchFeedbackIntent(StrEnum):
+    """Non-executable product-owner feedback types."""
+
+    NOTE = "note"
+
+
+class WorkbenchFeedbackStage(StrEnum):
+    """Current server-owned stages eligible for product-owner notes."""
+
+    SPECIFICATION = "specification"
+    PLANNING = "planning"
+    PLAN_APPROVAL = "plan_approval"
+    IMPLEMENTATION = "implementation"
+    IMPLEMENTATION_APPROVAL = "implementation_approval"
+
+
+class WorkbenchFeedbackRequest(BaseModel):
+    """Append-only feedback bound to one displayed immutable artifact."""
+
+    intent: WorkbenchFeedbackIntent = Field(default=WorkbenchFeedbackIntent.NOTE, description="Non-executable feedback intent")
+    artifact_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$", description="Displayed immutable artifact digest")
+    stage_id: WorkbenchFeedbackStage = Field(description="Authoritative stage receiving the feedback")
+    comment: str = Field(min_length=1, max_length=10_000, description="Bounded operator note that is never agent input")
+
+
+class WorkbenchFeedbackResponse(BaseModel):
+    """Immutable receipt for one accepted product-owner note."""
+
+    feedback_id: str = Field(description="Immutable feedback identifier")
+    run_id: str = Field(description="Authoritative run identifier")
+    intent: WorkbenchFeedbackIntent = Field(description="Recorded non-executable intent")
+    artifact_sha256: str = Field(pattern=r"^[a-f0-9]{64}$", description="Digest bound to the note")
+    stage_id: str = Field(description="Authoritative stage bound to the note")
+    actor_id: str = Field(description="Authenticated note author")
+    comment: str = Field(description="Recorded bounded operator note")
+    created_at: str = Field(description="ISO 8601 immutable creation timestamp")
+
+
+class WorkbenchFeedbackListResponse(BaseModel):
+    """Bounded newest-first notes visible in one authorized dossier."""
+
+    items: list[WorkbenchFeedbackResponse] = Field(description="Immutable product-owner notes")
+
+
 class CoordinationApprovalActionRequest(BaseModel):
     """Normalized authenticated approval action for a future operator client."""
 

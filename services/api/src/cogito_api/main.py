@@ -51,6 +51,9 @@ from .models import (
     WorkbenchEvidenceResponse,
     WorkbenchExecutionSummary,
     WorkbenchExternalLink,
+    WorkbenchFeedbackRequest,
+    WorkbenchFeedbackListResponse,
+    WorkbenchFeedbackResponse,
     WorkbenchProjectListResponse,
     WorkbenchProjectResponse,
     WorkbenchRunListResponse,
@@ -1229,6 +1232,85 @@ def create_app(
         if workbench_etag_matches(if_none_match, response.revision):
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": response.revision})
         return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": response.revision})
+
+    @app.post("/api/v1/workbench/runs/{run_id}/feedback", status_code=status.HTTP_202_ACCEPTED)
+    async def record_workbench_feedback(
+        run_id: str,
+        request_body: WorkbenchFeedbackRequest,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """Record a scope-authorized note that cannot alter workflow state."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        if not idempotency_key or len(idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
+        request_sha256 = sha256(
+            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        try:
+            feedback = await supervisor_store.record_workbench_feedback(
+                run_id=run_id,
+                intent=request_body.intent,
+                artifact_sha256=request_body.artifact_sha256,
+                stage_id=request_body.stage_id,
+                actor_id=principal.subject,
+                comment=request_body.comment,
+                idempotency_key=idempotency_key,
+                request_sha256=request_sha256,
+            )
+        except ApprovalConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=WorkbenchFeedbackResponse(
+                feedback_id=feedback.feedback_id,
+                run_id=feedback.run_id,
+                intent=feedback.intent,
+                artifact_sha256=feedback.artifact_sha256,
+                stage_id=feedback.stage_id,
+                actor_id=feedback.actor_id,
+                comment=feedback.comment,
+                created_at=feedback.created_at,
+            ).model_dump(mode="json"),
+        )
+
+    @app.get("/api/v1/workbench/runs/{run_id}/feedback")
+    async def list_workbench_feedback(
+        run_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Return bounded product-owner notes without granting execution authority."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        records = await supervisor_store.list_workbench_feedback(run_id)
+        return JSONResponse(
+            content=WorkbenchFeedbackListResponse(
+                items=[
+                    WorkbenchFeedbackResponse(
+                        feedback_id=item.feedback_id,
+                        run_id=item.run_id,
+                        intent=item.intent,
+                        artifact_sha256=item.artifact_sha256,
+                        stage_id=item.stage_id,
+                        actor_id=item.actor_id,
+                        comment=item.comment,
+                        created_at=item.created_at,
+                    )
+                    for item in records
+                ]
+            ).model_dump(mode="json")
+        )
 
     @app.get("/api/v1/planning-runs/{run_id}/coordination")
     async def get_coordination_run(

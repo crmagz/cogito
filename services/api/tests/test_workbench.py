@@ -120,6 +120,71 @@ def test_workbench_detail_and_evidence_are_scope_and_digest_bound(client, valid_
     assert forged.status_code == 404
 
 
+def test_workbench_feedback_is_digest_bound_idempotent_and_non_executable(client, valid_plan, supervisor_store) -> None:
+    run_id, digest = _awaiting_plan(client, valid_plan)
+    supervisor_store.planning_runs[run_id] = replace(supervisor_store.planning_runs[run_id], project_id="default")
+    payload = {
+        "intent": "note",
+        "artifact_sha256": digest,
+        "stage_id": "plan_approval",
+        "comment": "Please make the rollout impact explicit.",
+    }
+
+    first = client.post(f"/api/v1/workbench/runs/{run_id}/feedback", json=payload, headers=_headers("feedback-key"))
+    replay = client.post(f"/api/v1/workbench/runs/{run_id}/feedback", json=payload, headers=_headers("feedback-key"))
+    stale = client.post(
+        f"/api/v1/workbench/runs/{run_id}/feedback",
+        json={**payload, "artifact_sha256": "0" * 64},
+        headers=_headers("feedback-stale"),
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json() == first.json()
+    assert first.json()["actor_id"] == "test-operator"
+    assert first.json()["intent"] == "note"
+    assert supervisor_store.planning_runs[run_id].status is PlanningRunStatus.AWAITING_PLAN_APPROVAL
+    assert stale.status_code == 409
+
+    collision = client.post(
+        f"/api/v1/workbench/runs/{run_id}/feedback",
+        json={**payload, "comment": "A different note."},
+        headers=_headers("feedback-key"),
+    )
+    assert collision.status_code == 409
+
+    mismatched_stage = client.post(
+        f"/api/v1/workbench/runs/{run_id}/feedback",
+        json={**payload, "stage_id": "specification"},
+        headers=_headers("feedback-mismatched-stage"),
+    )
+    assert mismatched_stage.status_code == 409
+
+    invalid_stage = client.post(
+        f"/api/v1/workbench/runs/{run_id}/feedback",
+        json={**payload, "stage_id": "arbitrary-agent-command"},
+        headers=_headers("feedback-invalid-stage"),
+    )
+    assert invalid_stage.status_code == 422
+
+
+def test_workbench_feedback_hides_foreign_run(valid_plan) -> None:
+    store = InMemoryPlanStore()
+    supervisor_store = InMemorySupervisorStore()
+    writer = TestClient(create_app(store=store, settings=make_settings(), starter=FakeRunStarter(), supervisor_store=supervisor_store, planner=FakePlanner(AiPlan.model_validate(valid_plan))), headers={"Authorization": "Bearer operator-test-token"})
+    run_id, digest = _awaiting_plan(writer, valid_plan)
+    supervisor_store.planning_runs[run_id] = replace(supervisor_store.planning_runs[run_id], project_id="foreign")
+    reader = TestClient(create_app(store=store, settings=make_settings(auth_static_projects=("default",)), starter=FakeRunStarter(), supervisor_store=supervisor_store, planner=FakePlanner(AiPlan.model_validate(valid_plan))), headers={"Authorization": "Bearer operator-test-token"})
+
+    response = reader.post(
+        f"/api/v1/workbench/runs/{run_id}/feedback",
+        json={"intent": "note", "artifact_sha256": digest, "stage_id": "planning", "comment": "Need context."},
+        headers=_headers("foreign-feedback"),
+    )
+
+    assert response.status_code == 404
+
+
 def test_workbench_projects_authoritative_workflow_identity_and_scoped_timeline(client, valid_plan, supervisor_store) -> None:
     run_id, _ = _awaiting_plan(client, valid_plan)
     supervisor_store.planning_runs[run_id] = replace(

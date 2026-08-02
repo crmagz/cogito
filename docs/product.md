@@ -61,6 +61,15 @@ size limit, and verified against SHA-256; browser clients never receive an
 object-store location or credential. Historic unscopeable runs are excluded
 from Workbench responses until an explicit migration assigns their project.
 
+Product owners can record append-only notes in a stage dossier. Each note is
+bound to the displayed immutable artifact digest and the server-owned stage
+that owns that artifact, is idempotent, and is retained with the authenticated
+author and timestamp. Notes are context only: they cannot signal a workflow,
+invoke an agent, or change an approval. Product owners request a revision only
+through the existing digest-bound approval action. The dossier calls lifecycle
+events “audit activity,” not agent logs; raw agent output is intentionally not
+displayed until a separate classified, redacted-output policy exists.
+
 The Helm chart declares three stable role policies: `planner`, `developer`,
 and `reviewer`. Each names one model alias, a positive LiteLLM virtual-key
 budget ceiling and reset period, and a toolset label. Keys are provisioned by

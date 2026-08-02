@@ -13,6 +13,7 @@ from cogito_api.models import (
     RegistrationManifest,
     RegistrationReference,
     RunEnvelope,
+    WorkbenchFeedbackIntent,
 )
 from cogito_api.registry import manifest_sha256, registration_reference
 from cogito_api.planner import PlanningContext
@@ -27,6 +28,7 @@ from cogito_api.supervisor import (
     OutboxDelivery,
     PlanningRunRecord,
     WorkbenchApprovalRecord,
+    WorkbenchFeedbackRecord,
     RegistryConflictError,
 )
 
@@ -119,6 +121,8 @@ class InMemorySupervisorStore:
         self.coordination_events: dict[str, CoordinationEvent] = {}
         self.notification_deliveries: dict[str, tuple[bool, int, str | None]] = {}
         self.leased_notification_event_ids: set[str] = set()
+        self.workbench_feedback: dict[tuple[str, str], WorkbenchFeedbackRecord] = {}
+        self.workbench_feedback_request_hashes: dict[tuple[str, str], str] = {}
 
     async def create_agent_run(self, record: AgentRunRecord) -> None:
         self.agent_runs[record.run_id] = record
@@ -175,6 +179,38 @@ class InMemorySupervisorStore:
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         return self.planning_runs.get(run_id)
+
+    async def record_workbench_feedback(
+        self, *, run_id: str, intent: WorkbenchFeedbackIntent, artifact_sha256: str, stage_id: str,
+        actor_id: str, comment: str, idempotency_key: str, request_sha256: str,
+    ) -> WorkbenchFeedbackRecord:
+        run = self.planning_runs.get(run_id)
+        key = (run_id, idempotency_key)
+        existing = self.workbench_feedback.get(key)
+        if existing is not None:
+            if self.workbench_feedback_request_hashes[key] != request_sha256:
+                raise ApprovalConflictError("idempotency key was reused with different feedback")
+            return existing
+        expected_artifact = {
+            "specification": run.source_artifact if run is not None else None,
+            "planning": run.plan_artifact if run is not None else None,
+            "plan_approval": run.plan_artifact if run is not None else None,
+            "implementation": run.implementation_artifact if run is not None else None,
+            "implementation_approval": run.implementation_artifact if run is not None else None,
+        }.get(stage_id)
+        if expected_artifact is None or expected_artifact.sha256 != artifact_sha256:
+            raise ApprovalConflictError("feedback artifact is not authoritative for this stage")
+        record = WorkbenchFeedbackRecord(
+            feedback_id=f"feedback-{len(self.workbench_feedback) + 1}", run_id=run_id, intent=intent,
+            artifact_sha256=artifact_sha256, stage_id=stage_id, actor_id=actor_id, comment=comment.strip(),
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self.workbench_feedback[key] = record
+        self.workbench_feedback_request_hashes[key] = request_sha256
+        return record
+
+    async def list_workbench_feedback(self, run_id: str, *, limit: int = 100) -> list[WorkbenchFeedbackRecord]:
+        return list(reversed([item for item in self.workbench_feedback.values() if item.run_id == run_id]))[:limit]
 
     async def attach_generated_plan(
         self,
