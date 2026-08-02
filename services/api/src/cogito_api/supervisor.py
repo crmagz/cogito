@@ -99,7 +99,7 @@ class WorkbenchApprovalRecord:
 
 @dataclass(frozen=True)
 class WorkbenchFeedbackRecord:
-    """Immutable product-owner note with no execution authority."""
+    """Immutable Workbench review context with no execution authority."""
 
     feedback_id: str
     run_id: str
@@ -381,6 +381,18 @@ class PostgresSupervisorStore:
                     "sha256": record.source_artifact.sha256,
                     "created_at": datetime.fromisoformat(record.submitted_at),
                 },
+            )
+            await self._append_coordination_event(
+                connection,
+                run_id=record.run_id,
+                event_type="specification_recorded",
+                artifact=record.source_artifact,
+            )
+            await self._append_coordination_event(
+                connection,
+                run_id=record.run_id,
+                event_type="planning_started",
+                artifact=record.source_artifact,
             )
 
     async def create_agent_run(self, record: AgentRunRecord) -> None:
@@ -1274,6 +1286,7 @@ class PostgresSupervisorStore:
         artifact: ArtifactReference | None = None,
         decision: str | None = None,
         lifecycle_status: str | None = None,
+        stage_id: str | None = None,
     ) -> None:
         """Append one safe event and its generic notification delivery in the current transaction."""
 
@@ -1288,6 +1301,7 @@ class PostgresSupervisorStore:
             "artifact": artifact_payload,
             "decision": decision,
             "lifecycle_status": lifecycle_status,
+            "stage_id": stage_id,
             "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
             "action_url": f"/api/v1/coordination/runs/{run_id}/actions/{gate}" if gate else None,
         }
@@ -1405,7 +1419,7 @@ class PostgresSupervisorStore:
         idempotency_key: str,
         request_sha256: str,
     ) -> WorkbenchFeedbackRecord:
-        """Persist one non-executable, digest-bound product-owner note."""
+        """Persist one non-executable, digest-bound Workbench review context record."""
 
         async with self._engine.begin() as connection:
             run_result = await connection.execute(
@@ -1472,6 +1486,7 @@ class PostgresSupervisorStore:
                 run_id=run_id,
                 event_type="workbench_feedback_recorded",
                 artifact=ArtifactReference(ref=artifact_ref, sha256=artifact_sha256),
+                stage_id=stage_id,
             )
         return WorkbenchFeedbackRecord(
             feedback_id=feedback_id,
@@ -1485,7 +1500,7 @@ class PostgresSupervisorStore:
         )
 
     async def list_workbench_feedback(self, run_id: str, *, limit: int = 100) -> list[WorkbenchFeedbackRecord]:
-        """List bounded newest-first immutable product-owner notes."""
+        """List bounded newest-first immutable Workbench review context records."""
 
         async with self._engine.connect() as connection:
             result = await connection.execute(
@@ -1781,7 +1796,7 @@ def _coordination_event(row: object) -> CoordinationEvent:
 
 
 def _workbench_feedback_record(row: object) -> WorkbenchFeedbackRecord:
-    """Build one immutable product-owner note from a SQL mapping row."""
+    """Build one immutable Workbench review context record from a SQL mapping row."""
 
     values = row
     return WorkbenchFeedbackRecord(

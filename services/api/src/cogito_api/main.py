@@ -1099,6 +1099,27 @@ def create_app(
         except ValueError:
             return None
 
+    def workbench_stage_id(event_type: str, payload: dict[str, object]) -> str | None:
+        """Project only canonical, server-owned stage attribution into the Workbench contract."""
+
+        explicit_stage = payload.get("stage_id")
+        if explicit_stage in {
+            "specification",
+            "planning",
+            "plan_approval",
+            "implementation",
+            "implementation_approval",
+        }:
+            return explicit_stage
+        return {
+            "specification_recorded": "specification",
+            "planning_started": "planning",
+            "plan_approval_requested": "plan_approval",
+            "plan_approval_recorded": "plan_approval",
+            "implementation_approval_requested": "implementation_approval",
+            "implementation_approval_recorded": "implementation_approval",
+        }.get(event_type)
+
     async def workbench_timeline_response(record: PlanningRunRecord) -> WorkbenchTimelineResponse:
         """Build a bounded timeline without exposing storage references or sink errors."""
 
@@ -1108,6 +1129,7 @@ def create_app(
                 event_id=event.event_id,
                 event_type=event.event_type,
                 occurred_at=event.occurred_at,
+                stage_id=workbench_stage_id(event.event_type, event.payload),
                 gate=workbench_gate(event.gate),
                 artifact_sha256=event.artifact_sha256,
                 decision=workbench_plan_decision(event.decision),
@@ -1240,7 +1262,7 @@ def create_app(
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> JSONResponse:
-        """Record a scope-authorized note that cannot alter workflow state."""
+        """Record scope-authorized, immutable review context that cannot alter workflow state."""
 
         principal = await authenticator.authenticate(authorization)
         authenticator.require_viewer(principal)
@@ -1285,7 +1307,7 @@ def create_app(
         run_id: str,
         authorization: str | None = Header(default=None),
     ) -> JSONResponse:
-        """Return bounded product-owner notes without granting execution authority."""
+        """Return bounded immutable review context without granting execution authority."""
 
         principal = await authenticator.authenticate(authorization)
         authenticator.require_viewer(principal)
