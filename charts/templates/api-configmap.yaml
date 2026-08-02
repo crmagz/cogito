@@ -57,6 +57,10 @@ data:
   COGITO_NOTIFICATION_ENABLED: {{ default false $notifications.enabled | quote }}
   COGITO_NOTIFICATION_WEBHOOK_URL: {{ default "" $notifications.webhookUrl | quote }}
   COGITO_NOTIFICATION_TIMEOUT_SECONDS: {{ default 10 $notifications.timeoutSeconds | quote }}
+  COGITO_RECONCILIATION_ENABLED: {{ .Values.api.reconciliation.enabled | quote }}
+  COGITO_RECONCILIATION_POLL_SECONDS: {{ .Values.api.reconciliation.pollSeconds | quote }}
+  COGITO_RECONCILIATION_BATCH_SIZE: {{ .Values.api.reconciliation.batchSize | quote }}
+  COGITO_RECONCILIATION_STALL_SECONDS: {{ .Values.api.reconciliation.stallSeconds | quote }}
   COGITO_TELEMETRY_TRACES_ENABLED: {{ .Values.observability.traces.enabled | quote }}
   COGITO_TELEMETRY_METRICS_ENABLED: {{ .Values.observability.metrics.enabled | quote }}
   COGITO_TELEMETRY_SPAN_EVENTS_ENABLED: {{ .Values.observability.spanEvents.enabled | quote }}

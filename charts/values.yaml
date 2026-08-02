@@ -440,6 +440,16 @@ api:
     maxCostUsd: 50
     maxReviewRounds: 10
     maxTurnsPerPhase: 500
+  ## @param api.reconciliation.enabled Enable bounded API-owned Temporal-to-PostgreSQL projection repair.
+  ## @param api.reconciliation.pollSeconds Delay between reconciliation passes.
+  ## @param api.reconciliation.batchSize Maximum active workflow projections inspected per pass.
+  ## @param api.reconciliation.stallSeconds Maximum time without a completed loop pass before API readiness fails.
+  ##
+  reconciliation:
+    enabled: true
+    pollSeconds: 5
+    batchSize: 100
+    stallSeconds: 30
   ## @param api.temporal.host Temporal frontend address (host:port) the API connects to when starting workflows
   ## @param api.temporal.namespace Temporal namespace
   ## @param api.temporal.taskQueue Task queue the DeveloperRunWorkflow is started on (must match worker.temporal.taskQueue)

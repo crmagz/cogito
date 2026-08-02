@@ -8,6 +8,14 @@ import pytest
 from cogito_api.observability import Telemetry, TelemetrySettings
 
 
+class _Counter:
+    def __init__(self) -> None:
+        self.values: list[tuple[int, tuple]] = []
+
+    def add(self, value: int, *attributes: object) -> None:
+        self.values.append((value, attributes))
+
+
 def test_disabled_telemetry_creates_no_sdk_providers() -> None:
     telemetry = Telemetry(TelemetrySettings())
 
@@ -64,3 +72,22 @@ def test_otlp_http_exporter_sends_a_trace_to_an_external_receiver() -> None:
 
     assert received and received[0][0] == "/v1/traces"
     assert received[0][1]
+
+
+def test_reconciliation_metrics_are_aggregate_and_unlabelled() -> None:
+    telemetry = Telemetry(TelemetrySettings())
+    passes = _Counter()
+    inspections = _Counter()
+    repairs = _Counter()
+    failures = _Counter()
+    telemetry._reconciliation_passes = passes
+    telemetry._reconciliation_inspections = inspections
+    telemetry._reconciliation_repairs = repairs
+    telemetry._reconciliation_failures = failures
+
+    telemetry.reconciliation_pass(inspected=3, repaired=1, failures=2)
+
+    assert passes.values == [(1, ())]
+    assert inspections.values == [(3, ())]
+    assert repairs.values == [(1, ())]
+    assert failures.values == [(2, ())]

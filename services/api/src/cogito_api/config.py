@@ -53,6 +53,10 @@ class Settings:
     notification_webhook_url: str
     notification_webhook_hmac_secret: str
     notification_timeout_seconds: float
+    reconciliation_enabled: bool
+    reconciliation_poll_seconds: int
+    reconciliation_batch_size: int
+    reconciliation_stall_seconds: int
 
     @property
     def supervisor_database_url(self) -> str:
@@ -135,6 +139,10 @@ def load_settings() -> Settings:
         notification_webhook_url=os.environ.get("COGITO_NOTIFICATION_WEBHOOK_URL", ""),
         notification_webhook_hmac_secret=os.environ.get("COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET", ""),
         notification_timeout_seconds=float(os.environ.get("COGITO_NOTIFICATION_TIMEOUT_SECONDS", "10")),
+        reconciliation_enabled=os.environ.get("COGITO_RECONCILIATION_ENABLED", "true").lower() == "true",
+        reconciliation_poll_seconds=int(os.environ.get("COGITO_RECONCILIATION_POLL_SECONDS", "5")),
+        reconciliation_batch_size=int(os.environ.get("COGITO_RECONCILIATION_BATCH_SIZE", "100")),
+        reconciliation_stall_seconds=int(os.environ.get("COGITO_RECONCILIATION_STALL_SECONDS", "30")),
     )
     _validate_auth_configuration(settings)
     return settings
@@ -180,6 +188,12 @@ def _validate_auth_configuration(settings: Settings) -> None:
         )
     if settings.notification_timeout_seconds <= 0 or settings.notification_timeout_seconds > 60:
         raise ValueError("COGITO_NOTIFICATION_TIMEOUT_SECONDS must be greater than zero and at most 60")
+    if not 1 <= settings.reconciliation_poll_seconds <= 3600:
+        raise ValueError("COGITO_RECONCILIATION_POLL_SECONDS must be between 1 and 3600")
+    if not 1 <= settings.reconciliation_batch_size <= 1000:
+        raise ValueError("COGITO_RECONCILIATION_BATCH_SIZE must be between 1 and 1000")
+    if settings.reconciliation_stall_seconds < settings.reconciliation_poll_seconds * 2:
+        raise ValueError("COGITO_RECONCILIATION_STALL_SECONDS must be at least twice the poll interval")
     if not settings.notification_enabled:
         return
     if not settings.notification_webhook_hmac_secret:

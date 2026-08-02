@@ -91,6 +91,13 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-ec", "test -f /tmp/cogito-worker-ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
 {{- end }}

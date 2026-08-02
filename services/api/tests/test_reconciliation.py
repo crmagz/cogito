@@ -3,12 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from fastapi.testclient import TestClient
 
+from cogito_api.main import ApplicationReadiness, create_app
 from cogito_api.models import AgentRunStatus, ArtifactReference, PlanConstraints, PlanningRunStatus
-from cogito_api.reconciliation import WorkflowProjectionReconciler
+from cogito_api.reconciliation import ReconciliationHealth, WorkflowProjectionReconciler
 from cogito_api.supervisor import AgentRunRecord, PlanningRunRecord
 
+from .conftest import make_settings
 from .fakes import InMemorySupervisorStore
+from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore
 
 
 class _Inspector:
@@ -19,6 +23,14 @@ class _Inspector:
     async def get_terminal_outcome(self, workflow_id: str) -> str | None:
         self.workflow_ids.append(workflow_id)
         return self.outcomes[workflow_id]
+
+
+class _Telemetry:
+    def __init__(self) -> None:
+        self.passes: list[tuple[int, int, int]] = []
+
+    def reconciliation_pass(self, *, inspected: int, repaired: int, failures: int) -> None:
+        self.passes.append((inspected, repaired, failures))
 
 
 def _run(status: PlanningRunStatus = PlanningRunStatus.IMPLEMENTING) -> PlanningRunRecord:
@@ -90,3 +102,50 @@ async def test_reconciler_refuses_to_overwrite_a_newer_terminal_agent_projection
     assert repaired == 0
     assert store.planning_runs["run-1"].status is PlanningRunStatus.FINALIZING
     assert store.agent_runs["run-1"].status is AgentRunStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reports_aggregate_inspection_failure_without_mutating_projection() -> None:
+    store = InMemorySupervisorStore()
+    store.planning_runs["run-1"] = _run()
+    store.agent_runs["run-1"] = _agent()
+    telemetry = _Telemetry()
+
+    repaired = await WorkflowProjectionReconciler(
+        store,
+        _Inspector({}),
+        telemetry=telemetry,
+    ).reconcile_once()
+
+    assert repaired == 0
+    assert telemetry.passes == [(1, 0, 1)]
+    assert store.planning_runs["run-1"].status is PlanningRunStatus.IMPLEMENTING
+
+
+def test_readiness_requires_startup_and_bounded_reconciliation_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = 100.0
+    monkeypatch.setattr("cogito_api.reconciliation.time.monotonic", lambda: now)
+    health = ReconciliationHealth(stall_seconds=10)
+    readiness = ApplicationReadiness(health)
+
+    assert readiness.is_ready() is False
+    health.started()
+    readiness.started()
+    assert readiness.is_ready() is True
+
+    now = 111.0
+    assert readiness.is_ready() is False
+
+
+def test_api_readiness_is_separate_from_process_liveness(valid_plan: dict) -> None:
+    app = create_app(
+        store=InMemoryPlanStore(),
+        settings=make_settings(),
+        starter=FakeRunStarter(),
+        supervisor_store=InMemorySupervisorStore(),
+        planner=FakePlanner(valid_plan),
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").json() == {"status": "ok"}
+        assert client.get("/readyz").json() == {"status": "ready"}

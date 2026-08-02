@@ -11,6 +11,9 @@ run. Read the [product overview](docs/product.md) for the current capability
 boundary and [release guide](docs/releases.md) for the independently versioned
 API, worker, and Helm chart artifacts.
 
+Operational health, reconciliation boundaries, and incident response are
+documented in the [operations guide](docs/operations.md).
+
 ## Helm Chart
 
 Cogito deploys as an umbrella Helm chart with the following components:
