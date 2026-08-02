@@ -24,6 +24,13 @@ from .models import (
 )
 from .registry import manifest_sha256, registration_reference
 
+_TERMINAL_AGENT_STATUSES = {
+    AgentRunStatus.SUCCEEDED.value,
+    AgentRunStatus.FAILED.value,
+    AgentRunStatus.CANCELLED.value,
+    AgentRunStatus.TIMED_OUT.value,
+}
+
 
 @dataclass(frozen=True)
 class PlanningRunRecord:
@@ -1435,8 +1442,7 @@ class PostgresSupervisorStore:
             }:
                 return False
             current_agent_status = row["agent_status"]
-            terminal_agent_statuses = {item.value for item in AgentRunStatus if item.value in {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"}}
-            if current_agent_status in terminal_agent_statuses and current_agent_status != agent_status:
+            if current_agent_status in _TERMINAL_AGENT_STATUSES and current_agent_status != agent_status:
                 return False
             now = datetime.now().astimezone()
             await connection.execute(

@@ -32,7 +32,11 @@ class WorkflowProjectionReconciler:
             except Exception:
                 # Temporal unavailability is not workflow failure. Keep the
                 # projection unchanged and retry on the next bounded pass.
-                _LOGGER.warning("unable to inspect workflow for reconciliation", extra={"run_id": run.run_id})
+                _LOGGER.warning(
+                    "unable to inspect workflow for reconciliation",
+                    extra={"run_id": run.run_id},
+                    exc_info=True,
+                )
                 continue
             if outcome is None:
                 continue
