@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -7,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from cogito_api.main import ApplicationReadiness, create_app
 from cogito_api.models import AgentRunStatus, ArtifactReference, PlanConstraints, PlanningRunStatus
-from cogito_api.reconciliation import ReconciliationHealth, WorkflowProjectionReconciler
+from cogito_api.reconciliation import ReconciliationHealth, WorkflowProjectionReconciler, stop_reconciler
 from cogito_api.supervisor import AgentRunRecord, PlanningRunRecord
 
 from .conftest import make_settings
@@ -135,6 +136,20 @@ def test_readiness_requires_startup_and_bounded_reconciliation_progress(monkeypa
 
     now = 111.0
     assert readiness.is_ready() is False
+
+
+@pytest.mark.asyncio
+async def test_reconciler_run_owns_its_health_lifecycle() -> None:
+    reconciler = WorkflowProjectionReconciler(InMemorySupervisorStore(), _Inspector({}))
+
+    assert reconciler.health.is_healthy() is False
+    task = asyncio.create_task(reconciler.run())
+    await asyncio.sleep(0)
+    assert reconciler.health.is_healthy() is True
+
+    await stop_reconciler(task)
+
+    assert reconciler.health.is_healthy() is False
 
 
 def test_api_readiness_is_separate_from_process_liveness(valid_plan: dict) -> None:

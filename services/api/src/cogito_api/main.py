@@ -228,8 +228,6 @@ def create_app(
         notification_delivery_task = (
             asyncio.create_task(notification_dispatcher.run()) if notification_dispatcher is not None else None
         )
-        if reconciler is not None:
-            reconciler.health.started()
         reconciliation_task = asyncio.create_task(reconciler.run()) if reconciler is not None else None
         readiness.started()
         try:
