@@ -202,10 +202,25 @@ def test_workbench_projects_authoritative_workflow_identity_and_scoped_timeline(
     assert detail.json()["workflow_id"] == "planning-run-42-revision-1"
     assert timeline.status_code == 200
     assert timeline.json()["items"]
+    stages_by_type = {item["event_type"]: item["stage_id"] for item in timeline.json()["items"]}
+    assert stages_by_type["specification_recorded"] == "specification"
+    assert stages_by_type["planning_started"] == "planning"
+    assert stages_by_type["plan_approval_requested"] == "plan_approval"
     assert "artifact_ref" not in timeline.text
     assert "last_error" not in timeline.text
     assert unchanged.status_code == 304
     assert unchanged.content == b""
+
+
+def test_workbench_timeline_does_not_guess_a_stage_for_unknown_events(client, valid_plan, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store._append_coordination_event(run_id, "future_lifecycle_event")
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}/timeline", headers=_headers())
+
+    assert response.status_code == 200
+    unknown = next(item for item in response.json()["items"] if item["event_type"] == "future_lifecycle_event")
+    assert unknown["stage_id"] is None
 
 
 def test_workbench_timeline_tolerates_unknown_persisted_enum_values(client, valid_plan, supervisor_store) -> None:
@@ -218,7 +233,7 @@ def test_workbench_timeline_tolerates_unknown_persisted_enum_values(client, vali
     response = client.get(f"/api/v1/workbench/runs/{run_id}/timeline", headers=_headers())
 
     assert response.status_code == 200
-    item = response.json()["items"][0]
+    item = next(item for item in response.json()["items"] if item["event_id"] == event_id)
     assert item["gate"] is None
     assert item["decision"] is None
     assert item["lifecycle_status"] is None

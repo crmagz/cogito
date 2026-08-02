@@ -578,6 +578,10 @@ class WorkbenchTimelineEvent(BaseModel):
     event_id: str = Field(description="Immutable coordination event identifier")
     event_type: str = Field(description="Versioned lifecycle or approval event kind")
     occurred_at: str = Field(description="Authoritative ISO 8601 event timestamp")
+    stage_id: str | None = Field(
+        default=None,
+        description="Server-owned Workflow Map stage attribution when the event has a canonical stage",
+    )
     gate: CoordinationGate | None = Field(default=None, description="Approval gate when the event concerns one")
     artifact_sha256: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$", description="Immutable artifact digest when available"
@@ -645,13 +649,13 @@ class WorkbenchEvidenceResponse(BaseModel):
 
 
 class WorkbenchFeedbackIntent(StrEnum):
-    """Non-executable product-owner feedback types."""
+    """Non-executable Workbench review-context types."""
 
     NOTE = "note"
 
 
 class WorkbenchFeedbackStage(StrEnum):
-    """Current server-owned stages eligible for product-owner notes."""
+    """Current server-owned stages eligible for immutable review context."""
 
     SPECIFICATION = "specification"
     PLANNING = "planning"
@@ -670,7 +674,7 @@ class WorkbenchFeedbackRequest(BaseModel):
 
 
 class WorkbenchFeedbackResponse(BaseModel):
-    """Immutable receipt for one accepted product-owner note."""
+    """Immutable receipt for one accepted review-context record."""
 
     feedback_id: str = Field(description="Immutable feedback identifier")
     run_id: str = Field(description="Authoritative run identifier")
@@ -685,7 +689,7 @@ class WorkbenchFeedbackResponse(BaseModel):
 class WorkbenchFeedbackListResponse(BaseModel):
     """Bounded newest-first notes visible in one authorized dossier."""
 
-    items: list[WorkbenchFeedbackResponse] = Field(description="Immutable product-owner notes")
+    items: list[WorkbenchFeedbackResponse] = Field(description="Immutable review-context records")
 
 
 class CoordinationApprovalActionRequest(BaseModel):

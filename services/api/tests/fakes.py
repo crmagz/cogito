@@ -176,6 +176,10 @@ class InMemorySupervisorStore:
 
     async def create_planning_run(self, record: PlanningRunRecord) -> None:
         self.planning_runs[record.run_id] = record
+        self._append_coordination_event(
+            record.run_id, "specification_recorded", artifact=record.source_artifact
+        )
+        self._append_coordination_event(record.run_id, "planning_started", artifact=record.source_artifact)
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         return self.planning_runs.get(run_id)
@@ -207,6 +211,12 @@ class InMemorySupervisorStore:
         )
         self.workbench_feedback[key] = record
         self.workbench_feedback_request_hashes[key] = request_sha256
+        self._append_coordination_event(
+            run_id,
+            "workbench_feedback_recorded",
+            artifact=expected_artifact,
+            stage_id=stage_id,
+        )
         return record
 
     async def list_workbench_feedback(self, run_id: str, *, limit: int = 100) -> list[WorkbenchFeedbackRecord]:
@@ -483,6 +493,7 @@ class InMemorySupervisorStore:
         artifact: ArtifactReference | None = None,
         decision: str | None = None,
         lifecycle_status: str | None = None,
+        stage_id: str | None = None,
     ) -> None:
         payload = {
             "schema_version": "1.0",
@@ -492,6 +503,7 @@ class InMemorySupervisorStore:
             "artifact": {"ref": artifact.ref, "sha256": artifact.sha256} if artifact and artifact.ref else None,
             "decision": decision,
             "lifecycle_status": lifecycle_status,
+            "stage_id": stage_id,
             "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
             "action_url": f"/api/v1/coordination/runs/{run_id}/actions/{gate}" if gate else None,
         }
