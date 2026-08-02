@@ -69,6 +69,7 @@ from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDi
 from .notifications import NotificationOutboxDispatcher, notification_sink, stop_notification_dispatcher
 from .observability import Telemetry, TelemetrySettings
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
+from .reconciliation import WorkflowProjectionReconciler, stop_reconciler
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
 from .registry import RegistryAuthorizationError, load_component_catalog, require_tool
 from .supervisor import (
@@ -167,6 +168,11 @@ def create_app(
     implementation_dispatcher = ImplementationApprovalOutboxDispatcher(supervisor_store, starter)
     sink = notification_sink(settings)
     notification_dispatcher = NotificationOutboxDispatcher(supervisor_store, sink) if sink is not None else None
+    reconciler = (
+        WorkflowProjectionReconciler(supervisor_store, starter)
+        if callable(getattr(starter, "get_terminal_outcome", None))
+        else None
+    )
 
     async def resolve_roles(run_id: str, roles: list[str]):
         await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments)
@@ -189,12 +195,14 @@ def create_app(
         notification_delivery_task = (
             asyncio.create_task(notification_dispatcher.run()) if notification_dispatcher is not None else None
         )
+        reconciliation_task = asyncio.create_task(reconciler.run()) if reconciler is not None else None
         try:
             yield
         finally:
             await stop_dispatcher(delivery_task)
             await stop_dispatcher(implementation_delivery_task)
             await stop_notification_dispatcher(notification_delivery_task)
+            await stop_reconciler(reconciliation_task)
             telemetry.shutdown()
             close = getattr(supervisor_store, "close", None)
             if close is not None:

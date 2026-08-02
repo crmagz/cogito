@@ -283,6 +283,10 @@ class SupervisorStore(Protocol):
 
     async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]: ...
 
+    async def list_reconcilable_runs(self, *, limit: int = 100) -> list[PlanningRunRecord]: ...
+
+    async def reconcile_terminal_workflow(self, *, run_id: str, workflow_id: str, outcome: str) -> bool: ...
+
     async def list_workbench_runs(self, *, project_ids: frozenset[str], limit: int = 50) -> list[PlanningRunRecord]: ...
 
     async def claim_notification_deliveries(self, *, limit: int, lease_seconds: int) -> list[NotificationDelivery]: ...
@@ -1371,6 +1375,115 @@ class PostgresSupervisorStore:
             )
             rows = result.mappings().all()
         return [_planning_run_record(row) for row in rows]
+
+    async def list_reconcilable_runs(self, *, limit: int = 100) -> list[PlanningRunRecord]:
+        """List live workflow projections that can safely be checked for recovery."""
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT run_id, status, source_artifact_ref, source_artifact_sha256,
+                           target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
+                           plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
+                           implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id
+                    FROM supervisor_runs
+                    WHERE status IN ('implementing', 'finalizing') AND active_workflow_id IS NOT NULL
+                    ORDER BY submitted_at
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": max(1, min(limit, 100))},
+            )
+            rows = result.mappings().all()
+        return [_planning_run_record(row) for row in rows]
+
+    async def reconcile_terminal_workflow(self, *, run_id: str, workflow_id: str, outcome: str) -> bool:
+        """Atomically repair one stale projection from an exact Temporal result.
+
+        The caller has already established that ``workflow_id`` closed with a
+        recognized Cogito result.  Re-checking that workflow identity and both
+        current statuses under a lock prevents an old workflow revision from
+        overwriting a newer gate or a competing worker report.
+        """
+
+        target = {
+            "completed": (PlanningRunStatus.COMPLETED.value, AgentRunStatus.SUCCEEDED.value),
+            "failed": (PlanningRunStatus.PLANNING_FAILED.value, AgentRunStatus.FAILED.value),
+            "stopped_with_backup": (PlanningRunStatus.PLANNING_FAILED.value, AgentRunStatus.TIMED_OUT.value),
+        }.get(outcome)
+        if target is None:
+            return False
+        planning_status, agent_status = target
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT s.status AS planning_status, a.status AS agent_status
+                    FROM supervisor_runs AS s
+                    JOIN agent_runs AS a USING (run_id)
+                    WHERE s.run_id = :run_id AND s.active_workflow_id = :workflow_id
+                    FOR UPDATE OF s, a
+                    """
+                ),
+                {"run_id": run_id, "workflow_id": workflow_id},
+            )
+            row = result.mappings().one_or_none()
+            if row is None or row["planning_status"] not in {
+                PlanningRunStatus.IMPLEMENTING.value,
+                PlanningRunStatus.FINALIZING.value,
+            }:
+                return False
+            current_agent_status = row["agent_status"]
+            terminal_agent_statuses = {item.value for item in AgentRunStatus if item.value in {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"}}
+            if current_agent_status in terminal_agent_statuses and current_agent_status != agent_status:
+                return False
+            now = datetime.now().astimezone()
+            await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs SET status = :planning_status
+                    WHERE run_id = :run_id AND active_workflow_id = :workflow_id
+                    """
+                ),
+                {"run_id": run_id, "workflow_id": workflow_id, "planning_status": planning_status},
+            )
+            if current_agent_status != agent_status:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE agent_runs
+                        SET status = :agent_status, updated_at = :now, last_heartbeat_at = :now,
+                            completed_at = :now
+                        WHERE run_id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id, "agent_status": agent_status, "now": now},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO agent_run_events (event_id, run_id, event_type, from_status, to_status, occurred_at, metadata)
+                        VALUES (:event_id, :run_id, 'workflow_reconciled', :from_status, :to_status, :occurred_at,
+                                CAST(:metadata AS jsonb))
+                        """
+                    ),
+                    {
+                        "event_id": str(uuid.uuid4()),
+                        "run_id": run_id,
+                        "from_status": current_agent_status,
+                        "to_status": agent_status,
+                        "occurred_at": now,
+                        "metadata": json.dumps({"outcome": outcome}),
+                    },
+                )
+            await self._append_coordination_event(
+                connection,
+                run_id=run_id,
+                event_type="workflow_reconciled",
+                lifecycle_status=agent_status,
+            )
+        return True
 
     async def list_workbench_runs(self, *, project_ids: frozenset[str], limit: int = 50) -> list[PlanningRunRecord]:
         """List only runs whose persisted project scope is authorized."""

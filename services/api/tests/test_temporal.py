@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from cogito_api.temporal import TemporalRunStarter
+from cogito_api.temporal import TemporalRunStarter, _terminal_outcome
 
 
 class _FakeHandle:
@@ -42,3 +42,10 @@ async def test_temporal_approval_rejects_a_missing_decision_id() -> None:
     starter = TemporalRunStarter("temporal:7233", "default", "tasks")
 
     assert await starter.submit_plan_approval("workflow", {"decision": "approve"}) is False
+
+
+def test_terminal_outcome_accepts_only_known_reconcilable_results() -> None:
+    assert _terminal_outcome({"status": "completed"}) == "completed"
+    assert _terminal_outcome({"status": "failed"}) == "failed"
+    assert _terminal_outcome({"status": "revision_requested"}) is None
+    assert _terminal_outcome({"unexpected": "shape"}) is None
