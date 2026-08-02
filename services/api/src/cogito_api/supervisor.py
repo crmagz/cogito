@@ -21,6 +21,7 @@ from .models import (
     PlanningRunStatus,
     RegistrationManifest,
     RegistrationReference,
+    WorkbenchFeedbackIntent,
 )
 from .registry import manifest_sha256, registration_reference
 
@@ -94,6 +95,20 @@ class WorkbenchApprovalRecord:
     actor_id: str
     created_at: str
     delivered: bool
+
+
+@dataclass(frozen=True)
+class WorkbenchFeedbackRecord:
+    """Immutable product-owner note with no execution authority."""
+
+    feedback_id: str
+    run_id: str
+    intent: WorkbenchFeedbackIntent
+    artifact_sha256: str
+    stage_id: str
+    actor_id: str
+    comment: str
+    created_at: str
 
 
 @dataclass(frozen=True)
@@ -287,6 +302,21 @@ class SupervisorStore(Protocol):
     async def list_coordination_events(self, run_id: str, *, limit: int = 100) -> list[tuple[CoordinationEvent, bool, int, str | None]]: ...
 
     async def list_workbench_approvals(self, run_id: str, *, limit: int = 100) -> list[WorkbenchApprovalRecord]: ...
+
+    async def record_workbench_feedback(
+        self,
+        *,
+        run_id: str,
+        intent: WorkbenchFeedbackIntent,
+        artifact_sha256: str,
+        stage_id: str,
+        actor_id: str,
+        comment: str,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> WorkbenchFeedbackRecord: ...
+
+    async def list_workbench_feedback(self, run_id: str, *, limit: int = 100) -> list[WorkbenchFeedbackRecord]: ...
 
     async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]: ...
 
@@ -1363,6 +1393,114 @@ class PostgresSupervisorStore:
             for row in rows
         ]
 
+    async def record_workbench_feedback(
+        self,
+        *,
+        run_id: str,
+        intent: WorkbenchFeedbackIntent,
+        artifact_sha256: str,
+        stage_id: str,
+        actor_id: str,
+        comment: str,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> WorkbenchFeedbackRecord:
+        """Persist one non-executable, digest-bound product-owner note."""
+
+        async with self._engine.begin() as connection:
+            run_result = await connection.execute(
+                text(
+                    """
+                    SELECT source_artifact_ref, source_artifact_sha256, plan_artifact_ref, plan_artifact_sha256,
+                           implementation_artifact_ref, implementation_artifact_sha256
+                    FROM supervisor_runs WHERE run_id = :run_id FOR UPDATE
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            run = run_result.mappings().one_or_none()
+            if run is None:
+                raise ApprovalConflictError("planning run does not exist")
+            existing_result = await connection.execute(
+                text("SELECT * FROM workbench_feedback WHERE run_id = :run_id AND idempotency_key = :idempotency_key"),
+                {"run_id": run_id, "idempotency_key": idempotency_key},
+            )
+            existing = existing_result.mappings().one_or_none()
+            if existing is not None:
+                if existing["request_sha256"] != request_sha256:
+                    raise ApprovalConflictError("idempotency key was reused with different feedback")
+                return _workbench_feedback_record(existing)
+            expected_artifact = {
+                "specification": (run["source_artifact_ref"], run["source_artifact_sha256"]),
+                "planning": (run["plan_artifact_ref"], run["plan_artifact_sha256"]),
+                "plan_approval": (run["plan_artifact_ref"], run["plan_artifact_sha256"]),
+                "implementation": (run["implementation_artifact_ref"], run["implementation_artifact_sha256"]),
+                "implementation_approval": (run["implementation_artifact_ref"], run["implementation_artifact_sha256"]),
+            }.get(stage_id)
+            if expected_artifact is None or expected_artifact[0] is None or expected_artifact[1] != artifact_sha256:
+                raise ApprovalConflictError("feedback artifact is not authoritative for this stage")
+            artifact_ref = expected_artifact[0]
+            feedback_id = str(uuid.uuid4())
+            created_at = datetime.now().astimezone()
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO workbench_feedback (
+                        feedback_id, run_id, intent, artifact_sha256, stage_id, actor_id, comment,
+                        idempotency_key, request_sha256, created_at
+                    ) VALUES (
+                        :feedback_id, :run_id, :intent, :artifact_sha256, :stage_id, :actor_id, :comment,
+                        :idempotency_key, :request_sha256, :created_at
+                    )
+                    """
+                ),
+                {
+                    "feedback_id": feedback_id,
+                    "run_id": run_id,
+                    "intent": intent.value,
+                    "artifact_sha256": artifact_sha256,
+                    "stage_id": stage_id,
+                    "actor_id": actor_id,
+                    "comment": comment.strip(),
+                    "idempotency_key": idempotency_key,
+                    "request_sha256": request_sha256,
+                    "created_at": created_at,
+                },
+            )
+            await self._append_coordination_event(
+                connection,
+                run_id=run_id,
+                event_type="workbench_feedback_recorded",
+                artifact=ArtifactReference(ref=artifact_ref, sha256=artifact_sha256),
+            )
+        return WorkbenchFeedbackRecord(
+            feedback_id=feedback_id,
+            run_id=run_id,
+            intent=intent,
+            artifact_sha256=artifact_sha256,
+            stage_id=stage_id,
+            actor_id=actor_id,
+            comment=comment.strip(),
+            created_at=created_at.isoformat(),
+        )
+
+    async def list_workbench_feedback(self, run_id: str, *, limit: int = 100) -> list[WorkbenchFeedbackRecord]:
+        """List bounded newest-first immutable product-owner notes."""
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT feedback_id, run_id, intent, artifact_sha256, stage_id, actor_id, comment, created_at
+                    FROM workbench_feedback WHERE run_id = :run_id
+                    ORDER BY created_at DESC, feedback_id DESC LIMIT :limit
+                    """
+                ),
+                {"run_id": run_id, "limit": max(1, min(limit, 100))},
+            )
+            rows = result.mappings().all()
+        return [_workbench_feedback_record(row) for row in rows]
+
     async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]:
         """List bounded newest-first planning runs for authenticated coordination clients."""
 
@@ -1639,6 +1777,22 @@ def _coordination_event(row: object) -> CoordinationEvent:
         decision=payload.get("decision") if isinstance(payload.get("decision"), str) else None,
         lifecycle_status=payload.get("lifecycle_status") if isinstance(payload.get("lifecycle_status"), str) else None,
         payload=payload,
+    )
+
+
+def _workbench_feedback_record(row: object) -> WorkbenchFeedbackRecord:
+    """Build one immutable product-owner note from a SQL mapping row."""
+
+    values = row
+    return WorkbenchFeedbackRecord(
+        feedback_id=values["feedback_id"],  # type: ignore[index]
+        run_id=values["run_id"],  # type: ignore[index]
+        intent=WorkbenchFeedbackIntent(values["intent"]),  # type: ignore[index]
+        artifact_sha256=values["artifact_sha256"],  # type: ignore[index]
+        stage_id=values["stage_id"],  # type: ignore[index]
+        actor_id=values["actor_id"],  # type: ignore[index]
+        comment=values["comment"],  # type: ignore[index]
+        created_at=values["created_at"].isoformat(),  # type: ignore[index]
     )
 
 

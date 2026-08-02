@@ -51,3 +51,31 @@ def test_phase14_workbench_e2e() -> None:
     )
     assert evidence_status == 200, evidence
     assert marker in str(evidence["content"])
+
+    feedback_path = f"/api/v1/workbench/runs/{run_id}/feedback"
+    feedback_payload = {
+        "intent": "note",
+        "artifact_sha256": source_sha256,
+        "stage_id": "specification",
+        "comment": f"Kind Phase 16 feedback for {marker}.",
+    }
+    unauthenticated_feedback, _ = harness.api("POST", feedback_path, feedback_payload, authenticated=False)
+    assert unauthenticated_feedback == 401
+    feedback_status, feedback = harness.api("POST", feedback_path, feedback_payload, idempotency_key=f"feedback-{run_id}")
+    replay_status, replay = harness.api("POST", feedback_path, feedback_payload, idempotency_key=f"feedback-{run_id}")
+    assert feedback_status == 202, feedback
+    assert replay_status == 202, replay
+    assert replay == feedback
+    assert feedback["artifact_sha256"] == source_sha256
+    assert feedback["stage_id"] == "specification"
+
+    mismatched_stage, _ = harness.api(
+        "POST",
+        feedback_path,
+        {**feedback_payload, "stage_id": "plan_approval"},
+        idempotency_key=f"feedback-mismatched-{run_id}",
+    )
+    assert mismatched_stage == 409
+    feedback_list_status, feedback_list = harness.api("GET", feedback_path)
+    assert feedback_list_status == 200, feedback_list
+    assert any(item["feedback_id"] == feedback["feedback_id"] for item in feedback_list["items"])

@@ -50,17 +50,28 @@ class KindHarness:
         if self.context not in self.command("kubectl", "config", "get-contexts", "-o", "name").splitlines():
             pytest.skip(f"Kind context unavailable: {self.context}")
 
-    def api(self, method: str, path: str, body: dict[str, object] | None = None, *, authenticated: bool = True) -> tuple[int, dict[str, object]]:
+    def api(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        *,
+        authenticated: bool = True,
+        idempotency_key: str | None = None,
+    ) -> tuple[int, dict[str, object]]:
         code = """
 import json,os,sys,urllib.error,urllib.request
 payload=json.loads(sys.stdin.read()); headers={"Content-Type":"application/json"}
-if sys.argv[3] == "true": headers.update({"Authorization":"Bearer "+os.environ["COGITO_AUTH_STATIC_TOKEN"],"Idempotency-Key":"kind-pytest-"+sys.argv[2]})
+if sys.argv[3] == "true": headers.update({"Authorization":"Bearer "+os.environ["COGITO_AUTH_STATIC_TOKEN"],"Idempotency-Key":sys.argv[4]})
 request=urllib.request.Request("http://127.0.0.1:8000"+sys.argv[2],data=(json.dumps(payload).encode() if payload is not None else None),headers=headers,method=sys.argv[1])
 try:
  response=urllib.request.urlopen(request,timeout=90); print(json.dumps({"status":response.status,"body":json.loads(response.read())}))
 except urllib.error.HTTPError as error: print(json.dumps({"status":error.code,"body":json.loads(error.read() or b"{}")}))
 """
-        output = self.kubectl("-n", self.namespace, "exec", "-i", f"deployment/{self.release}-api", "--", "python", "-c", code, method, path, str(authenticated).lower(), input_text=json.dumps(body))
+        output = self.kubectl(
+            "-n", self.namespace, "exec", "-i", f"deployment/{self.release}-api", "--", "python", "-c", code,
+            method, path, str(authenticated).lower(), idempotency_key or f"kind-pytest-{path}", input_text=json.dumps(body),
+        )
         result = json.loads(output)
         return int(result["status"]), dict(result["body"])
 
