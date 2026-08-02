@@ -582,6 +582,10 @@ class WorkbenchTimelineEvent(BaseModel):
         default=None,
         description="Server-owned Workflow Map stage attribution when the event has a canonical stage",
     )
+    stage_ids: list[str] = Field(
+        default_factory=list,
+        description="All server-owned Workflow Map stages materially affected by this lifecycle transition",
+    )
     gate: CoordinationGate | None = Field(default=None, description="Approval gate when the event concerns one")
     artifact_sha256: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$", description="Immutable artifact digest when available"
