@@ -7,6 +7,15 @@
 {{- $staticAuth := default (dict) $auth.static }}
 {{- $oidcAuth := default (dict) $auth.oidc }}
 {{- $notifications := default (dict) .Values.api.notifications }}
+{{- $reconciliation := default (dict) .Values.api.reconciliation }}
+{{- $reconciliationEnabled := true }}
+{{- $reconciliationPollSeconds := 5 }}
+{{- $reconciliationBatchSize := 100 }}
+{{- $reconciliationStallSeconds := 30 }}
+{{- if hasKey $reconciliation "enabled" }}{{- $reconciliationEnabled = $reconciliation.enabled }}{{- end }}
+{{- if hasKey $reconciliation "pollSeconds" }}{{- $reconciliationPollSeconds = $reconciliation.pollSeconds }}{{- end }}
+{{- if hasKey $reconciliation "batchSize" }}{{- $reconciliationBatchSize = $reconciliation.batchSize }}{{- end }}
+{{- if hasKey $reconciliation "stallSeconds" }}{{- $reconciliationStallSeconds = $reconciliation.stallSeconds }}{{- end }}
 {{- $telemetryEnabled := or .Values.observability.traces.enabled .Values.observability.metrics.enabled }}
 {{- if and $telemetryEnabled (not .Values.observability.otlp.endpoint) }}
 {{- fail "observability.otlp.endpoint is required when traces or metrics are enabled" }}
@@ -57,10 +66,10 @@ data:
   COGITO_NOTIFICATION_ENABLED: {{ default false $notifications.enabled | quote }}
   COGITO_NOTIFICATION_WEBHOOK_URL: {{ default "" $notifications.webhookUrl | quote }}
   COGITO_NOTIFICATION_TIMEOUT_SECONDS: {{ default 10 $notifications.timeoutSeconds | quote }}
-  COGITO_RECONCILIATION_ENABLED: {{ .Values.api.reconciliation.enabled | quote }}
-  COGITO_RECONCILIATION_POLL_SECONDS: {{ .Values.api.reconciliation.pollSeconds | quote }}
-  COGITO_RECONCILIATION_BATCH_SIZE: {{ .Values.api.reconciliation.batchSize | quote }}
-  COGITO_RECONCILIATION_STALL_SECONDS: {{ .Values.api.reconciliation.stallSeconds | quote }}
+  COGITO_RECONCILIATION_ENABLED: {{ $reconciliationEnabled | quote }}
+  COGITO_RECONCILIATION_POLL_SECONDS: {{ $reconciliationPollSeconds | quote }}
+  COGITO_RECONCILIATION_BATCH_SIZE: {{ $reconciliationBatchSize | quote }}
+  COGITO_RECONCILIATION_STALL_SECONDS: {{ $reconciliationStallSeconds | quote }}
   COGITO_TELEMETRY_TRACES_ENABLED: {{ .Values.observability.traces.enabled | quote }}
   COGITO_TELEMETRY_METRICS_ENABLED: {{ .Values.observability.metrics.enabled | quote }}
   COGITO_TELEMETRY_SPAN_EVENTS_ENABLED: {{ .Values.observability.spanEvents.enabled | quote }}
