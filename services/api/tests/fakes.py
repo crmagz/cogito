@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from cogito_api.models import (
@@ -445,6 +446,7 @@ class InMemorySupervisorStore:
         gate: str | None = None,
         artifact: ArtifactReference | None = None,
         decision: str | None = None,
+        lifecycle_status: str | None = None,
     ) -> None:
         payload = {
             "schema_version": "1.0",
@@ -453,7 +455,7 @@ class InMemorySupervisorStore:
             "gate": gate,
             "artifact": {"ref": artifact.ref, "sha256": artifact.sha256} if artifact and artifact.ref else None,
             "decision": decision,
-            "lifecycle_status": None,
+            "lifecycle_status": lifecycle_status,
             "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
             "action_url": f"/api/v1/coordination/runs/{run_id}/actions/{gate}" if gate else None,
         }
@@ -474,7 +476,7 @@ class InMemorySupervisorStore:
             artifact_ref=artifact.ref if artifact and artifact.ref else None,
             artifact_sha256=artifact.sha256 if artifact and artifact.ref else None,
             decision=decision,
-            lifecycle_status=None,
+            lifecycle_status=lifecycle_status,
             payload=payload,
         )
         self.notification_deliveries[event_id] = (False, 0, None)
@@ -521,6 +523,44 @@ class InMemorySupervisorStore:
 
     async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]:
         return sorted(self.planning_runs.values(), key=lambda item: item.submitted_at, reverse=True)[:limit]
+
+    async def list_reconcilable_runs(self, *, limit: int = 100) -> list[PlanningRunRecord]:
+        return [
+            record
+            for record in self.planning_runs.values()
+            if record.status in {PlanningRunStatus.IMPLEMENTING, PlanningRunStatus.FINALIZING} and record.workflow_id
+        ][:limit]
+
+    async def reconcile_terminal_workflow(self, *, run_id: str, workflow_id: str, outcome: str) -> bool:
+        record = self.planning_runs.get(run_id)
+        agent = self.agent_runs.get(run_id)
+        targets = {
+            "completed": (PlanningRunStatus.COMPLETED, AgentRunStatus.SUCCEEDED),
+            "failed": (PlanningRunStatus.PLANNING_FAILED, AgentRunStatus.FAILED),
+            "stopped_with_backup": (PlanningRunStatus.PLANNING_FAILED, AgentRunStatus.TIMED_OUT),
+        }
+        target = targets.get(outcome)
+        if (
+            record is None
+            or agent is None
+            or target is None
+            or record.workflow_id != workflow_id
+            or record.status not in {PlanningRunStatus.IMPLEMENTING, PlanningRunStatus.FINALIZING}
+        ):
+            return False
+        terminal = {AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED, AgentRunStatus.TIMED_OUT}
+        if agent.status in terminal and agent.status is not target[1]:
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        self.planning_runs[run_id] = replace(record, status=target[0])
+        self.agent_runs[run_id] = replace(
+            agent,
+            status=target[1],
+            updated_at=now,
+            last_heartbeat_at=now,
+        )
+        self._append_coordination_event(run_id, "workflow_reconciled", lifecycle_status=target[1].value)
+        return True
 
     async def list_workbench_runs(self, *, project_ids: frozenset[str], limit: int = 50) -> list[PlanningRunRecord]:
         return [

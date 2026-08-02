@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
+from typing import Any, Protocol
 
 from temporalio.client import Client
+from temporalio.api.enums.v1 import WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from .models import RunEnvelope
@@ -15,6 +16,12 @@ class RunStarter(Protocol):
     async def submit_plan_approval(self, workflow_id: str, decision: dict[str, str]) -> bool: ...
 
     async def submit_implementation_approval(self, workflow_id: str, decision: dict[str, str]) -> bool: ...
+
+
+class WorkflowOutcomeInspector(Protocol):
+    """Read a closed workflow's typed business outcome without mutating it."""
+
+    async def get_terminal_outcome(self, workflow_id: str) -> str | None: ...
 
 
 class TemporalRunStarter:
@@ -62,9 +69,35 @@ class TemporalRunStarter:
         handle = client.get_workflow_handle(workflow_id)
         return await handle.execute_update("submit_implementation_approval", decision, id=decision_id)
 
+    async def get_terminal_outcome(self, workflow_id: str) -> str | None:
+        """Return a recognized terminal workflow result, or ``None`` while it is live.
+
+        The Supervisor uses this only to repair its own projection after a
+        worker-side status activity was interrupted.  It deliberately trusts
+        neither a missing heartbeat nor a generic Temporal close status: the
+        workflow result must carry one of Cogito's explicit business outcomes.
+        """
+
+        client = await self._get_client()
+        handle = client.get_workflow_handle(workflow_id)
+        description = await handle.describe()
+        status = description.raw_description.workflow_execution_info.status
+        if status != WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_COMPLETED:
+            return None
+        return _terminal_outcome(await handle.result(follow_runs=False))
+
     async def _get_client(self) -> Client:
         if self._client is None:
             async with self._lock:
                 if self._client is None:
                     self._client = await Client.connect(self._host, namespace=self._namespace)
         return self._client
+
+
+def _terminal_outcome(result: Any) -> str | None:
+    """Extract only a supported outcome from a Temporal workflow result."""
+
+    status = result.get("status") if isinstance(result, dict) else getattr(result, "status", None)
+    if status in {"completed", "failed", "stopped_with_backup"}:
+        return status
+    return None
