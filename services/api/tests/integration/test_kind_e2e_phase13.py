@@ -103,6 +103,12 @@ class KindConfig:
         spec_ref = os.environ.get("COGITO_E2E_SPEC_REF")
         if spec_ref and validate_spec_reference(spec_ref):
             pytest.fail("COGITO_E2E_SPEC_REF must be an immutable name@version#sha256=<digest> reference")
+        existing_run_id = os.environ.get("COGITO_E2E_EXISTING_RUN_ID") or None
+        if existing_run_id and os.environ.get("COGITO_E2E_RESUME_EXISTING_RUN") != "1":
+            pytest.fail(
+                "refusing to approve an existing run; unset COGITO_E2E_EXISTING_RUN_ID "
+                "or set COGITO_E2E_RESUME_EXISTING_RUN=1"
+            )
         values_file = os.environ.get("COGITO_E2E_VALUES_FILE")
         resolved_values_file = Path(values_file).resolve() if values_file else None
         if resolved_values_file and not resolved_values_file.is_file():
@@ -118,7 +124,7 @@ class KindConfig:
                 "https://github.com/crmagz/cogito-kind-e2e-fixture.git#7d1ddc14c1cbaf666641c7235c89fa937bb1bd50",
             ),
             timeout=int(os.environ.get("COGITO_E2E_TIMEOUT_SECONDS", "900")),
-            existing_run_id=os.environ.get("COGITO_E2E_EXISTING_RUN_ID") or None,
+            existing_run_id=existing_run_id,
             values_file=resolved_values_file,
         )
 
@@ -322,7 +328,19 @@ except urllib.error.HTTPError as error:
         if restore:
             return ("--set", "litellm.enabled=false") if self._litellm_was_enabled is False else ()
         values = json.loads(
-            self.command("helm", "get", "values", self.config.release, "--namespace", self.config.namespace, "--all", "--output", "json")
+            self.command(
+                "helm",
+                "get",
+                "values",
+                self.config.release,
+                "--kube-context",
+                self.config.context,
+                "--namespace",
+                self.config.namespace,
+                "--all",
+                "--output",
+                "json",
+            )
         )
         litellm = dict(values.get("litellm", {}))
         planner_policy = dict(dict(litellm.get("rolePolicies", {})).get("planner", {}))

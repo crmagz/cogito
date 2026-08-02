@@ -51,6 +51,25 @@ def test_kind_config_rejects_a_mutable_fixture_reference(monkeypatch: pytest.Mon
         KindConfig.load()
 
 
+def test_kind_config_rejects_an_existing_run_without_a_resume_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COGITO_E2E_EXISTING_RUN_ID", "run-from-another-workflow")
+    monkeypatch.delenv("COGITO_E2E_RESUME_EXISTING_RUN", raising=False)
+
+    with pytest.raises(pytest.fail.Exception, match="refusing to approve an existing run"):
+        KindConfig.load()
+
+
+def test_kind_config_allows_an_existing_run_with_a_resume_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COGITO_E2E_EXISTING_RUN_ID", "run-from-another-workflow")
+    monkeypatch.setenv("COGITO_E2E_RESUME_EXISTING_RUN", "1")
+
+    assert KindConfig.load().existing_run_id == "run-from-another-workflow"
+
+
 def test_provider_preflight_names_the_configured_secret_when_provider_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -75,10 +94,32 @@ def test_provider_preflight_names_the_configured_secret_when_provider_is_missing
             "tiers": {"balanced": {}},
         }
     }
-    monkeypatch.setattr(control, "command", lambda *_: json.dumps(values))
+    commands: list[tuple[str, ...]] = []
+
+    def command(*args: str) -> str:
+        commands.append(args)
+        return json.dumps(values)
+
+    monkeypatch.setattr(control, "command", command)
 
     with pytest.raises(pytest.fail.Exception, match="cogito-litellm-credentials"):
         control.litellm_overrides()
+
+    assert commands == [
+        (
+            "helm",
+            "get",
+            "values",
+            "cogito",
+            "--kube-context",
+            "kind-test",
+            "--namespace",
+            "test",
+            "--all",
+            "--output",
+            "json",
+        )
+    ]
 
 
 def test_secret_key_presence_checks_describe_metadata_without_reading_data(monkeypatch: pytest.MonkeyPatch) -> None:
