@@ -69,7 +69,7 @@ from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDi
 from .notifications import NotificationOutboxDispatcher, notification_sink, stop_notification_dispatcher
 from .observability import Telemetry, TelemetrySettings
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
-from .reconciliation import WorkflowProjectionReconciler, stop_reconciler
+from .reconciliation import ReconciliationHealth, WorkflowProjectionReconciler, stop_reconciler
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
 from .registry import RegistryAuthorizationError, load_component_catalog, require_tool
 from .supervisor import (
@@ -133,6 +133,31 @@ class TraceRequestMiddleware:
             detach(token)
 
 
+class ApplicationReadiness:
+    """Represent startup completion and required background-loop progress."""
+
+    def __init__(self, reconciliation_health: ReconciliationHealth | None) -> None:
+        self._reconciliation_health = reconciliation_health
+        self._started = False
+
+    def started(self) -> None:
+        """Mark application initialization as complete."""
+
+        self._started = True
+
+    def stopped(self) -> None:
+        """Mark the application unavailable during shutdown."""
+
+        self._started = False
+
+    def is_ready(self) -> bool:
+        """Return whether startup completed and the required loop is progressing."""
+
+        return self._started and (
+            self._reconciliation_health is None or self._reconciliation_health.is_healthy()
+        )
+
+
 def create_app(
     store: PlanStore | None = None,
     settings: Settings | None = None,
@@ -169,10 +194,18 @@ def create_app(
     sink = notification_sink(settings)
     notification_dispatcher = NotificationOutboxDispatcher(supervisor_store, sink) if sink is not None else None
     reconciler = (
-        WorkflowProjectionReconciler(supervisor_store, starter)
-        if callable(getattr(starter, "get_terminal_outcome", None))
+        WorkflowProjectionReconciler(
+            supervisor_store,
+            starter,
+            poll_seconds=settings.reconciliation_poll_seconds,
+            batch_size=settings.reconciliation_batch_size,
+            stall_seconds=settings.reconciliation_stall_seconds,
+            telemetry=telemetry,
+        )
+        if settings.reconciliation_enabled and callable(getattr(starter, "get_terminal_outcome", None))
         else None
     )
+    readiness = ApplicationReadiness(reconciler.health if reconciler is not None else None)
 
     async def resolve_roles(run_id: str, roles: list[str]):
         await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments)
@@ -195,10 +228,14 @@ def create_app(
         notification_delivery_task = (
             asyncio.create_task(notification_dispatcher.run()) if notification_dispatcher is not None else None
         )
+        if reconciler is not None:
+            reconciler.health.started()
         reconciliation_task = asyncio.create_task(reconciler.run()) if reconciler is not None else None
+        readiness.started()
         try:
             yield
         finally:
+            readiness.stopped()
             await stop_dispatcher(delivery_task)
             await stop_dispatcher(implementation_delivery_task)
             await stop_notification_dispatcher(notification_delivery_task)
@@ -222,6 +259,14 @@ def create_app(
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def readyz() -> JSONResponse:
+        """Report whether required startup and reconciliation work is progressing."""
+
+        if readiness.is_ready():
+            return JSONResponse(status_code=status.HTTP_200_OK, content={"status": "ready"})
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"status": "not_ready"})
 
     @app.post("/api/v1/runs")
     async def submit_run(submission: RunSubmission) -> JSONResponse:

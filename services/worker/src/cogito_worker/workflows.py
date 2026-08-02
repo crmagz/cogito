@@ -32,10 +32,19 @@ _ACTIVITY_TIMEOUT = timedelta(seconds=30)
 # short status/load activity timeout or Temporal will cancel it first.
 _PROVISION_ACTIVITY_TIMEOUT = timedelta(seconds=180)
 _CLEANUP_ACTIVITY_TIMEOUT = timedelta(seconds=120)
-_PROVISION_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
-_CLEANUP_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
+_RETRY_INITIAL_INTERVAL = timedelta(seconds=1)
+_RETRY_MAXIMUM_INTERVAL = timedelta(seconds=30)
+_IDEMPOTENT_RETRY_POLICY = RetryPolicy(
+    initial_interval=_RETRY_INITIAL_INTERVAL,
+    backoff_coefficient=2.0,
+    maximum_interval=_RETRY_MAXIMUM_INTERVAL,
+    maximum_attempts=3,
+)
+_PROVISION_RETRY_POLICY = _IDEMPOTENT_RETRY_POLICY
+_CLEANUP_RETRY_POLICY = _IDEMPOTENT_RETRY_POLICY
+_PUBLISH_RETRY_POLICY = _IDEMPOTENT_RETRY_POLICY
 _RUN_PHASE_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
-_BACKUP_PHASE_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
+_BACKUP_PHASE_RETRY_POLICY = _IDEMPOTENT_RETRY_POLICY
 _BACKUP_ACTIVITY_TIMEOUT = timedelta(seconds=120)
 _REVIEW_ACTIVITY_TIMEOUT = timedelta(seconds=120)
 
@@ -382,7 +391,7 @@ class DeveloperRunWorkflow:
                 WorkerActivities.open_pull_request,
                 args=[implementation_artifact.sha256, implementation_evidence],
                 start_to_close_timeout=_REVIEW_ACTIVITY_TIMEOUT,
-                retry_policy=_PROVISION_RETRY_POLICY,
+                retry_policy=_PUBLISH_RETRY_POLICY,
             )
             await workflow.execute_activity(
                 WorkerActivities.report_status,

@@ -58,6 +58,10 @@ def make_settings(**overrides) -> Settings:
         notification_webhook_url="",
         notification_webhook_hmac_secret="",
         notification_timeout_seconds=10.0,
+        reconciliation_enabled=True,
+        reconciliation_poll_seconds=5,
+        reconciliation_batch_size=100,
+        reconciliation_stall_seconds=30,
     )
     defaults.update(overrides)
     return Settings(**defaults)

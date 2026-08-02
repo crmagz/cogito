@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from minio import Minio
 from temporalio.client import Client
@@ -19,6 +20,20 @@ from .run_state import PostgresRunStateReporter
 from .storage import MinioRunStore
 from .workflows import DeveloperRunWorkflow
 
+_READINESS_FILE = Path("/tmp/cogito-worker-ready")
+
+
+def _clear_readiness_file() -> None:
+    """Remove the local readiness sentinel before startup and during shutdown."""
+
+    _READINESS_FILE.unlink(missing_ok=True)
+
+
+def _mark_ready() -> None:
+    """Publish readiness only after Temporal and the worker runtime initialize."""
+
+    _READINESS_FILE.touch()
+
 
 async def _connect_temporal(host: str, namespace: str) -> Client:
     """Wait for Temporal during independent control-plane startup."""
@@ -32,7 +47,10 @@ async def _connect_temporal(host: str, namespace: str) -> Client:
 
 
 async def main() -> None:
+    """Start the Temporal worker after clearing any stale readiness state."""
+
     logging.basicConfig(level=logging.INFO)
+    _clear_readiness_file()
     settings = load_settings()
 
     client = await _connect_temporal(settings.temporal_host, settings.temporal_namespace)
@@ -131,7 +149,12 @@ async def main() -> None:
             activities.address_review_findings,
         ],
     )
-    await worker.run()
+    async with worker:
+        _mark_ready()
+        try:
+            await asyncio.Future()
+        finally:
+            _clear_readiness_file()
 
 
 if __name__ == "__main__":

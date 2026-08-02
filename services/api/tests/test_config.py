@@ -68,3 +68,21 @@ def test_production_notifications_require_https(monkeypatch: pytest.MonkeyPatch)
 
     with pytest.raises(ValueError, match="must use HTTPS"):
         load_settings()
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("COGITO_RECONCILIATION_POLL_SECONDS", "0", "must be between 1 and 3600"),
+        ("COGITO_RECONCILIATION_BATCH_SIZE", "0", "must be between 1 and 1000"),
+        ("COGITO_RECONCILIATION_STALL_SECONDS", "9", "must be at least twice"),
+    ],
+)
+def test_reconciliation_configuration_rejects_unsafe_bounds(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, message: str
+) -> None:
+    monkeypatch.setenv("COGITO_RECONCILIATION_POLL_SECONDS", "5")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=message):
+        load_settings()

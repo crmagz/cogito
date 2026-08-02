@@ -87,6 +87,10 @@ class Telemetry:
         self._meter = metrics.get_meter("cogito.api")
         self._runs = None
         self._requests = None
+        self._reconciliation_passes = None
+        self._reconciliation_inspections = None
+        self._reconciliation_repairs = None
+        self._reconciliation_failures = None
         if settings.traces_enabled:
             self._tracer_provider = TracerProvider(resource=resource)
             self._tracer_provider.add_span_processor(BatchSpanProcessor(_span_exporter(settings)))
@@ -103,6 +107,12 @@ class Telemetry:
             self._meter = self._meter_provider.get_meter("cogito.api")
             self._runs = self._meter.create_counter("cogito.run.transitions", unit="1")
             self._requests = self._meter.create_counter("cogito.api.requests", unit="1")
+            self._reconciliation_passes = self._meter.create_counter("cogito.reconciliation.passes", unit="1")
+            self._reconciliation_inspections = self._meter.create_counter(
+                "cogito.reconciliation.inspections", unit="1"
+            )
+            self._reconciliation_repairs = self._meter.create_counter("cogito.reconciliation.repairs", unit="1")
+            self._reconciliation_failures = self._meter.create_counter("cogito.reconciliation.failures", unit="1")
 
     @property
     def enabled(self) -> bool:
@@ -128,6 +138,18 @@ class Telemetry:
     def request(self, method: str, status_code: int) -> None:
         if self._requests is not None:
             self._requests.add(1, {"http.request.method": method, "http.response.status_code": status_code})
+
+    def reconciliation_pass(self, *, inspected: int, repaired: int, failures: int) -> None:
+        """Record aggregate reconciliation outcomes without high-cardinality identifiers."""
+
+        if self._reconciliation_passes is not None:
+            self._reconciliation_passes.add(1)
+        if self._reconciliation_inspections is not None and inspected:
+            self._reconciliation_inspections.add(inspected)
+        if self._reconciliation_repairs is not None and repaired:
+            self._reconciliation_repairs.add(repaired)
+        if self._reconciliation_failures is not None and failures:
+            self._reconciliation_failures.add(failures)
 
     def event(self, name: str, attributes: Mapping[str, str] | None = None) -> None:
         if self._settings.span_events_enabled:
