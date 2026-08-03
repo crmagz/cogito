@@ -6,6 +6,7 @@
 {{- $auth := default (dict) .Values.api.auth }}
 {{- $staticAuth := default (dict) $auth.static }}
 {{- $notifications := default (dict) .Values.api.notifications }}
+{{- $notificationProvider := lower (default "webhook" $notifications.provider) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -72,12 +73,19 @@ spec:
                   name: {{ default "cogito-operator-auth" $staticAuth.existingSecret }}
                   key: {{ default "token" $staticAuth.tokenKey }}
             {{- end }}
-            {{- if $notifications.enabled }}
+            {{- if and $notifications.enabled (eq $notificationProvider "webhook") }}
             - name: COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ required "api.notifications.existingSecret is required when notifications are enabled" $notifications.existingSecret }}
                   key: {{ required "api.notifications.hmacSecretKey is required when notifications are enabled" $notifications.hmacSecretKey }}
+            {{- end }}
+            {{- if and $notifications.enabled (eq $notificationProvider "slack") }}
+            - name: COGITO_NOTIFICATION_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "api.notifications.slackExistingSecret is required when Slack notifications are enabled" $notifications.slackExistingSecret }}
+                  key: {{ required "api.notifications.slackBotTokenKey is required when Slack notifications are enabled" $notifications.slackBotTokenKey }}
             {{- end }}
             {{- if .Values.observability.otlp.existingSecret }}
             - name: COGITO_TELEMETRY_OTLP_HEADERS

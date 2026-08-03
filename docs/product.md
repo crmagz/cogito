@@ -48,8 +48,11 @@ The coordination plane exposes authenticated, provider-neutral run and gate
 views for the Operator Workbench. It can deliver allow-listed,
 versioned event snapshots to an explicitly enabled HMAC-signed webhook using
 an independent leased outbox; notification delivery never has authority to
-approve work or signal Temporal directly. Slack and GitHub Issues adapters are
-not part of this release.
+approve work or signal Temporal directly. It also supports an optional
+outbound-only Slack adapter that renders Block Kit messages in one thread per
+run. Its buttons only open the authenticated Workbench; Slack cannot approve,
+reject, revise, or signal Temporal. See the [Slack setup guide](slack.md).
+GitHub Issues adapters are not part of this release.
 
 The Operator Workbench contract is project-scoped and default-deny. New
 planning runs receive a trusted deployment project identity; OIDC principals
@@ -136,6 +139,20 @@ deliberately not represented as completed features yet. The Operator Workbench
 is an independently deployable, evidence-first UI over the scoped API; it does
 not add authority to the worker or browser client. Its production promotion
 still requires an environment-owned OIDC session relay and production values.
+
+## Delivery roadmap
+
+- **Phase 16 — Product-owner dossier: complete.** Scoped, digest- and
+  stage-bound product feedback is append-only and non-executable.
+- **Phase 17 — Threaded Slack notifications: in implementation.** Optional
+  Slack Block Kit messages group each run's lifecycle activity into one thread
+  and link to the authenticated Workbench without creating a Slack control
+  plane. Production readiness requires the Slack workspace acceptance gate.
+- **Next — governed tool execution.** Define MCP registration and strict
+  per-role tool allow-lists before enabling any MCP execution.
+- **Later — delegated A2A sub-agents.** Add separately provisioned services
+  only after their identity, budget, and tool boundaries are independently
+  reviewable.
 
 ## Target agentic ecosystem
 

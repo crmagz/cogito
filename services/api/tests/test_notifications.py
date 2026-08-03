@@ -5,8 +5,17 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from dataclasses import replace
 
-from cogito_api.notifications import NotificationOutboxDispatcher, webhook_event_bytes
+import pytest
+
+from cogito_api.notifications import (
+    NotificationDeliveryError,
+    NotificationOutboxDispatcher,
+    SlackNotificationSink,
+    slack_event_payload,
+    webhook_event_bytes,
+)
 from cogito_api.supervisor import CoordinationEvent
 
 from .fakes import InMemorySupervisorStore
@@ -44,6 +53,131 @@ def test_webhook_event_bytes_are_canonical_and_allow_list_safe() -> None:
         hmac.new(b"test-secret", body, hashlib.sha256).hexdigest(),
         "036d69b1f0058381babcd0a1b1692b65ff820c472c01ff6113fd75a43159dbcf",
     )
+
+
+def test_slack_payload_uses_block_kit_with_a_workbench_link_only() -> None:
+    payload = slack_event_payload(_event(), workbench_url="https://workbench.example.test", thread_ts=None)
+
+    assert payload["text"] == "Cogito run run-1: plan approval requested"
+    assert "thread_ts" not in payload
+    assert "artifact" not in str(payload)
+    assert "action_id" not in str(payload)
+    button = payload["blocks"][2]["elements"][0]
+    assert button["url"] == "https://workbench.example.test/runs/run-1/workflow"
+    assert button["text"]["text"] == "Open in Workbench"
+
+
+async def test_slack_delivery_creates_one_root_and_replies_in_the_same_thread() -> None:
+    store = InMemorySupervisorStore()
+    posts: list[tuple[str, str | None]] = []
+
+    async def post(channel_id: str, thread_ts: str | None) -> str:
+        posts.append((channel_id, thread_ts))
+        return f"{len(posts)}.000000"
+
+    first = _event()
+    second = replace(first, event_id="event-2", event_type="planning_started")
+
+    assert await store.deliver_slack_notification(first, channel_id="C01234567", post=post)
+    assert await store.deliver_slack_notification(second, channel_id="C01234567", post=post)
+    assert await store.deliver_slack_notification(first, channel_id="C01234567", post=post)
+
+    assert posts == [("C01234567", None), ("C01234567", "1.000000")]
+    assert store.slack_notification_threads == {"run-1": ("C01234567", "1.000000")}
+
+
+async def test_slack_sink_posts_a_threaded_block_kit_message_without_leaking_the_token(monkeypatch) -> None:
+    requests: list[tuple[str, dict, dict]] = []
+
+    class Response:
+        status_code = 200
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True, "ts": "1.000000"}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url: str, *, json: dict, headers: dict):
+            requests.append((url, json, headers))
+            return Response()
+
+    monkeypatch.setattr("cogito_api.notifications.httpx.AsyncClient", lambda **_kwargs: Client())
+    sink = SlackNotificationSink(
+        InMemorySupervisorStore(),
+        bot_token="xoxb-secret",
+        channel_id="C01234567",
+        workbench_url="https://workbench.example.test",
+        timeout_seconds=10,
+    )
+
+    assert await sink.deliver(_event())
+
+    url, payload, headers = requests[0]
+    assert url == "https://slack.com/api/chat.postMessage"
+    assert payload["channel"] == "C01234567"
+    assert payload["client_msg_id"] == "event-1"
+    assert headers == {"Authorization": "Bearer xoxb-secret"}
+    assert "xoxb-secret" not in str(payload)
+    assert "artifact" not in str(payload)
+
+
+async def test_slack_sink_honors_a_rate_limit_retry_after(monkeypatch) -> None:
+    class Response:
+        status_code = 429
+        headers = {"Retry-After": "17"}
+
+        def json(self) -> dict[str, object]:
+            return {"ok": False, "error": "ratelimited"}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr("cogito_api.notifications.httpx.AsyncClient", lambda **_kwargs: Client())
+    sink = SlackNotificationSink(
+        InMemorySupervisorStore(),
+        bot_token="xoxb-secret",
+        channel_id="C01234567",
+        workbench_url="https://workbench.example.test",
+        timeout_seconds=10,
+    )
+
+    with pytest.raises(NotificationDeliveryError, match="rate limited") as error:
+        await sink.deliver(_event())
+
+    assert error.value.retry_seconds == 17
+
+
+async def test_notification_dispatcher_uses_a_provider_retry_delay() -> None:
+    class RecordingStore(InMemorySupervisorStore):
+        retry_seconds: int | None = None
+
+        async def release_notification_delivery(self, event_id: str, *, retry_seconds: int, error: str) -> None:
+            self.retry_seconds = retry_seconds
+            await super().release_notification_delivery(event_id, retry_seconds=retry_seconds, error=error)
+
+    class RateLimitedSink:
+        async def deliver(self, event: CoordinationEvent) -> bool:
+            del event
+            raise NotificationDeliveryError("Slack notification request was rate limited", retry_seconds=17)
+
+    store = RecordingStore()
+    store.coordination_events["event-1"] = _event()
+    store.notification_deliveries["event-1"] = (False, 0, None)
+
+    assert await NotificationOutboxDispatcher(store, RateLimitedSink()).deliver_once() == set()
+    assert store.retry_seconds == 17
 
 
 async def test_notification_failure_does_not_change_authoritative_run_state() -> None:

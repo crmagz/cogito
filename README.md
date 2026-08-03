@@ -14,6 +14,9 @@ API, worker, and Helm chart artifacts.
 Operational health, reconciliation boundaries, and incident response are
 documented in the [operations guide](docs/operations.md).
 
+Optional personal-workspace Slack notifications and their least-privilege
+setup are documented in the [Slack guide](docs/slack.md).
+
 ## Helm Chart
 
 Cogito deploys as an umbrella Helm chart with the following components:

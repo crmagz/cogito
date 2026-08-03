@@ -30,6 +30,7 @@ from cogito_api.supervisor import (
     WorkbenchApprovalRecord,
     WorkbenchFeedbackRecord,
     RegistryConflictError,
+    SlackNotificationPoster,
 )
 
 
@@ -121,6 +122,8 @@ class InMemorySupervisorStore:
         self.coordination_events: dict[str, CoordinationEvent] = {}
         self.notification_deliveries: dict[str, tuple[bool, int, str | None]] = {}
         self.leased_notification_event_ids: set[str] = set()
+        self.slack_notification_threads: dict[str, tuple[str, str]] = {}
+        self.slack_notification_messages: dict[str, str] = {}
         self.workbench_feedback: dict[tuple[str, str], WorkbenchFeedbackRecord] = {}
         self.workbench_feedback_request_hashes: dict[tuple[str, str], str] = {}
 
@@ -629,6 +632,22 @@ class InMemorySupervisorStore:
             if len(claimed) == limit:
                 break
         return claimed
+
+    async def deliver_slack_notification(
+        self, event: CoordinationEvent, *, channel_id: str, post: SlackNotificationPoster
+    ) -> bool:
+        if event.event_id in self.slack_notification_messages:
+            return True
+        thread = self.slack_notification_threads.get(event.run_id)
+        if thread is None:
+            message_ts = await post(channel_id, None)
+            self.slack_notification_threads[event.run_id] = (channel_id, message_ts)
+            root_message_ts = message_ts
+        else:
+            configured_channel_id, root_message_ts = thread
+            message_ts = await post(configured_channel_id, root_message_ts)
+        self.slack_notification_messages[event.event_id] = message_ts
+        return True
 
     async def mark_notification_delivered(self, event_id: str) -> None:
         _, attempts, _ = self.notification_deliveries[event_id]

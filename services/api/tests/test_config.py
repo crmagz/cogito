@@ -70,6 +70,28 @@ def test_production_notifications_require_https(monkeypatch: pytest.MonkeyPatch)
         load_settings()
 
 
+def test_slack_notifications_require_a_bot_token_and_workbench_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COGITO_NOTIFICATION_ENABLED", "true")
+    monkeypatch.setenv("COGITO_NOTIFICATION_PROVIDER", "slack")
+    monkeypatch.setenv("COGITO_NOTIFICATION_SLACK_CHANNEL_ID", "C01234567")
+    monkeypatch.setenv("COGITO_NOTIFICATION_SLACK_WORKBENCH_URL", "https://workbench.example.test")
+    monkeypatch.delenv("COGITO_NOTIFICATION_SLACK_BOT_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="SLACK_BOT_TOKEN is required"):
+        load_settings()
+
+
+def test_slack_notifications_require_an_https_workbench_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COGITO_NOTIFICATION_ENABLED", "true")
+    monkeypatch.setenv("COGITO_NOTIFICATION_PROVIDER", "slack")
+    monkeypatch.setenv("COGITO_NOTIFICATION_SLACK_CHANNEL_ID", "C01234567")
+    monkeypatch.setenv("COGITO_NOTIFICATION_SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("COGITO_NOTIFICATION_SLACK_WORKBENCH_URL", "http://workbench.example.test")
+
+    with pytest.raises(ValueError, match="must be an absolute HTTPS URL"):
+        load_settings()
+
+
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [

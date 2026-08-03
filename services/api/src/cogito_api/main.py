@@ -194,7 +194,7 @@ def create_app(
 
     dispatcher = PlanApprovalOutboxDispatcher(supervisor_store, starter)
     implementation_dispatcher = ImplementationApprovalOutboxDispatcher(supervisor_store, starter)
-    sink = notification_sink(settings)
+    sink = notification_sink(settings, supervisor_store)
     notification_dispatcher = NotificationOutboxDispatcher(supervisor_store, sink) if sink is not None else None
     reconciler = (
         WorkflowProjectionReconciler(
