@@ -26,7 +26,7 @@ def upgrade() -> None:
         sa.Column("intent", sa.String(length=32), nullable=False),
         sa.Column("artifact_sha256", sa.String(length=64), nullable=False),
         sa.Column("stage_id", sa.String(length=128), nullable=False),
-        sa.Column("actor_id", sa.String(length=256), nullable=False),
+        sa.Column("actor_id", sa.String(length=512), nullable=False),
         sa.Column("comment", sa.Text(), nullable=False),
         sa.Column("idempotency_key", sa.String(length=256), nullable=False),
         sa.Column("request_sha256", sa.String(length=64), nullable=False),

@@ -1284,8 +1284,11 @@ def create_app(
         require_workbench_scope(record, principal)
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
+        comment = request_body.comment.strip()
         request_sha256 = sha256(
-            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(
+                request_body.model_dump(mode="json") | {"comment": comment}, sort_keys=True, separators=(",", ":")
+            ).encode()
         ).hexdigest()
         try:
             feedback = await supervisor_store.record_workbench_feedback(
@@ -1294,7 +1297,7 @@ def create_app(
                 artifact_sha256=request_body.artifact_sha256,
                 stage_id=request_body.stage_id,
                 actor_id=principal.subject,
-                comment=request_body.comment,
+                comment=comment,
                 idempotency_key=idempotency_key,
                 request_sha256=request_sha256,
             )
