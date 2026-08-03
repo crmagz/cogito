@@ -1745,6 +1745,12 @@ class PostgresSupervisorStore:
                 {"run_id": event.run_id},
             )
             thread = thread_result.mappings().one()
+            delivered = await connection.execute(
+                text("SELECT message_ts FROM slack_notification_messages WHERE event_id = :event_id"),
+                {"event_id": event.event_id},
+            )
+            if delivered.mappings().one_or_none() is not None:
+                return True
             root_message_ts = thread["root_message_ts"]
             message_ts = await post(thread["channel_id"], root_message_ts)
             if root_message_ts is None:

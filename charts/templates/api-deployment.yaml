@@ -6,7 +6,7 @@
 {{- $auth := default (dict) .Values.api.auth }}
 {{- $staticAuth := default (dict) $auth.static }}
 {{- $notifications := default (dict) .Values.api.notifications }}
-{{- $notificationProvider := default "webhook" $notifications.provider }}
+{{- $notificationProvider := lower (default "webhook" $notifications.provider) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

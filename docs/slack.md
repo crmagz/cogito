@@ -1,10 +1,16 @@
 # Slack notifications
 
-Cogito can post outbound-only, Slack-native Block Kit notifications. One root
-message is created for each Cogito run; later lifecycle and approval events are
-replies in that message's thread. Each message has a URL button to the
-authenticated Workbench. Slack cannot approve, reject, revise, or otherwise
-signal a Cogito workflow.
+Cogito can post outbound-only, Slack-native Block Kit notifications. Under
+normal delivery, one root message is created for each Cogito run; later
+lifecycle and approval events are replies in that message's thread. Each
+message has a URL button to the authenticated Workbench. Slack cannot approve,
+reject, revise, or otherwise signal a Cogito workflow.
+
+Delivery is at-least-once. Cogito persists a per-run thread identity and a
+per-event message mapping, but an external Slack acknowledgement and a database
+commit cannot be atomic. A process failure in that narrow interval can cause a
+retry and a duplicate Slack message; it never changes workflow or approval
+state.
 
 ## Create a private Slack app
 

@@ -25,6 +25,14 @@ class NotificationSink(Protocol):
     async def deliver(self, event: CoordinationEvent) -> bool: ...
 
 
+class NotificationDeliveryError(RuntimeError):
+    """A safe delivery failure with an optional provider-directed retry delay."""
+
+    def __init__(self, message: str, *, retry_seconds: int | None = None):
+        super().__init__(message)
+        self.retry_seconds = retry_seconds
+
+
 class WebhookNotificationSink:
     """Deliver canonical event snapshots with an HMAC over the exact body."""
 
@@ -73,12 +81,23 @@ class SlackNotificationSink:
         async def post(channel_id: str, thread_ts: str | None) -> str:
             payload = slack_event_payload(event, workbench_url=self._workbench_url, thread_ts=thread_ts)
             payload["channel"] = channel_id
+            payload["client_msg_id"] = event.event_id
             headers = {"Authorization": f"Bearer {self._bot_token}"}
             async with httpx.AsyncClient(follow_redirects=False, timeout=self._timeout_seconds) as client:
                 response = await client.post("https://slack.com/api/chat.postMessage", json=payload, headers=headers)
+            if response.status_code == 429:
+                raise NotificationDeliveryError(
+                    "Slack notification request was rate limited",
+                    retry_seconds=_slack_retry_after(response.headers.get("Retry-After")),
+                )
             if not 200 <= response.status_code < 300:
                 raise RuntimeError("Slack notification request was not acknowledged")
             body = response.json()
+            if isinstance(body, dict) and body.get("error") == "ratelimited":
+                raise NotificationDeliveryError(
+                    "Slack notification request was rate limited",
+                    retry_seconds=_slack_retry_after(response.headers.get("Retry-After")),
+                )
             if not isinstance(body, dict) or body.get("ok") is not True or not isinstance(body.get("ts"), str):
                 raise RuntimeError("Slack notification request was rejected")
             return body["ts"]
@@ -89,18 +108,28 @@ class SlackNotificationSink:
 class NotificationOutboxDispatcher:
     """Lease and deliver notifications independently from Temporal approval delivery."""
 
-    def __init__(self, store: SupervisorStore, sink: NotificationSink, poll_seconds: float = 1.0):
+    def __init__(
+        self, store: SupervisorStore, sink: NotificationSink, poll_seconds: float = 1.0, lease_seconds: int = 90
+    ):
         self._store = store
         self._sink = sink
         self._poll_seconds = poll_seconds
+        self._lease_seconds = lease_seconds
 
     async def deliver_once(self, limit: int = 10) -> set[str]:
         """Attempt a bounded delivery batch and return acknowledged event IDs."""
 
         delivered: set[str] = set()
-        for item in await self._store.claim_notification_deliveries(limit=limit, lease_seconds=30):
+        for item in await self._store.claim_notification_deliveries(limit=limit, lease_seconds=self._lease_seconds):
             try:
                 accepted = await self._sink.deliver(item.event)
+            except NotificationDeliveryError as error:
+                await self._store.release_notification_delivery(
+                    item.event.event_id,
+                    retry_seconds=error.retry_seconds or _retry_delay(item.attempt_count),
+                    error="transient notification delivery failure",
+                )
+                continue
             except Exception:
                 await self._store.release_notification_delivery(
                     item.event.event_id,
@@ -222,3 +251,15 @@ def _retry_delay(attempt_count: int) -> int:
     """Use the same bounded exponential retry cadence as approval outboxes."""
 
     return min(60, 2 ** min(attempt_count, 6))
+
+
+def _slack_retry_after(value: str | None) -> int | None:
+    """Return Slack's bounded retry hint only when it is a positive integer."""
+
+    if value is None:
+        return None
+    try:
+        seconds = int(value)
+    except ValueError:
+        return None
+    return min(3600, seconds) if seconds > 0 else None

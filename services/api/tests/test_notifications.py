@@ -7,7 +7,15 @@ import hmac
 import json
 from dataclasses import replace
 
-from cogito_api.notifications import NotificationOutboxDispatcher, SlackNotificationSink, slack_event_payload, webhook_event_bytes
+import pytest
+
+from cogito_api.notifications import (
+    NotificationDeliveryError,
+    NotificationOutboxDispatcher,
+    SlackNotificationSink,
+    slack_event_payload,
+    webhook_event_bytes,
+)
 from cogito_api.supervisor import CoordinationEvent
 
 from .fakes import InMemorySupervisorStore
@@ -112,9 +120,64 @@ async def test_slack_sink_posts_a_threaded_block_kit_message_without_leaking_the
     url, payload, headers = requests[0]
     assert url == "https://slack.com/api/chat.postMessage"
     assert payload["channel"] == "C01234567"
+    assert payload["client_msg_id"] == "event-1"
     assert headers == {"Authorization": "Bearer xoxb-secret"}
     assert "xoxb-secret" not in str(payload)
     assert "artifact" not in str(payload)
+
+
+async def test_slack_sink_honors_a_rate_limit_retry_after(monkeypatch) -> None:
+    class Response:
+        status_code = 429
+        headers = {"Retry-After": "17"}
+
+        def json(self) -> dict[str, object]:
+            return {"ok": False, "error": "ratelimited"}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr("cogito_api.notifications.httpx.AsyncClient", lambda **_kwargs: Client())
+    sink = SlackNotificationSink(
+        InMemorySupervisorStore(),
+        bot_token="xoxb-secret",
+        channel_id="C01234567",
+        workbench_url="https://workbench.example.test",
+        timeout_seconds=10,
+    )
+
+    with pytest.raises(NotificationDeliveryError, match="rate limited") as error:
+        await sink.deliver(_event())
+
+    assert error.value.retry_seconds == 17
+
+
+async def test_notification_dispatcher_uses_a_provider_retry_delay() -> None:
+    class RecordingStore(InMemorySupervisorStore):
+        retry_seconds: int | None = None
+
+        async def release_notification_delivery(self, event_id: str, *, retry_seconds: int, error: str) -> None:
+            self.retry_seconds = retry_seconds
+            await super().release_notification_delivery(event_id, retry_seconds=retry_seconds, error=error)
+
+    class RateLimitedSink:
+        async def deliver(self, event: CoordinationEvent) -> bool:
+            del event
+            raise NotificationDeliveryError("Slack notification request was rate limited", retry_seconds=17)
+
+    store = RecordingStore()
+    store.coordination_events["event-1"] = _event()
+    store.notification_deliveries["event-1"] = (False, 0, None)
+
+    assert await NotificationOutboxDispatcher(store, RateLimitedSink()).deliver_once() == set()
+    assert store.retry_seconds == 17
 
 
 async def test_notification_failure_does_not_change_authoritative_run_state() -> None:

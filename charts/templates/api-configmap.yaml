@@ -7,7 +7,7 @@
 {{- $staticAuth := default (dict) $auth.static }}
 {{- $oidcAuth := default (dict) $auth.oidc }}
 {{- $notifications := default (dict) .Values.api.notifications }}
-{{- $notificationProvider := default "webhook" $notifications.provider }}
+{{- $notificationProvider := lower (default "webhook" $notifications.provider) }}
 {{- $reconciliation := default (dict) .Values.api.reconciliation }}
 {{- $reconciliationEnabled := true }}
 {{- $reconciliationPollSeconds := 5 }}
