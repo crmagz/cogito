@@ -9,6 +9,7 @@ import hmac
 import json
 import logging
 from typing import Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -48,6 +49,43 @@ class WebhookNotificationSink:
         return 200 <= response.status_code < 300
 
 
+class SlackNotificationSink:
+    """Deliver safe Block Kit notifications in one durable Slack thread per run."""
+
+    def __init__(
+        self,
+        store: SupervisorStore,
+        *,
+        bot_token: str,
+        channel_id: str,
+        workbench_url: str,
+        timeout_seconds: float,
+    ):
+        self._store = store
+        self._bot_token = bot_token
+        self._channel_id = channel_id
+        self._workbench_url = workbench_url.rstrip("/")
+        self._timeout_seconds = timeout_seconds
+
+    async def deliver(self, event: CoordinationEvent) -> bool:
+        """Post one lifecycle event without accepting any Slack-originated action."""
+
+        async def post(channel_id: str, thread_ts: str | None) -> str:
+            payload = slack_event_payload(event, workbench_url=self._workbench_url, thread_ts=thread_ts)
+            payload["channel"] = channel_id
+            headers = {"Authorization": f"Bearer {self._bot_token}"}
+            async with httpx.AsyncClient(follow_redirects=False, timeout=self._timeout_seconds) as client:
+                response = await client.post("https://slack.com/api/chat.postMessage", json=payload, headers=headers)
+            if not 200 <= response.status_code < 300:
+                raise RuntimeError("Slack notification request was not acknowledged")
+            body = response.json()
+            if not isinstance(body, dict) or body.get("ok") is not True or not isinstance(body.get("ts"), str):
+                raise RuntimeError("Slack notification request was rejected")
+            return body["ts"]
+
+        return await self._store.deliver_slack_notification(event, channel_id=self._channel_id, post=post)
+
+
 class NotificationOutboxDispatcher:
     """Lease and deliver notifications independently from Temporal approval delivery."""
 
@@ -77,7 +115,7 @@ class NotificationOutboxDispatcher:
                 await self._store.release_notification_delivery(
                     item.event.event_id,
                     retry_seconds=_retry_delay(item.attempt_count),
-                    error="notification webhook did not acknowledge event",
+                    error="notification sink did not acknowledge event",
                 )
         return delivered
 
@@ -125,11 +163,54 @@ def webhook_event_bytes(event: CoordinationEvent) -> bytes:
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
 
 
-def notification_sink(settings: Settings) -> NotificationSink | None:
-    """Return the enabled webhook sink, leaving disabled deployments network-silent."""
+def slack_event_payload(event: CoordinationEvent, *, workbench_url: str, thread_ts: str | None) -> dict[str, object]:
+    """Render a minimal Slack-native card without internal artifact identities."""
+
+    run_url = f"{workbench_url}/runs/{quote(event.run_id, safe='')}/workflow"
+    event_label = event.event_type.replace("_", " ")
+    details = [f"*Event:* {event_label}", f"*Run:* `{event.run_id}`", f"*Occurred:* {event.occurred_at}"]
+    if event.gate:
+        details.append(f"*Gate:* {event.gate}")
+    payload: dict[str, object] = {
+        "channel": "",
+        "text": f"Cogito run {event.run_id}: {event_label}",
+        "blocks": [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": f"Cogito run {event.run_id[:12]}"},
+            },
+            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(details)}},
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Open in Workbench"},
+                        "url": run_url,
+                        "accessibility_label": "Open this Cogito run in the authenticated Workbench",
+                    }
+                ],
+            },
+        ],
+    }
+    if thread_ts is not None:
+        payload["thread_ts"] = thread_ts
+    return payload
+
+
+def notification_sink(settings: Settings, store: SupervisorStore) -> NotificationSink | None:
+    """Return the configured outbound-only sink, leaving disabled deployments network-silent."""
 
     if not settings.notification_enabled:
         return None
+    if settings.notification_provider == "slack":
+        return SlackNotificationSink(
+            store,
+            bot_token=settings.notification_slack_bot_token,
+            channel_id=settings.notification_slack_channel_id,
+            workbench_url=settings.notification_slack_workbench_url,
+            timeout_seconds=settings.notification_timeout_seconds,
+        )
     return WebhookNotificationSink(
         settings.notification_webhook_url,
         settings.notification_webhook_hmac_secret,

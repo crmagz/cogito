@@ -7,6 +7,7 @@
 {{- $staticAuth := default (dict) $auth.static }}
 {{- $oidcAuth := default (dict) $auth.oidc }}
 {{- $notifications := default (dict) .Values.api.notifications }}
+{{- $notificationProvider := default "webhook" $notifications.provider }}
 {{- $reconciliation := default (dict) .Values.api.reconciliation }}
 {{- $reconciliationEnabled := true }}
 {{- $reconciliationPollSeconds := 5 }}
@@ -64,7 +65,10 @@ data:
   COGITO_WORKBENCH_DEFAULT_PROJECT_ID: {{ default "default" $auth.defaultProjectId | quote }}
   COGITO_REGISTRY_CATALOG_PATH: "/app/components"
   COGITO_NOTIFICATION_ENABLED: {{ default false $notifications.enabled | quote }}
+  COGITO_NOTIFICATION_PROVIDER: {{ $notificationProvider | quote }}
   COGITO_NOTIFICATION_WEBHOOK_URL: {{ default "" $notifications.webhookUrl | quote }}
+  COGITO_NOTIFICATION_SLACK_CHANNEL_ID: {{ default "" $notifications.slackChannelId | quote }}
+  COGITO_NOTIFICATION_SLACK_WORKBENCH_URL: {{ default "" $notifications.slackWorkbenchUrl | quote }}
   COGITO_NOTIFICATION_TIMEOUT_SECONDS: {{ default 10 $notifications.timeoutSeconds | quote }}
   COGITO_RECONCILIATION_ENABLED: {{ $reconciliationEnabled | quote }}
   COGITO_RECONCILIATION_POLL_SECONDS: {{ $reconciliationPollSeconds | quote }}

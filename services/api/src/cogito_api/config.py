@@ -50,8 +50,12 @@ class Settings:
     workbench_default_project_id: str
     registry_catalog_path: str
     notification_enabled: bool
+    notification_provider: str
     notification_webhook_url: str
     notification_webhook_hmac_secret: str
+    notification_slack_channel_id: str
+    notification_slack_bot_token: str
+    notification_slack_workbench_url: str
     notification_timeout_seconds: float
     reconciliation_enabled: bool
     reconciliation_poll_seconds: int
@@ -136,8 +140,12 @@ def load_settings() -> Settings:
             str(_default_registry_catalog_path()),
         ),
         notification_enabled=os.environ.get("COGITO_NOTIFICATION_ENABLED", "false").lower() == "true",
+        notification_provider=os.environ.get("COGITO_NOTIFICATION_PROVIDER", "webhook").lower(),
         notification_webhook_url=os.environ.get("COGITO_NOTIFICATION_WEBHOOK_URL", ""),
         notification_webhook_hmac_secret=os.environ.get("COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET", ""),
+        notification_slack_channel_id=os.environ.get("COGITO_NOTIFICATION_SLACK_CHANNEL_ID", ""),
+        notification_slack_bot_token=os.environ.get("COGITO_NOTIFICATION_SLACK_BOT_TOKEN", ""),
+        notification_slack_workbench_url=os.environ.get("COGITO_NOTIFICATION_SLACK_WORKBENCH_URL", ""),
         notification_timeout_seconds=float(os.environ.get("COGITO_NOTIFICATION_TIMEOUT_SECONDS", "10")),
         reconciliation_enabled=os.environ.get("COGITO_RECONCILIATION_ENABLED", "true").lower() == "true",
         reconciliation_poll_seconds=int(os.environ.get("COGITO_RECONCILIATION_POLL_SECONDS", "5")),
@@ -196,12 +204,30 @@ def _validate_auth_configuration(settings: Settings) -> None:
         raise ValueError("COGITO_RECONCILIATION_STALL_SECONDS must be at least twice the poll interval")
     if not settings.notification_enabled:
         return
-    if not settings.notification_webhook_hmac_secret:
-        raise ValueError("COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET is required when notifications are enabled")
-    parsed = urlparse(settings.notification_webhook_url)
-    if parsed.username or parsed.password or not parsed.hostname or parsed.fragment:
-        raise ValueError("COGITO_NOTIFICATION_WEBHOOK_URL must be an absolute URL without credentials or a fragment")
-    if settings.deployment_mode == "production" and parsed.scheme != "https":
-        raise ValueError("production notification webhook URL must use HTTPS")
-    if settings.deployment_mode == "development" and parsed.scheme not in {"http", "https"}:
-        raise ValueError("development notification webhook URL must use HTTP or HTTPS")
+    if settings.notification_provider == "webhook":
+        if not settings.notification_webhook_hmac_secret:
+            raise ValueError("COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET is required when notifications are enabled")
+        parsed = urlparse(settings.notification_webhook_url)
+        if parsed.username or parsed.password or not parsed.hostname or parsed.fragment:
+            raise ValueError("COGITO_NOTIFICATION_WEBHOOK_URL must be an absolute URL without credentials or a fragment")
+        if settings.deployment_mode == "production" and parsed.scheme != "https":
+            raise ValueError("production notification webhook URL must use HTTPS")
+        if settings.deployment_mode == "development" and parsed.scheme not in {"http", "https"}:
+            raise ValueError("development notification webhook URL must use HTTP or HTTPS")
+        return
+    if settings.notification_provider != "slack":
+        raise ValueError("COGITO_NOTIFICATION_PROVIDER must be webhook or slack")
+    if not settings.notification_slack_bot_token:
+        raise ValueError("COGITO_NOTIFICATION_SLACK_BOT_TOKEN is required when Slack notifications are enabled")
+    if not 1 <= len(settings.notification_slack_channel_id) <= 64 or not settings.notification_slack_channel_id.strip():
+        raise ValueError("COGITO_NOTIFICATION_SLACK_CHANNEL_ID must be a non-empty channel identifier")
+    parsed = urlparse(settings.notification_slack_workbench_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or not parsed.hostname
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("COGITO_NOTIFICATION_SLACK_WORKBENCH_URL must be an absolute HTTPS URL without credentials, query, or fragment")

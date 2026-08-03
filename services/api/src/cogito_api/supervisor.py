@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
-from typing import Any, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -144,6 +144,9 @@ class NotificationDelivery:
 
     event: CoordinationEvent
     attempt_count: int
+
+
+SlackNotificationPoster = Callable[[str, str | None], Awaitable[str]]
 
 
 @dataclass(frozen=True)
@@ -327,6 +330,10 @@ class SupervisorStore(Protocol):
     async def list_workbench_runs(self, *, project_ids: frozenset[str], limit: int = 50) -> list[PlanningRunRecord]: ...
 
     async def claim_notification_deliveries(self, *, limit: int, lease_seconds: int) -> list[NotificationDelivery]: ...
+
+    async def deliver_slack_notification(
+        self, event: CoordinationEvent, *, channel_id: str, post: SlackNotificationPoster
+    ) -> bool: ...
 
     async def mark_notification_delivered(self, event_id: str) -> None: ...
 
@@ -1703,6 +1710,71 @@ class PostgresSupervisorStore:
             NotificationDelivery(event=_coordination_event(row), attempt_count=int(row["attempt_count"]) + 1)
             for row in rows
         ]
+
+    async def deliver_slack_notification(
+        self, event: CoordinationEvent, *, channel_id: str, post: SlackNotificationPoster
+    ) -> bool:
+        """Post one event in its run thread while serializing concurrent run deliveries."""
+
+        async with self._engine.begin() as connection:
+            delivered = await connection.execute(
+                text("SELECT message_ts FROM slack_notification_messages WHERE event_id = :event_id"),
+                {"event_id": event.event_id},
+            )
+            if delivered.mappings().one_or_none() is not None:
+                return True
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO slack_notification_threads (run_id, channel_id, root_message_ts, created_at)
+                    VALUES (:run_id, :channel_id, NULL, now())
+                    ON CONFLICT (run_id) DO NOTHING
+                    """
+                ),
+                {"run_id": event.run_id, "channel_id": channel_id},
+            )
+            thread_result = await connection.execute(
+                text(
+                    """
+                    SELECT channel_id, root_message_ts
+                    FROM slack_notification_threads
+                    WHERE run_id = :run_id
+                    FOR UPDATE
+                    """
+                ),
+                {"run_id": event.run_id},
+            )
+            thread = thread_result.mappings().one()
+            root_message_ts = thread["root_message_ts"]
+            message_ts = await post(thread["channel_id"], root_message_ts)
+            if root_message_ts is None:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE slack_notification_threads
+                        SET root_message_ts = :root_message_ts
+                        WHERE run_id = :run_id AND root_message_ts IS NULL
+                        """
+                    ),
+                    {"run_id": event.run_id, "root_message_ts": message_ts},
+                )
+                root_message_ts = message_ts
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO slack_notification_messages (
+                        event_id, run_id, root_message_ts, message_ts, created_at
+                    ) VALUES (:event_id, :run_id, :root_message_ts, :message_ts, now())
+                    """
+                ),
+                {
+                    "event_id": event.event_id,
+                    "run_id": event.run_id,
+                    "root_message_ts": root_message_ts,
+                    "message_ts": message_ts,
+                },
+            )
+        return True
 
     async def mark_notification_delivered(self, event_id: str) -> None:
         """Persist one successful webhook acknowledgement without touching workflow state."""
