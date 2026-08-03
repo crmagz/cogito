@@ -146,6 +146,14 @@ def test_workbench_feedback_is_digest_bound_idempotent_and_non_executable(client
     assert supervisor_store.planning_runs[run_id].status is PlanningRunStatus.AWAITING_PLAN_APPROVAL
     assert stale.status_code == 409
 
+    whitespace_replay = client.post(
+        f"/api/v1/workbench/runs/{run_id}/feedback",
+        json={**payload, "comment": f"  {payload['comment']}  "},
+        headers=_headers("feedback-key"),
+    )
+    assert whitespace_replay.status_code == 202
+    assert whitespace_replay.json() == first.json()
+
     collision = client.post(
         f"/api/v1/workbench/runs/{run_id}/feedback",
         json={**payload, "comment": "A different note."},
@@ -166,6 +174,37 @@ def test_workbench_feedback_is_digest_bound_idempotent_and_non_executable(client
         headers=_headers("feedback-invalid-stage"),
     )
     assert invalid_stage.status_code == 422
+
+
+def test_workbench_feedback_accepts_a_512_character_oidc_subject(valid_plan) -> None:
+    store = InMemoryPlanStore()
+    supervisor_store = InMemorySupervisorStore()
+    subject = "o" * 512
+    client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(auth_static_subject=subject),
+            starter=FakeRunStarter(),
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+    run_id, digest = _awaiting_plan(client, valid_plan)
+
+    response = client.post(
+        f"/api/v1/workbench/runs/{run_id}/feedback",
+        json={
+            "intent": "note",
+            "artifact_sha256": digest,
+            "stage_id": "plan_approval",
+            "comment": "Keep the full OIDC subject.",
+        },
+        headers=_headers("long-actor"),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["actor_id"] == subject
 
 
 def test_workbench_feedback_hides_foreign_run(valid_plan) -> None:
