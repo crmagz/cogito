@@ -1,0 +1,67 @@
+{{- $mcp := default (dict) .Values.mcp }}
+{{- if $mcp.enabled }}
+{{- $image := merge (deepCopy .Values.worker.image) (default (dict) $mcp.image) }}
+{{- $service := default (dict) $mcp.service }}
+{{- $port := default 8000 $service.port }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-readonly-mcp
+  labels:
+    app.kubernetes.io/name: readonly-mcp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: readonly-mcp
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: readonly-mcp
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: readonly-mcp
+          image: {{ include "cogito.image" (dict "root" . "image" $image) | quote }}
+          imagePullPolicy: {{ $image.pullPolicy }}
+          command: ["python", "-m", "cogito_worker.readonly_mcp"]
+          ports:
+            - name: http
+              containerPort: {{ $port | int }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-readonly-mcp
+  labels:
+    app.kubernetes.io/name: readonly-mcp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: readonly-mcp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ $port | int }}
+      targetPort: http
+{{- end }}

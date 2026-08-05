@@ -373,6 +373,15 @@ litellm:
       existingSecret: cogito-reviewer-secondary-key
       apiKeyKey: api-key
 
+## @section Governed MCP validation
+## The deterministic read-only server is disabled by default. It is intended
+## only for in-cluster authorization-path validation and has no credentials.
+mcp:
+  enabled: false
+  image: {}
+  service:
+    port: 8000
+
 ## @section API
 ## Plan submission API: schema/DAG/constraint validation and plan storage in the object store.
 
