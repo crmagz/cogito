@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from cogito_worker.execution import CommandResult
 from cogito_worker.harness import ClaudeCodeHarness
-from cogito_worker.models import BackupExecutionRequest, ExecutionWorkspace, PhaseExecutionRequest, PlanPhase
+from cogito_worker.models import (
+    BackupExecutionRequest,
+    ExecutionWorkspace,
+    McpServerConfiguration,
+    PhaseExecutionRequest,
+    PlanPhase,
+)
 
 
 class ScriptedWorkspaces:
@@ -42,7 +49,9 @@ class ScriptedWorkspaces:
         timeout_seconds: int = 60,
     ) -> CommandResult:
         self.calls.append((command, stdin))
-        if command[0] == "claude":
+        if command[:2] == ["sh", "-ec"] and "claude mcp add" in command[2]:
+            return CommandResult(0, "", "")
+        if command[:2] == ["sh", "-ec"] and "exec claude" in command[2]:
             return CommandResult(self._agent_exit_code, self._agent_stdout, self._agent_stderr)
         if command[-2:] == ["branch", "--show-current"]:
             return CommandResult(0, "adp/run-1\n", "")
@@ -102,19 +111,51 @@ async def test_harness_records_turns_cost_changes_verification_and_published_com
     assert result.changed_files == ["/workspace/repos/example:src/feature.py"]
     assert result.commits == {"/workspace/repos/example": "after"}
     assert result.verification[0].passed is True
-    agent_command, prompt = next((command, stdin) for command, stdin in workspaces.calls if command[0] == "claude")
+    agent_command, prompt = next((command, stdin) for command, stdin in workspaces.calls if "exec claude" in command[2])
     assert agent_command == [
-        "claude",
-        "--print",
-        "--output-format",
-        "json",
-        "--max-turns",
+        "sh",
+        "-ec",
+        'cd "$1" && exec claude --print --output-format json --max-turns "$2" --dangerously-skip-permissions',
+        "sh",
+        "/workspace",
         "7",
-        "--dangerously-skip-permissions",
     ]
     assert "Resolved immutable specifications: /workspace/specs" in prompt
     assert "adp/run-1" in prompt
     assert workspaces.calls[-1][0][-4:] == ["push", "--set-upstream", "origin", "adp/run-1"]
+
+
+async def test_harness_configures_only_the_workspace_mcp_routes_before_claude_runs() -> None:
+    workspaces = ScriptedWorkspaces()
+    request = _request()
+    request = replace(
+        request,
+        workspace=replace(
+            request.workspace,
+            mcp_servers=[
+                McpServerConfiguration(
+                    registration_id="cogito_readonly_mcp",
+                    name="cogito_readonly",
+                    url="http://cogito-litellm:4000/cogito_readonly/mcp",
+                )
+            ],
+        ),
+    )
+
+    result = await ClaudeCodeHarness(workspaces).execute_phase(request)  # type: ignore[arg-type]
+
+    assert result.succeeded is True
+    mcp_command, _ = next((command, stdin) for command, stdin in workspaces.calls if "claude mcp add" in command[2])
+    assert mcp_command == [
+        "sh",
+        "-ec",
+        'cd "$1" && claude mcp add --scope local --transport http "$2" "$3" '
+        "--header 'Authorization: Bearer ${ANTHROPIC_AUTH_TOKEN}'",
+        "sh",
+        "/workspace",
+        "cogito_readonly",
+        "http://cogito-litellm:4000/cogito_readonly/mcp",
+    ]
 
 
 async def test_harness_does_not_publish_when_verification_fails() -> None:

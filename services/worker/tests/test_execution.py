@@ -254,7 +254,9 @@ async def test_provisioned_run_key_maps_only_pinned_mcp_grants_to_gateway_identi
 
     gateway_server_id = "a" * 32
     settings = replace(
-        execution_settings(), mcp_gateway_server_ids={"cogito_readonly_mcp": gateway_server_id}
+        execution_settings(),
+        mcp_gateway_server_ids={"cogito_readonly_mcp": gateway_server_id},
+        mcp_gateway_server_routes={"cogito_readonly_mcp": "cogito_readonly"},
     )
     run_keys = RecordingRunKeys()
     service = ExecutionWorkspaceService(settings, InMemoryExecutionJobClient(), run_keys)

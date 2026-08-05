@@ -99,6 +99,16 @@ class ExecutionWorkspace:
     base_commits: dict[str, str] = field(default_factory=dict)
     run_key_secret: str = ""
     run_git_secret: str = ""
+    mcp_servers: list["McpServerConfiguration"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class McpServerConfiguration:
+    """Non-secret gateway route configured for an approved execution workspace."""
+
+    registration_id: str
+    name: str
+    url: str
 
 
 @dataclass(frozen=True)

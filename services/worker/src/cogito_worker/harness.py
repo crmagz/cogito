@@ -282,21 +282,42 @@ class ClaudeCodeHarness:
         return ReviewRevisionResult(True, agent.summary, commits, changed_files, verification)
 
     async def _run_agent(self, request: PhaseExecutionRequest) -> _AgentResult:
+        await self._configure_mcp(request.workspace)
         result = await self._workspaces.execute(
             request.workspace,
             [
-                "claude",
-                "--print",
-                "--output-format",
-                "json",
-                "--max-turns",
+                "sh",
+                "-ec",
+                'cd "$1" && exec claude --print --output-format json --max-turns "$2" --dangerously-skip-permissions',
+                "sh",
+                request.workspace.workspace_root,
                 str(request.max_turns),
-                "--dangerously-skip-permissions",
             ],
             stdin=_assemble_prompt(request),
             timeout_seconds=request.timeout_seconds,
         )
         return _parse_agent_result(result, request.max_turns)
+
+    async def _configure_mcp(self, workspace: ExecutionWorkspace) -> None:
+        """Configure only the Supervisor-approved MCP routes for this run's Claude process."""
+
+        for server in workspace.mcp_servers:
+            result = await self._workspaces.execute(
+                workspace,
+                [
+                    "sh",
+                    "-ec",
+                    'cd "$1" && claude mcp add --scope local --transport http "$2" "$3" '
+                    "--header 'Authorization: Bearer ${ANTHROPIC_AUTH_TOKEN}'",
+                    "sh",
+                    workspace.workspace_root,
+                    server.name,
+                    server.url,
+                ],
+                timeout_seconds=30,
+            )
+            if result.exit_code != 0:
+                raise RuntimeError(f"could not configure approved MCP server: {_command_error(result)}")
 
     async def _head_commits(self, request: PhaseExecutionRequest) -> dict[str, str]:
         commits: dict[str, str] = {}
