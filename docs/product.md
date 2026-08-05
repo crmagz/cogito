@@ -153,6 +153,49 @@ The Supervisor makes policy decisions. LiteLLM enforces gateway-level model,
 tool, and accounting controls. Workers and sub-agents remain in the execution
 plane, where their credentials and network reach can be narrowly constrained.
 
+## Governed agent and tool architecture
+
+This is the target architecture for governed MCP integration. It describes the
+intended extension, not a currently shipped MCP capability: no MCP server is
+registered today and every role has zero tool authority.
+
+```text
+Versioned, non-secret catalog
+
+  Agent release -------------------\
+  MCP server + tool release --------> Binding policy --> Supervisor resolves
+  Role, project, environment, budget /                    immutable run policy
+                                                             |
+                                                             v
+Worker or sub-agent --> LiteLLM virtual key + toolset --> scoped MCP server
+```
+
+The catalog records identity and compatibility; it never grants authority.
+
+| Record | Purpose |
+|---|---|
+| Agent registration | Identifies an agent release, execution class, and declared capability requirements. It does not receive credentials or tool access by registering. |
+| Tool registration | Identifies an MCP server release, transport, named tool schemas, trust boundary, and a non-secret credential-broker reference. |
+| Binding policy | Maps an approved agent role to an explicit MCP server and per-tool allow-list, subject to project, environment, approval, and budget constraints. |
+| Run resolution | Captures the exact agent, policy, server, and tool versions selected for one run. The Supervisor persists this immutable snapshot before execution. |
+
+The Supervisor is the policy decision point and audit authority. It resolves
+the bindings, creates the run-scoped LiteLLM virtual key, and records the
+resulting model and tool limits. LiteLLM is the gateway enforcement point: the
+virtual key and toolset enforce the resolved model, budget, and MCP-tool scope
+for the runtime. Tool services obtain their own downstream credentials through
+the broker reference; agents never receive raw tool secrets.
+
+Semantic discovery may narrow the already-approved tool set for a request, but
+it can never expand the set. Runtimes cannot self-register, change a binding,
+or approve their own escalation. Every registry or policy change, as well as
+each run's resolved bindings, is intended to be auditable.
+
+Phase 18 will add these registration and binding contracts together with a
+small internal, read-only mock MCP server. That allows the allow and deny paths
+to be validated in a local cluster before any externally reachable tool or
+ingress is introduced.
+
 ## Architecture
 
 ```text
