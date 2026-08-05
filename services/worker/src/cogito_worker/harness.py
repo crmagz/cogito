@@ -232,16 +232,16 @@ class ClaudeCodeHarness:
         )
         await self._assert_expected_repositories(execution_request, branch_name)
         before_commits = await self._head_commits(execution_request)
+        await self._configure_mcp(request.workspace)
         result = await self._workspaces.execute(
             request.workspace,
             [
-                "claude",
-                "--print",
-                "--output-format",
-                "json",
-                "--max-turns",
+                "sh",
+                "-ec",
+                'cd "$1" && exec claude --print --output-format json --max-turns "$2" --dangerously-skip-permissions',
+                "sh",
+                request.workspace.workspace_root,
                 str(request.max_turns),
-                "--dangerously-skip-permissions",
             ],
             stdin=_assemble_review_revision_prompt(request),
             timeout_seconds=request.timeout_seconds,

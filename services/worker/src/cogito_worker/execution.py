@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from .execution_prepare import feature_branch_name, repository_clone_url, repository_directory_name
 from .models import ExecutionRequest, ExecutionWorkspace, McpServerConfiguration
 from .budgets import RunBudget, RunGitCredentialManager, RunKeyManager
+from .config import McpGatewayServer
 
 _EXECUTION_JOB_PREFIX = "cogito-execution-"
 _RUN_HASH_LABEL = "cogito.dev/run-hash"
@@ -57,8 +58,7 @@ class ExecutionJobSettings:
     git_author_name: str
     git_author_email: str
     command_output_limit_bytes: int
-    mcp_gateway_server_ids: dict[str, str] = field(default_factory=dict)
-    mcp_gateway_server_routes: dict[str, str] = field(default_factory=dict)
+    mcp_gateway_servers: dict[str, McpGatewayServer] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -662,23 +662,27 @@ def _gateway_mcp_servers(request: ExecutionRequest, settings: ExecutionJobSettin
     """Translate Supervisor-pinned MCP releases to trusted gateway routes."""
 
     permissions: dict[str, set[str]] = {}
+    configured_servers: dict[str, McpGatewayServer] = {}
     for grant in request.mcp_grants:
-        gateway_server_id = settings.mcp_gateway_server_ids.get(grant.server_id)
-        route = settings.mcp_gateway_server_routes.get(grant.server_id)
-        if gateway_server_id is None or route is None:
-            raise ValueError(f"MCP server '{grant.server_id}' is not configured in the execution gateway")
-        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,127}", route):
-            raise ValueError(f"MCP gateway route for '{grant.server_id}' is invalid")
-        permissions.setdefault(grant.server_id, set()).add(grant.tool_name)
+        release = f"{grant.server_id}@{grant.server_version}"
+        server = settings.mcp_gateway_servers.get(release)
+        if server is None:
+            raise ValueError(f"MCP server release '{release}' is not configured in the execution gateway")
+        if server.server_manifest_sha256 != grant.server_manifest_sha256:
+            raise ValueError(f"MCP server release '{release}' does not match its configured manifest")
+        if grant.tool_name not in server.tool_names:
+            raise ValueError(f"MCP tool '{grant.tool_name}' is not configured for server release '{release}'")
+        configured_servers[release] = server
+        permissions.setdefault(release, set()).add(grant.tool_name)
     return [
         _GatewayMcpServer(
-            registration_id=registration_id,
-            gateway_server_id=settings.mcp_gateway_server_ids[registration_id],
-            name=settings.mcp_gateway_server_routes[registration_id],
-            url=f"{settings.litellm_endpoint.rstrip('/')}/{settings.mcp_gateway_server_routes[registration_id]}/mcp",
+            registration_id=release.split("@", maxsplit=1)[0],
+            gateway_server_id=configured_servers[release].gateway_server_id,
+            name=configured_servers[release].route,
+            url=f"{settings.litellm_endpoint.rstrip('/')}/{configured_servers[release].route}/mcp",
             tool_names=tuple(sorted(tool_names)),
         )
-        for registration_id, tool_names in sorted(permissions.items())
+        for release, tool_names in sorted(permissions.items())
     ]
 
 

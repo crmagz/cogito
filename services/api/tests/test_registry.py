@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cogito_api.models import RegistrationManifest
+from cogito_api.models import RegistrationLifecycle, RegistrationManifest
 from cogito_api.registry import (
     RegistryAuthorizationError,
     canonical_manifest_bytes,
@@ -46,7 +46,10 @@ def test_component_catalog_is_complete_and_versioned() -> None:
         "github_publisher",
         "cogito_readonly_mcp",
     }
-    assert all(item.version == "1.0.0" for item in catalog.components)
+    assert all(
+        item.version == ("1.0.1" if item.registration_id == "cogito_readonly_mcp" else "1.0.0")
+        for item in catalog.components
+    )
     assert all(
         item.execution_class.value == ("worker_service" if item.registration_id == "cogito_readonly_mcp" else "adapter")
         for item in catalog.components
@@ -59,9 +62,20 @@ def test_mcp_policy_is_explicit_and_references_only_catalog_tools() -> None:
 
     policy = load_mcp_binding_policy(_catalog_root(), catalog)
 
-    assert policy.policy_revision == "phase18_initial"
+    assert policy.policy_revision == "governed_mcp_initial"
     assert policy.bindings[0].role == "developer"
     assert policy.bindings[0].tools == ["catalog_read"]
+
+
+def test_chart_gateway_mapping_tracks_the_current_mcp_manifest() -> None:
+    catalog = load_component_catalog(_catalog_root())
+    server = next(item for item in catalog.components if item.registration_id == "cogito_readonly_mcp")
+    template = (_catalog_root().parent / "charts" / "templates" / "worker-configmap.yaml").read_text(
+        encoding="utf-8"
+    )
+
+    assert f'"cogito_readonly_mcp@{server.version}"' in template
+    assert manifest_sha256(server) in template
 
 
 def test_mcp_policy_rejects_unknown_tool(tmp_path: Path) -> None:
@@ -156,6 +170,7 @@ async def test_mcp_run_resolution_is_project_scoped_and_immutable() -> None:
     }
     store = InMemorySupervisorStore()
 
+    await store.bootstrap_registry(manifests, "phase12_initial", assignments)
     await store.bootstrap_registry(manifests, policy.policy_revision, assignments, policy)
     granted = await store.resolve_run_mcp_tools("run-1", "developer", "default", policy.policy_revision)
     repeated = await store.resolve_run_mcp_tools("run-1", "developer", "default", policy.policy_revision)
@@ -165,6 +180,30 @@ async def test_mcp_run_resolution_is_project_scoped_and_immutable() -> None:
     assert [(grant.server_id, grant.tool_name) for grant in granted] == [("cogito_readonly_mcp", "catalog_read")]
     assert denied == []
     assert store.run_mcp_tool_resolutions[("run-1", "developer")] == granted
+
+
+async def test_mcp_resolution_preserves_persisted_grants_after_server_revocation() -> None:
+    catalog = load_component_catalog(_catalog_root())
+    policy = load_mcp_binding_policy(_catalog_root(), catalog)
+    manifests = list(catalog.components)
+    assignments = {
+        item.registration_id: f"{item.registration_id}@{item.version}"
+        for item in manifests
+        if item.kind.value == "agent"
+    }
+    store = InMemorySupervisorStore()
+
+    await store.bootstrap_registry(manifests, "phase12_initial", assignments)
+    await store.bootstrap_registry(manifests, policy.policy_revision, assignments, policy)
+    initial = await store.resolve_run_mcp_tools("run-1", "developer", "default", policy.policy_revision)
+    server = store.registrations[("cogito_readonly_mcp", "1.0.1")]
+    store.registrations[("cogito_readonly_mcp", "1.0.1")] = server.model_copy(
+        update={"lifecycle": RegistrationLifecycle.REVOKED}
+    )
+
+    retried = await store.resolve_run_mcp_tools("run-1", "developer", "default", "new_policy_revision")
+
+    assert retried == initial
 
 
 async def test_postgres_resolution_converges_when_a_concurrent_insert_wins() -> None:

@@ -374,10 +374,10 @@ litellm:
       apiKeyKey: api-key
 
 ## @section Governed MCP validation
-## The deterministic read-only server is disabled by default. It is intended
-## only for in-cluster authorization-path validation and has no credentials.
-## Enabling it also configures execution run keys with the derived LiteLLM
-## server identity; no endpoint or credential is exposed to execution jobs.
+## The deterministic read-only server is disabled by default. Enabling it
+## activates the governed MCP policy and configures execution run keys with
+## the exact immutable server release; no endpoint or credential is exposed
+## to execution jobs. A NetworkPolicy admits only LiteLLM ingress.
 mcp:
   enabled: false
   image: {}

@@ -370,7 +370,7 @@ class RegistrationManifest(BaseModel):
     mcp_endpoint: str | None = Field(
         default=None,
         max_length=2048,
-        description="Non-secret internal MCP endpoint for an MCP server release only",
+        description="Non-secret logical internal MCP endpoint for an MCP server release only",
     )
     mcp_tools: list[McpToolDefinition] = Field(
         default_factory=list,

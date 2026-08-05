@@ -54,6 +54,7 @@ def make_settings(**overrides) -> Settings:
         auth_oidc_admin_role="cogito-admin",
         workbench_default_project_id="default",
         registry_catalog_path=str(Path(__file__).parents[3] / "components"),
+        mcp_enabled=False,
         notification_enabled=False,
         notification_webhook_url="",
         notification_webhook_hmac_secret="",

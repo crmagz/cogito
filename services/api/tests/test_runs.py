@@ -4,10 +4,12 @@ import copy
 from dataclasses import replace
 
 from cogito_api.models import AgentRunStatus
+from cogito_api.main import create_app
 from cogito_api.storage import PlanStoreUnavailableError
 from fastapi.testclient import TestClient
 
 from .fakes import FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
+from .conftest import make_settings
 
 
 def test_submit_valid_plan_returns_202_with_run_id_and_plan_ref(
@@ -164,6 +166,42 @@ def test_submit_valid_plan_starts_workflow(
     assert envelope.plan_ref == response.json()["plan_ref"]
     assert len(envelope.plan_sha256) == 64
     assert envelope.spec_ref == valid_plan["spec_set"]
+
+
+def test_default_configuration_does_not_issue_mcp_grants(
+    client: TestClient, valid_plan: dict, starter: FakeRunStarter, supervisor_store: InMemorySupervisorStore
+) -> None:
+    response = client.post("/api/v1/runs", json={"plan": valid_plan})
+
+    assert response.status_code == 202
+    assert all(not resolution.mcp_grants for resolution in starter.started_runs[0].registry_resolutions)
+    assert set(supervisor_store.registry_policies) == {"phase12_initial"}
+
+
+def test_enabled_configuration_uses_independent_mcp_policy(
+    valid_plan: dict, store: InMemoryPlanStore, starter: FakeRunStarter
+) -> None:
+    supervisor_store = InMemorySupervisorStore()
+    client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(mcp_enabled=True),
+            starter=starter,
+            supervisor_store=supervisor_store,
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    response = client.post("/api/v1/runs", json={"plan": valid_plan})
+
+    assert response.status_code == 202
+    developer = next(
+        resolution for resolution in starter.started_runs[0].registry_resolutions if resolution.role == "developer"
+    )
+    assert [(grant.server_id, grant.server_version, grant.tool_name) for grant in developer.mcp_grants] == [
+        ("cogito_readonly_mcp", "1.0.1", "catalog_read")
+    ]
+    assert set(supervisor_store.registry_policies) == {"phase12_initial", "governed_mcp_initial"}
 
 
 def test_dry_run_does_not_start_workflow(

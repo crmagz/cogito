@@ -43,6 +43,20 @@ jobs:
         run: helm lint charts
       - name: Render default values
         run: helm template cogito charts > /dev/null
+      - name: Render governed MCP overrides
+        run: |
+          rendered="$(mktemp)"
+          helm template governed-mcp charts --namespace governed-mcp \
+            --set mcp.enabled=true \
+            --set mcp.service.port=9000 \
+            --set mcp.image.repository=separate-mcp \
+            --set mcp.image.tag=v9 > "$rendered"
+          grep -Fq 'COGITO_MCP_ENABLED: "true"' "$rendered"
+          grep -Fq 'cogito_readonly_mcp@1.0.1' "$rendered"
+          grep -Fq 'image: "separate-mcp:v9"' "$rendered"
+          grep -Fq 'name: COGITO_MCP_PORT' "$rendered"
+          grep -Fq 'value: "9000"' "$rendered"
+          grep -Fq 'name: governed-mcp-readonly-mcp-ingress' "$rendered"
       - name: Render production values
         run: |
           helm template cogito charts -f charts/values-production.yaml \

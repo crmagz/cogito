@@ -690,6 +690,35 @@ class PostgresSupervisorStore:
         """Pin project-scoped MCP tool authority from the immutable policy revision."""
 
         async with self._engine.begin() as connection:
+            existing = await connection.execute(
+                text(
+                    """
+                    SELECT server_registration_id, server_version, server_manifest_sha256,
+                           tool_name, input_schema_sha256, policy_revision
+                    FROM run_mcp_tool_resolutions
+                    WHERE run_id = :run_id AND role = :role
+                    FOR UPDATE
+                    """
+                ),
+                {"run_id": run_id, "role": role},
+            )
+            persisted = existing.mappings().all()
+            if persisted:
+                if len({item["policy_revision"] for item in persisted}) != 1:
+                    raise RegistryConflictError("run MCP tools have inconsistent policy revisions")
+                return sorted(
+                    [
+                        McpToolGrant(
+                            server_id=item["server_registration_id"],
+                            server_version=item["server_version"],
+                            server_manifest_sha256=item["server_manifest_sha256"],
+                            tool_name=item["tool_name"],
+                            input_schema_sha256=item["input_schema_sha256"],
+                        )
+                        for item in persisted
+                    ],
+                    key=_mcp_grant_key,
+                )
             policy = await connection.execute(
                 text(
                     "SELECT mcp_bindings FROM registry_policy_revisions "
@@ -739,39 +768,6 @@ class PostgresSupervisorStore:
                         )
                     )
             expected = sorted(grants, key=_mcp_grant_key)
-            existing = await connection.execute(
-                text(
-                    """
-                    SELECT server_registration_id, server_version, server_manifest_sha256,
-                           tool_name, input_schema_sha256, policy_revision
-                    FROM run_mcp_tool_resolutions
-                    WHERE run_id = :run_id AND role = :role
-                    FOR UPDATE
-                    """
-                ),
-                {"run_id": run_id, "role": role},
-            )
-            persisted = existing.mappings().all()
-            if persisted:
-                actual = sorted(
-                    [
-                        McpToolGrant(
-                            server_id=item["server_registration_id"],
-                            server_version=item["server_version"],
-                            server_manifest_sha256=item["server_manifest_sha256"],
-                            tool_name=item["tool_name"],
-                            input_schema_sha256=item["input_schema_sha256"],
-                        )
-                        for item in persisted
-                    ],
-                    key=_mcp_grant_key,
-                )
-                if (
-                    any(item["policy_revision"] != policy_revision for item in persisted)
-                    or [_mcp_grant_key(item) for item in actual] != [_mcp_grant_key(item) for item in expected]
-                ):
-                    raise RegistryConflictError("run MCP tools are already pinned to a different policy release")
-                return actual
             for grant in expected:
                 await connection.execute(
                     text(
