@@ -74,7 +74,7 @@ from .observability import Telemetry, TelemetrySettings
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
 from .reconciliation import ReconciliationHealth, WorkflowProjectionReconciler, stop_reconciler
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
-from .registry import RegistryAuthorizationError, load_component_catalog, require_tool
+from .registry import RegistryAuthorizationError, load_component_catalog, load_mcp_binding_policy, require_tool
 from .supervisor import (
     AgentRunRecord,
     ApprovalConflictError,
@@ -186,8 +186,9 @@ def create_app(
     supervisor_store = supervisor_store or PostgresSupervisorStore(settings.supervisor_database_url)
     planner = planner or LiteLLMPlanner(settings)
     catalog = load_component_catalog(Path(settings.registry_catalog_path))
+    mcp_policy = load_mcp_binding_policy(Path(settings.registry_catalog_path), catalog)
     agents = {item.registration_id: item for item in catalog.components if item.kind.value == "agent"}
-    policy_revision = "phase12_initial"
+    policy_revision = mcp_policy.policy_revision
     assignments = {role: f"{manifest.registration_id}@{manifest.version}" for role, manifest in agents.items()}
     telemetry = Telemetry(TelemetrySettings.from_environment())
     authenticator = ApprovalAuthenticator(settings)
@@ -210,13 +211,17 @@ def create_app(
     )
     readiness = ApplicationReadiness(reconciler.health if reconciler is not None else None)
 
-    async def resolve_roles(run_id: str, roles: list[str]):
-        await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments)
+    async def resolve_roles(run_id: str, roles: list[str], project_id: str):
+        await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments, mcp_policy)
         try:
-            return [
-                await supervisor_store.resolve_run_registration(run_id, role, policy_revision, agents[role])
-                for role in roles
-            ]
+            resolutions = []
+            for role in roles:
+                resolution = await supervisor_store.resolve_run_registration(run_id, role, policy_revision, agents[role])
+                mcp_grants = await supervisor_store.resolve_run_mcp_tools(
+                    run_id, role, project_id, policy_revision
+                )
+                resolutions.append(resolution.model_copy(update={"mcp_grants": mcp_grants}))
+            return resolutions
         except KeyError as error:
             raise RegistryConflictError("registry policy does not define the requested role") from error
 
@@ -225,7 +230,7 @@ def create_app(
         # Validate and persist the non-secret catalog before the API reports
         # ready. Deferring this until the first submitted run makes a broken
         # migration or policy look healthy and delays a safe failure boundary.
-        await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments)
+        await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments, mcp_policy)
         delivery_task = asyncio.create_task(dispatcher.run())
         implementation_delivery_task = asyncio.create_task(implementation_dispatcher.run())
         notification_delivery_task = (
@@ -304,7 +309,9 @@ def create_app(
         )
         try:
             resolutions = await resolve_roles(
-                run_id, ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"]
+                run_id,
+                ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
+                settings.workbench_default_project_id,
             )
         except RegistryConflictError as error:
             raise HTTPException(status_code=503, detail="registry is temporarily unavailable") from error
@@ -391,7 +398,7 @@ def create_app(
             )
         )
         try:
-            await resolve_roles(run_id, ["planner"])
+            await resolve_roles(run_id, ["planner"], settings.workbench_default_project_id)
         except RegistryConflictError as error:
             raise HTTPException(status_code=503, detail="registry is temporarily unavailable") from error
         telemetry.transition(AgentRunStatus.QUEUED.value, "planner")
@@ -436,7 +443,9 @@ def create_app(
         require_workbench_scope(record, principal)
         if record.status is PlanningRunStatus.PLANNING:
             try:
-                planner_resolution = (await resolve_roles(run_id, ["planner"]))[0]
+                planner_resolution = (
+                    await resolve_roles(run_id, ["planner"], record.project_id or settings.workbench_default_project_id)
+                )[0]
                 require_tool(planner_resolution, "planning_model", "plan_generation")
             except (RegistryAuthorizationError, RegistryConflictError) as error:
                 raise HTTPException(status_code=503, detail="planner registry grant is unavailable") from error
@@ -496,6 +505,7 @@ def create_app(
             resolutions = await resolve_roles(
                 updated.run_id,
                 ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
+                updated.project_id or settings.workbench_default_project_id,
             )
             await starter.start_run(
                 RunEnvelope(

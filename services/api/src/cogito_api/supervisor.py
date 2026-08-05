@@ -16,6 +16,8 @@ from .models import (
     AgentRunStatus,
     ArtifactReference,
     ImplementationApprovalDecision,
+    McpBindingPolicy,
+    McpToolGrant,
     PlanApprovalDecision,
     PlanConstraints,
     PlanningRunStatus,
@@ -185,6 +187,18 @@ def _matches_registration_resolution(
     )
 
 
+def _mcp_grant_key(grant: McpToolGrant) -> tuple[str, str, str, str, str]:
+    """Return a stable identity for a pinned MCP tool authorization."""
+
+    return (
+        grant.server_id,
+        grant.server_version,
+        grant.server_manifest_sha256,
+        grant.tool_name,
+        grant.input_schema_sha256,
+    )
+
+
 def _planning_run_record(row: Mapping[str, Any]) -> PlanningRunRecord:
     """Materialize a planning-run projection returned by PostgreSQL."""
 
@@ -289,6 +303,7 @@ class SupervisorStore(Protocol):
         manifests: list[RegistrationManifest],
         policy_revision: str,
         assignments: dict[str, str],
+        mcp_policy: McpBindingPolicy | None = None,
     ) -> None: ...
 
     async def resolve_run_registration(
@@ -298,6 +313,14 @@ class SupervisorStore(Protocol):
         policy_revision: str,
         manifest: RegistrationManifest,
     ) -> RegistrationReference: ...
+
+    async def resolve_run_mcp_tools(
+        self,
+        run_id: str,
+        role: str,
+        project_id: str,
+        policy_revision: str,
+    ) -> list[McpToolGrant]: ...
 
     async def list_coordination_events(self, run_id: str, *, limit: int = 100) -> list[tuple[CoordinationEvent, bool, int, str | None]]: ...
 
@@ -454,9 +477,14 @@ class PostgresSupervisorStore:
         manifests: list[RegistrationManifest],
         policy_revision: str,
         assignments: dict[str, str],
+        mcp_policy: McpBindingPolicy | None = None,
     ) -> None:
         """Persist immutable releases and one policy revision without rewriting either."""
 
+        mcp_policy = mcp_policy or McpBindingPolicy(policy_revision=policy_revision)
+        if mcp_policy.policy_revision != policy_revision:
+            raise RegistryConflictError("MCP policy revision does not match the registry policy revision")
+        mcp_bindings = mcp_policy.model_dump(mode="json")["bindings"]
         async with self._engine.begin() as connection:
             for manifest in manifests:
                 manifest_json = manifest.model_dump(mode="json")
@@ -528,18 +556,29 @@ class PostgresSupervisorStore:
             await connection.execute(
                 text(
                     """
-                    INSERT INTO registry_policy_revisions (policy_revision, assignments, created_at)
-                    VALUES (:policy_revision, CAST(:assignments AS jsonb), now())
+                    INSERT INTO registry_policy_revisions (policy_revision, assignments, mcp_bindings, created_at)
+                    VALUES (:policy_revision, CAST(:assignments AS jsonb), CAST(:mcp_bindings AS jsonb), now())
                     ON CONFLICT (policy_revision) DO NOTHING
                     """
                 ),
-                {"policy_revision": policy_revision, "assignments": json.dumps(assignments, sort_keys=True)},
+                {
+                    "policy_revision": policy_revision,
+                    "assignments": json.dumps(assignments, sort_keys=True),
+                    "mcp_bindings": json.dumps(mcp_bindings, sort_keys=True),
+                },
             )
             policy = await connection.execute(
-                text("SELECT assignments FROM registry_policy_revisions WHERE policy_revision = :policy_revision"),
+                text(
+                    "SELECT assignments, mcp_bindings FROM registry_policy_revisions "
+                    "WHERE policy_revision = :policy_revision"
+                ),
                 {"policy_revision": policy_revision},
             )
-            if dict(policy.mappings().one()["assignments"]) != assignments:
+            persisted_policy = policy.mappings().one()
+            if (
+                dict(persisted_policy["assignments"]) != assignments
+                or list(persisted_policy["mcp_bindings"]) != mcp_bindings
+            ):
                 raise RegistryConflictError("policy revision already exists with different assignments")
 
     async def resolve_run_registration(
@@ -640,6 +679,124 @@ class PostgresSupervisorStore:
                 if current is None or not _matches_registration_resolution(current, expected, policy_revision):
                     raise RegistryConflictError("run role is already pinned to a different registration release")
         return expected
+
+    async def resolve_run_mcp_tools(
+        self,
+        run_id: str,
+        role: str,
+        project_id: str,
+        policy_revision: str,
+    ) -> list[McpToolGrant]:
+        """Pin project-scoped MCP tool authority from the immutable policy revision."""
+
+        async with self._engine.begin() as connection:
+            policy = await connection.execute(
+                text(
+                    "SELECT mcp_bindings FROM registry_policy_revisions "
+                    "WHERE policy_revision = :policy_revision"
+                ),
+                {"policy_revision": policy_revision},
+            )
+            policy_row = policy.mappings().one_or_none()
+            if policy_row is None:
+                raise RegistryConflictError("registry policy revision is not available")
+            bindings = McpBindingPolicy.model_validate(
+                {"policy_revision": policy_revision, "bindings": list(policy_row["mcp_bindings"])}
+            )
+            grants: list[McpToolGrant] = []
+            for binding in bindings.bindings:
+                if binding.role != role or project_id not in binding.project_ids:
+                    continue
+                registration = await connection.execute(
+                    text(
+                        """
+                        SELECT lifecycle, manifest_sha256, manifest
+                        FROM registry_registrations
+                        WHERE registration_id = :registration_id AND version = :version
+                        FOR UPDATE
+                        """
+                    ),
+                    {"registration_id": binding.server_id, "version": binding.server_version},
+                )
+                row = registration.mappings().one_or_none()
+                if row is None or row["lifecycle"] != "active":
+                    raise RegistryConflictError("MCP server release is not active")
+                server = RegistrationManifest.model_validate(dict(row["manifest"]))
+                if manifest_sha256(server) != row["manifest_sha256"]:
+                    raise RegistryConflictError("MCP server release does not match its declared manifest")
+                tool_schemas = {tool.name: tool.input_schema_sha256 for tool in server.mcp_tools}
+                for tool_name in binding.tools:
+                    input_schema_sha256 = tool_schemas.get(tool_name)
+                    if input_schema_sha256 is None:
+                        raise RegistryConflictError("MCP policy references an unavailable server tool")
+                    grants.append(
+                        McpToolGrant(
+                            server_id=binding.server_id,
+                            server_version=binding.server_version,
+                            server_manifest_sha256=row["manifest_sha256"],
+                            tool_name=tool_name,
+                            input_schema_sha256=input_schema_sha256,
+                        )
+                    )
+            expected = sorted(grants, key=_mcp_grant_key)
+            existing = await connection.execute(
+                text(
+                    """
+                    SELECT server_registration_id, server_version, server_manifest_sha256,
+                           tool_name, input_schema_sha256, policy_revision
+                    FROM run_mcp_tool_resolutions
+                    WHERE run_id = :run_id AND role = :role
+                    FOR UPDATE
+                    """
+                ),
+                {"run_id": run_id, "role": role},
+            )
+            persisted = existing.mappings().all()
+            if persisted:
+                actual = sorted(
+                    [
+                        McpToolGrant(
+                            server_id=item["server_registration_id"],
+                            server_version=item["server_version"],
+                            server_manifest_sha256=item["server_manifest_sha256"],
+                            tool_name=item["tool_name"],
+                            input_schema_sha256=item["input_schema_sha256"],
+                        )
+                        for item in persisted
+                    ],
+                    key=_mcp_grant_key,
+                )
+                if (
+                    any(item["policy_revision"] != policy_revision for item in persisted)
+                    or [_mcp_grant_key(item) for item in actual] != [_mcp_grant_key(item) for item in expected]
+                ):
+                    raise RegistryConflictError("run MCP tools are already pinned to a different policy release")
+                return actual
+            for grant in expected:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO run_mcp_tool_resolutions (
+                            run_id, role, server_registration_id, server_version, server_manifest_sha256,
+                            tool_name, input_schema_sha256, policy_revision, created_at
+                        ) VALUES (
+                            :run_id, :role, :server_id, :server_version, :server_manifest_sha256,
+                            :tool_name, :input_schema_sha256, :policy_revision, now()
+                        ) ON CONFLICT DO NOTHING
+                        """
+                    ),
+                    {
+                        "run_id": run_id,
+                        "role": role,
+                        "server_id": grant.server_id,
+                        "server_version": grant.server_version,
+                        "server_manifest_sha256": grant.server_manifest_sha256,
+                        "tool_name": grant.tool_name,
+                        "input_schema_sha256": grant.input_schema_sha256,
+                        "policy_revision": policy_revision,
+                    },
+                )
+            return expected
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         async with self._engine.connect() as connection:

@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 from temporalio.converter import DataConverter
 
-from cogito_worker.models import RegistrationReference, RunEnvelope, ToolGrant
-from cogito_worker.registry import RegistryAuthorizationError, require_role, require_tool
+from cogito_worker.models import McpToolGrant, RegistrationReference, RunEnvelope, ToolGrant
+from cogito_worker.registry import RegistryAuthorizationError, require_mcp_tool, require_role, require_tool
 
 
 def _reference(role: str) -> RegistrationReference:
@@ -54,6 +54,31 @@ def test_resolved_role_accepts_a_typed_pinned_tool_grant_at_any_catalog_version(
     require_tool(resolution, "planning_model", "plan_generation")
 
 
+def test_resolved_role_requires_an_explicit_pinned_mcp_tool_grant() -> None:
+    reference = _reference("developer")
+    resolution = RegistrationReference(
+        role=reference.role,
+        registration_id=reference.registration_id,
+        version=reference.version,
+        manifest_sha256=reference.manifest_sha256,
+        component_id=reference.component_id,
+        component_version=reference.component_version,
+        mcp_grants=[
+            McpToolGrant(
+                server_id="cogito_readonly_mcp",
+                server_version="1.0.0",
+                server_manifest_sha256="b" * 64,
+                tool_name="catalog_read",
+                input_schema_sha256="c" * 64,
+            )
+        ],
+    )
+
+    require_mcp_tool(resolution, "cogito_readonly_mcp", "catalog_read")
+    with pytest.raises(RegistryAuthorizationError, match="different_tool"):
+        require_mcp_tool(resolution, "cogito_readonly_mcp", "different_tool")
+
+
 async def test_temporal_deserializes_pinned_grants_into_typed_worker_contracts() -> None:
     payloads = await DataConverter.default.encode(
         [
@@ -72,6 +97,15 @@ async def test_temporal_deserializes_pinned_grants_into_typed_worker_contracts()
                         "grants": [
                             {"tool_id": "planning_model", "tool_version": "1.0.0", "scope": "plan_generation"}
                         ],
+                        "mcp_grants": [
+                            {
+                                "server_id": "cogito_readonly_mcp",
+                                "server_version": "1.0.0",
+                                "server_manifest_sha256": "b" * 64,
+                                "tool_name": "catalog_read",
+                                "input_schema_sha256": "c" * 64,
+                            }
+                        ],
                     }
                 ],
             }
@@ -82,4 +116,5 @@ async def test_temporal_deserializes_pinned_grants_into_typed_worker_contracts()
 
     grant = envelope.registry_resolutions[0].grants[0]
     assert grant == ToolGrant(tool_id="planning_model", tool_version="1.0.0", scope="plan_generation")
+    assert envelope.registry_resolutions[0].mcp_grants[0].tool_name == "catalog_read"
     require_tool(envelope.registry_resolutions[0], "planning_model", "plan_generation")

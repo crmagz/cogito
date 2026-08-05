@@ -506,6 +506,16 @@ def _implementation_evidence(envelope: RunEnvelope, workspace, phase_results: li
                     }
                     for grant in resolution.grants
                 ],
+                "mcp_grants": [
+                    {
+                        "server_id": grant.server_id,
+                        "server_version": grant.server_version,
+                        "server_manifest_sha256": grant.server_manifest_sha256,
+                        "tool_name": grant.tool_name,
+                        "input_schema_sha256": grant.input_schema_sha256,
+                    }
+                    for grant in resolution.mcp_grants
+                ],
             }
             for resolution in envelope.registry_resolutions
         ],
