@@ -1,0 +1,23 @@
+{
+  "registration_id": "cogito_readonly_mcp",
+  "version": "1.0.0",
+  "kind": "mcp_server",
+  "component_id": "cogito_readonly_mcp",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "worker_service",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "mcp_request", "version": "1"},
+  "output_schema": {"schema_id": "mcp_response", "version": "1"},
+  "capabilities": ["read_capability_catalog"],
+  "quality_gates": ["credentialless", "read_only", "internal_only"],
+  "mcp_transport": "http",
+  "mcp_endpoint": "http://cogito-readonly-mcp.cogito.svc:8000/mcp",
+  "mcp_tools": [
+    {
+      "name": "catalog_read",
+      "input_schema_sha256": "ef3cb95cfd8ed305ddfb437e195878a4a9c9196cdaf3a38cbe2e2bdb99df5622"
+    }
+  ]
+}

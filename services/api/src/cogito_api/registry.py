@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
-from .models import RegistrationManifest, RegistrationReference
+from .models import McpBindingPolicy, RegistrationKind, RegistrationManifest, RegistrationReference
 
 
 class RegistryAuthorizationError(RuntimeError):
@@ -101,3 +101,28 @@ def load_component_catalog(catalog_root: Path) -> ComponentCatalog:
             raise ValueError(f"component definition '{definition}' is not valid JSON") from error
         components.append(RegistrationManifest.model_validate(value))
     return ComponentCatalog(components=components)
+
+
+def load_mcp_binding_policy(catalog_root: Path, catalog: ComponentCatalog) -> McpBindingPolicy:
+    """Load the reviewed MCP allow-list and reject references outside the catalog."""
+
+    definition = catalog_root / "mcp_policy.json"
+    try:
+        value = json.loads(definition.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"MCP policy definition '{definition}' is not valid JSON") from error
+    policy = McpBindingPolicy.model_validate(value)
+    registrations = {(item.registration_id, item.version): item for item in catalog.components}
+    agent_ids = {item.registration_id for item in catalog.components if item.kind is RegistrationKind.AGENT}
+    for binding in policy.bindings:
+        if binding.role not in agent_ids:
+            raise ValueError(f"MCP policy role '{binding.role}' is not a registered agent")
+        server = registrations.get((binding.server_id, binding.server_version))
+        if server is None or server.kind is not RegistrationKind.MCP_SERVER:
+            raise ValueError(
+                f"MCP policy binding references unknown server '{binding.server_id}' version '{binding.server_version}'"
+            )
+        known_tools = {tool.name for tool in server.mcp_tools}
+        if not set(binding.tools).issubset(known_tools):
+            raise ValueError(f"MCP policy binding references an unknown tool on server '{binding.server_id}'")
+    return policy
