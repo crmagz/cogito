@@ -52,8 +52,18 @@ class ComponentCatalog(BaseModel):
 def canonical_manifest_bytes(manifest: RegistrationManifest) -> bytes:
     """Return stable non-secret bytes used for registration identity and audit."""
 
+    value = manifest.model_dump(mode="json")
+    # These fields did not exist when the initial agent and tool releases were
+    # registered. Omit their empty form so adding MCP support does not mutate
+    # the canonical identity of an already immutable non-MCP release.
+    if manifest.mcp_transport is None:
+        value.pop("mcp_transport")
+    if manifest.mcp_endpoint is None:
+        value.pop("mcp_endpoint")
+    if not manifest.mcp_tools:
+        value.pop("mcp_tools")
     return json.dumps(
-        manifest.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode()
 
 

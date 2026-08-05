@@ -89,6 +89,15 @@ def test_manifest_identity_is_canonical_and_role_reference_is_audit_safe() -> No
     require_tool(reference, "planning_model", "plan_generation")
 
 
+def test_non_mcp_manifest_identity_remains_compatible_with_registered_releases() -> None:
+    catalog = load_component_catalog(_catalog_root())
+    planner = next(item for item in catalog.components if item.registration_id == "planner")
+    planning_model = next(item for item in catalog.components if item.registration_id == "planning_model")
+
+    assert manifest_sha256(planner) == "bfad6b69affded9f48a63c049c66f120e09ce281c0f96b122cac7c59c639059a"
+    assert manifest_sha256(planning_model) == "e26a3b427c07ef786885344de24481187b1f2a6a6dd51dffdd4fe196c5245cc6"
+
+
 def test_api_tool_guard_rejects_an_ungranted_pinned_tool() -> None:
     manifest = RegistrationManifest.model_validate(
         json.loads((_catalog_root() / "agents" / "planner" / "component.json").read_text(encoding="utf-8"))
