@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import quote
 
 
@@ -64,6 +64,7 @@ class Settings:
     supervisor_database_name: str
     supervisor_database_user: str
     supervisor_database_password: str
+    execution_mcp_gateway_server_ids: dict[str, str] = field(default_factory=dict)
 
     @property
     def supervisor_database_url(self) -> str:
@@ -90,6 +91,9 @@ def load_settings() -> Settings:
         raise ValueError("COGITO_ALLOWED_GIT_HOSTS must be a non-empty JSON string array")
     if not isinstance(execution_resources, dict):
         raise ValueError("COGITO_EXECUTION_RESOURCES must be a JSON object")
+    execution_mcp_gateway_server_ids = _json_string_mapping(
+        "COGITO_EXECUTION_MCP_GATEWAY_SERVER_IDS", "{}"
+    )
     return Settings(
         temporal_host=os.environ.get("COGITO_TEMPORAL_HOST", "localhost:7233"),
         temporal_namespace=os.environ.get("COGITO_TEMPORAL_NAMESPACE", "default"),
@@ -173,4 +177,16 @@ def load_settings() -> Settings:
         supervisor_database_name=os.environ.get("COGITO_SUPERVISOR_DATABASE_NAME", "cogito"),
         supervisor_database_user=os.environ.get("COGITO_SUPERVISOR_DATABASE_USER", "postgres"),
         supervisor_database_password=os.environ.get("COGITO_SUPERVISOR_DATABASE_PASSWORD", "cogito"),
+        execution_mcp_gateway_server_ids=execution_mcp_gateway_server_ids,
     )
+
+
+def _json_string_mapping(name: str, default: str) -> dict[str, str]:
+    """Read a non-secret configuration mapping with strict scalar values."""
+
+    value = json.loads(os.environ.get(name, default))
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str) and key and isinstance(item, str) and item for key, item in value.items()
+    ):
+        raise ValueError(f"{name} must be a JSON object with non-empty string keys and values")
+    return value
