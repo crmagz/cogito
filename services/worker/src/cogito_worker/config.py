@@ -65,6 +65,7 @@ class Settings:
     supervisor_database_user: str
     supervisor_database_password: str
     execution_mcp_gateway_server_ids: dict[str, str] = field(default_factory=dict)
+    execution_mcp_gateway_server_routes: dict[str, str] = field(default_factory=dict)
 
     @property
     def supervisor_database_url(self) -> str:
@@ -93,6 +94,9 @@ def load_settings() -> Settings:
         raise ValueError("COGITO_EXECUTION_RESOURCES must be a JSON object")
     execution_mcp_gateway_server_ids = _json_string_mapping(
         "COGITO_EXECUTION_MCP_GATEWAY_SERVER_IDS", "{}"
+    )
+    execution_mcp_gateway_server_routes = _json_string_mapping(
+        "COGITO_EXECUTION_MCP_GATEWAY_SERVER_ROUTES", "{}"
     )
     return Settings(
         temporal_host=os.environ.get("COGITO_TEMPORAL_HOST", "localhost:7233"),
@@ -178,6 +182,7 @@ def load_settings() -> Settings:
         supervisor_database_user=os.environ.get("COGITO_SUPERVISOR_DATABASE_USER", "postgres"),
         supervisor_database_password=os.environ.get("COGITO_SUPERVISOR_DATABASE_PASSWORD", "cogito"),
         execution_mcp_gateway_server_ids=execution_mcp_gateway_server_ids,
+        execution_mcp_gateway_server_routes=execution_mcp_gateway_server_routes,
     )
 
 

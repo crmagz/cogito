@@ -94,6 +94,7 @@ async def main() -> None:
         git_author_email=settings.execution_git_author_email,
         command_output_limit_bytes=settings.execution_command_output_limit_bytes,
         mcp_gateway_server_ids=settings.execution_mcp_gateway_server_ids,
+        mcp_gateway_server_routes=settings.execution_mcp_gateway_server_routes,
     )
     execution_workspaces = ExecutionWorkspaceService(
         execution_settings,
