@@ -168,6 +168,23 @@ def test_run_key_payload_scopes_mcp_access_to_explicit_gateway_tools() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("permissions", "message"),
+    [
+        ([], "must be a mapping"),
+        ({1: ("catalog_read",)}, "gateway server IDs"),
+        ({"a" * 32: "catalog_read"}, "explicit unique tool names"),
+        ({"a" * 32: {"catalog_read"}}, "explicit unique tool names"),
+        ({"a" * 32: (1,)}, "explicit unique tool names"),
+    ],
+)
+def test_run_key_budget_rejects_malformed_mcp_permissions(permissions: object, message: str) -> None:
+    budget = RunBudget("run-1", 2.5, "complex", 120, permissions)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match=message):
+        _validate_budget(budget)
+
+
 async def test_provisioning_removes_a_job_when_its_pod_never_becomes_active() -> None:
     """A failed startup does not leak a Job or its future workspace."""
 
