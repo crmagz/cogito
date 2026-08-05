@@ -308,7 +308,7 @@ class ClaudeCodeHarness:
                     "sh",
                     "-ec",
                     'cd "$1" && claude mcp add --scope local --transport http "$2" "$3" '
-                    "--header 'Authorization: Bearer ${ANTHROPIC_AUTH_TOKEN}'",
+                    '--header "Authorization: Bearer ${ANTHROPIC_AUTH_TOKEN}"',
                     "sh",
                     workspace.workspace_root,
                     server.name,

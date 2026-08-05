@@ -152,7 +152,7 @@ async def test_harness_configures_only_the_workspace_mcp_routes_before_claude_ru
         "sh",
         "-ec",
         'cd "$1" && claude mcp add --scope local --transport http "$2" "$3" '
-        "--header 'Authorization: Bearer ${ANTHROPIC_AUTH_TOKEN}'",
+        '--header "Authorization: Bearer ${ANTHROPIC_AUTH_TOKEN}"',
         "sh",
         "/workspace",
         "cogito_readonly",

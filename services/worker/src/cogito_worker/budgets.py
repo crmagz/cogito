@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import secrets
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.request import Request, urlopen
@@ -221,10 +222,22 @@ def _secret_token(secret: object, key: str = "api-key") -> str | None:
 def _validate_budget(budget: RunBudget) -> None:
     if budget.max_cost_usd <= 0 or budget.expires_in_seconds < 1 or not budget.model:
         raise ValueError("run budget must have a positive cost, expiry, and model")
+    if not isinstance(budget.mcp_tool_permissions, Mapping):
+        raise ValueError("MCP tool permissions must be a mapping")
     for server_id, tool_names in budget.mcp_tool_permissions.items():
-        if not server_id or len(server_id) != 32 or any(character not in "0123456789abcdef" for character in server_id):
+        if (
+            not isinstance(server_id, str)
+            or len(server_id) != 32
+            or any(character not in "0123456789abcdef" for character in server_id)
+        ):
             raise ValueError("MCP gateway server IDs must be 32-character lowercase digests")
-        if not tool_names or len(set(tool_names)) != len(tool_names) or any(not tool_name for tool_name in tool_names):
+        if (
+            not isinstance(tool_names, Sequence)
+            or isinstance(tool_names, str)
+            or not tool_names
+            or len(set(tool_names)) != len(tool_names)
+            or any(not isinstance(tool_name, str) or not tool_name for tool_name in tool_names)
+        ):
             raise ValueError("MCP tool permissions must be explicit unique tool names")
 
 
