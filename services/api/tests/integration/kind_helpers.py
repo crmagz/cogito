@@ -46,6 +46,21 @@ class KindHarness:
     def kubectl(self, *args: str, input_text: str | None = None, check: bool = True) -> str:
         return self.command("kubectl", "--context", self.context, *args, input_text=input_text, check=check)
 
+    def exec_python(self, resource: str, source: str) -> str:
+        """Run test-only Python inside one trusted workload without exposing Secrets."""
+
+        return self.kubectl(
+            "-n",
+            self.namespace,
+            "exec",
+            "-i",
+            resource,
+            "--",
+            "python",
+            "-c",
+            source,
+        )
+
     def assert_context(self) -> None:
         if self.context not in self.command("kubectl", "config", "get-contexts", "-o", "name").splitlines():
             pytest.skip(f"Kind context unavailable: {self.context}")
