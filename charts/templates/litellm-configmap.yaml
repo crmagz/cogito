@@ -1,4 +1,7 @@
 {{- if .Values.litellm.enabled }}
+{{- $mcp := default (dict) .Values.mcp }}
+{{- $mcpService := default (dict) $mcp.service }}
+{{- $mcpPort := default 8000 $mcpService.port }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -29,4 +32,15 @@ data:
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
       database_url: os.environ/DATABASE_URL
+    {{- if $mcp.enabled }}
+    mcp_servers:
+      cogito_readonly:
+        url: {{ printf "http://%s-readonly-mcp.%s.svc:%v/mcp" .Release.Name .Release.Namespace ($mcpPort | int) | quote }}
+        transport: http
+        auth_type: none
+        allowed_tools:
+          - catalog_read
+        allow_all_keys: false
+        available_on_public_internet: false
+    {{- end }}
 {{- end }}
