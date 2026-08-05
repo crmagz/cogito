@@ -84,3 +84,16 @@ already be present in `cogito-github-pull-request`. Set `COGITO_E2E_CONTEXT`,
 `COGITO_E2E_TIMEOUT_SECONDS`, `COGITO_E2E_TARGET_REPO`, or
 `COGITO_E2E_VALUES_FILE` to select a disposable environment; none of those
 options source credentials from the local machine.
+
+### Governed MCP Kind E2E
+
+This opt-in test does not invoke a model or modify a repository. It verifies
+the persisted MCP policy, a real worker-issued LiteLLM run key, the allowed
+tool call, the denied-tool case, and temporary Secret cleanup. The selected
+release must have `mcp.enabled=true`.
+
+```sh
+COGITO_E2E_ENABLED=1 \
+  uv run --project services/api pytest -q -m kind_e2e \
+  services/api/tests/integration/test_kind_e2e_governed_mcp.py
+```
