@@ -1,0 +1,12 @@
+{
+  "policy_revision": "phase18_initial",
+  "bindings": [
+    {
+      "role": "developer",
+      "server_id": "cogito_readonly_mcp",
+      "server_version": "1.0.0",
+      "tools": ["catalog_read"],
+      "project_ids": ["default"]
+    }
+  ]
+}

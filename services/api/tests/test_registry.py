@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from cogito_api.registry import (
     RegistryAuthorizationError,
     canonical_manifest_bytes,
     load_component_catalog,
+    load_mcp_binding_policy,
     manifest_sha256,
     registration_reference,
     require_tool,
@@ -42,10 +44,34 @@ def test_component_catalog_is_complete_and_versioned() -> None:
         "validation_runner",
         "ephemeral_environment",
         "github_publisher",
+        "cogito_readonly_mcp",
     }
     assert all(item.version == "1.0.0" for item in catalog.components)
-    assert all(item.execution_class.value == "adapter" for item in catalog.components)
+    assert all(
+        item.execution_class.value == ("worker_service" if item.registration_id == "cogito_readonly_mcp" else "adapter")
+        for item in catalog.components
+    )
     assert all(item.owner == "cogito-platform" for item in catalog.components)
+
+
+def test_mcp_policy_is_explicit_and_references_only_catalog_tools() -> None:
+    catalog = load_component_catalog(_catalog_root())
+
+    policy = load_mcp_binding_policy(_catalog_root(), catalog)
+
+    assert policy.policy_revision == "phase18_initial"
+    assert policy.bindings[0].role == "developer"
+    assert policy.bindings[0].tools == ["catalog_read"]
+
+
+def test_mcp_policy_rejects_unknown_tool(tmp_path: Path) -> None:
+    shutil.copytree(_catalog_root(), tmp_path, dirs_exist_ok=True)
+    policy = json.loads((tmp_path / "mcp_policy.json").read_text(encoding="utf-8"))
+    policy["bindings"][0]["tools"] = ["unknown_tool"]
+    (tmp_path / "mcp_policy.json").write_text(json.dumps(policy), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unknown tool"):
+        load_mcp_binding_policy(tmp_path, load_component_catalog(tmp_path))
 
 
 def test_manifest_identity_is_canonical_and_role_reference_is_audit_safe() -> None:

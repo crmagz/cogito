@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum, StrEnum
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -172,6 +173,7 @@ class RegistrationKind(StrEnum):
 
     AGENT = "agent"
     TOOL = "tool"
+    MCP_SERVER = "mcp_server"
 
 
 class RegistrationLifecycle(StrEnum):
@@ -239,6 +241,64 @@ class ToolGrant(BaseModel):
     )
 
 
+class McpTransport(StrEnum):
+    """Transport allowed for a governed MCP server release."""
+
+    HTTP = "http"
+
+
+class McpToolDefinition(BaseModel):
+    """Non-secret, immutable contract for one MCP tool."""
+
+    name: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_-]{0,127}$",
+    )
+    input_schema_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the versioned tool input schema, never the tool input itself.",
+    )
+
+
+class McpBinding(BaseModel):
+    """Explicit, non-secret policy grant from an agent role to one MCP release."""
+
+    role: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    server_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    server_version: str = Field(min_length=1, max_length=32, pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$")
+    tools: list[str] = Field(min_length=1, max_length=32)
+    project_ids: list[str] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_unique_tools(self) -> "McpBinding":
+        """Reject wildcard or duplicate tool selection before it becomes authority."""
+
+        if any(not tool or tool == "*" for tool in self.tools) or len(set(self.tools)) != len(self.tools):
+            raise ValueError("MCP binding tools must be unique explicit tool names")
+        if len(set(self.project_ids)) != len(self.project_ids):
+            raise ValueError("MCP binding project IDs must be unique")
+        return self
+
+
+class McpBindingPolicy(BaseModel):
+    """Immutable reviewed MCP authorization policy loaded with the component catalog."""
+
+    policy_revision: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    bindings: list[McpBinding] = Field(default_factory=list, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_unique_bindings(self) -> "McpBindingPolicy":
+        """Require one policy entry for each role/server release pair."""
+
+        keys = [(binding.role, binding.server_id, binding.server_version) for binding in self.bindings]
+        if len(set(keys)) != len(keys):
+            raise ValueError("MCP policy contains duplicate role/server bindings")
+        return self
+
+
 class RegistrationManifest(BaseModel):
     """Declarative, non-secret definition of an immutable component release."""
 
@@ -283,6 +343,20 @@ class RegistrationManifest(BaseModel):
         max_length=32,
         description="Pinned tool grants available to this release",
     )
+    mcp_transport: McpTransport | None = Field(
+        default=None,
+        description="MCP transport for an MCP server release only",
+    )
+    mcp_endpoint: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="Non-secret internal MCP endpoint for an MCP server release only",
+    )
+    mcp_tools: list[McpToolDefinition] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Named MCP tools exposed by an MCP server release",
+    )
     quality_gates: list[str] = Field(
         min_length=1,
         max_length=32,
@@ -293,13 +367,24 @@ class RegistrationManifest(BaseModel):
     def validate_kind_grants(self) -> "RegistrationManifest":
         """Reject tool grants on tool definitions and duplicate capability declarations."""
 
-        if self.kind is RegistrationKind.TOOL and self.grants:
-            raise ValueError("tool registrations cannot grant other tools")
+        if self.kind in {RegistrationKind.TOOL, RegistrationKind.MCP_SERVER} and self.grants:
+            raise ValueError("tool and MCP server registrations cannot grant other tools")
         if len(set(self.capabilities)) != len(self.capabilities):
             raise ValueError("registration capabilities must be unique")
         grant_keys = [(grant.tool_id, grant.tool_version, grant.scope) for grant in self.grants]
         if len(set(grant_keys)) != len(grant_keys):
             raise ValueError("registration grants must be unique")
+        if self.kind is RegistrationKind.MCP_SERVER:
+            if self.mcp_transport is None or not self.mcp_endpoint or not self.mcp_tools:
+                raise ValueError("MCP server registrations require transport, endpoint, and tools")
+            parsed = urlparse(self.mcp_endpoint)
+            if parsed.scheme != "http" or not parsed.hostname or parsed.username or parsed.password or parsed.query:
+                raise ValueError("MCP server endpoint must be an internal HTTP URL without credentials or query")
+            tool_names = [tool.name for tool in self.mcp_tools]
+            if len(set(tool_names)) != len(tool_names):
+                raise ValueError("MCP server tool names must be unique")
+        elif self.mcp_transport is not None or self.mcp_endpoint is not None or self.mcp_tools:
+            raise ValueError("only MCP server registrations may define MCP transport, endpoint, or tools")
         return self
 
 
