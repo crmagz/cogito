@@ -186,9 +186,11 @@ def create_app(
     supervisor_store = supervisor_store or PostgresSupervisorStore(settings.supervisor_database_url)
     planner = planner or LiteLLMPlanner(settings)
     catalog = load_component_catalog(Path(settings.registry_catalog_path))
-    mcp_policy = load_mcp_binding_policy(Path(settings.registry_catalog_path), catalog)
+    mcp_policy = (
+        load_mcp_binding_policy(Path(settings.registry_catalog_path), catalog) if settings.mcp_enabled else None
+    )
     agents = {item.registration_id: item for item in catalog.components if item.kind.value == "agent"}
-    policy_revision = mcp_policy.policy_revision
+    policy_revision = "phase12_initial"
     assignments = {role: f"{manifest.registration_id}@{manifest.version}" for role, manifest in agents.items()}
     telemetry = Telemetry(TelemetrySettings.from_environment())
     authenticator = ApprovalAuthenticator(settings)
@@ -211,14 +213,27 @@ def create_app(
     )
     readiness = ApplicationReadiness(reconciler.health if reconciler is not None else None)
 
+    async def bootstrap_registry() -> None:
+        """Persist the established agent policy and optional MCP policy independently."""
+
+        await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments)
+        if mcp_policy is not None:
+            await supervisor_store.bootstrap_registry(
+                catalog.components, mcp_policy.policy_revision, assignments, mcp_policy
+            )
+
     async def resolve_roles(run_id: str, roles: list[str], project_id: str):
-        await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments, mcp_policy)
+        await bootstrap_registry()
         try:
             resolutions = []
             for role in roles:
                 resolution = await supervisor_store.resolve_run_registration(run_id, role, policy_revision, agents[role])
-                mcp_grants = await supervisor_store.resolve_run_mcp_tools(
-                    run_id, role, project_id, policy_revision
+                mcp_grants = (
+                    await supervisor_store.resolve_run_mcp_tools(
+                        run_id, role, project_id, mcp_policy.policy_revision
+                    )
+                    if mcp_policy is not None
+                    else []
                 )
                 resolutions.append(resolution.model_copy(update={"mcp_grants": mcp_grants}))
             return resolutions
@@ -230,7 +245,7 @@ def create_app(
         # Validate and persist the non-secret catalog before the API reports
         # ready. Deferring this until the first submitted run makes a broken
         # migration or policy look healthy and delays a safe failure boundary.
-        await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments, mcp_policy)
+        await bootstrap_registry()
         delivery_task = asyncio.create_task(dispatcher.run())
         implementation_delivery_task = asyncio.create_task(implementation_dispatcher.run())
         notification_delivery_task = (

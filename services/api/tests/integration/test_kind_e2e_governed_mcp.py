@@ -33,6 +33,9 @@ def test_governed_mcp_registration_and_gateway_authorization_e2e() -> None:
     assert resolution == {
         "grant_count": 1,
         "grant_is_catalog_read": True,
+        "grant_is_current_release": True,
+        "retry_preserves_pinned_grant": True,
+        "role_policy_is_compatible": True,
     }
 
     gateway = json.loads(
@@ -78,6 +81,7 @@ async def main() -> None:
     run_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
     try:
+        await store.bootstrap_registry(catalog.components, "phase12_initial", assignments)
         await store.bootstrap_registry(catalog.components, policy.policy_revision, assignments, policy)
         await store.create_agent_run(
             AgentRunRecord(
@@ -92,12 +96,39 @@ async def main() -> None:
             )
         )
         developer = next(item for item in catalog.components if item.registration_id == "developer")
-        await store.resolve_run_registration(run_id, "developer", policy.policy_revision, developer)
+        await store.resolve_run_registration(run_id, "developer", "phase12_initial", developer)
         grants = await store.resolve_run_mcp_tools(run_id, "developer", "default", policy.policy_revision)
+        async with store._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE registry_registrations SET lifecycle = 'revoked'
+                    WHERE registration_id = 'cogito_readonly_mcp' AND version = '1.0.1'
+                    """
+                )
+            )
+        try:
+            retried = await store.resolve_run_mcp_tools(run_id, "developer", "default", "governed_mcp_next")
+        finally:
+            async with store._engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE registry_registrations SET lifecycle = 'active'
+                        WHERE registration_id = 'cogito_readonly_mcp' AND version = '1.0.1'
+                        """
+                    )
+                )
         print(json.dumps({
             "grant_count": len(grants),
             "grant_is_catalog_read": [(grant.server_id, grant.tool_name) for grant in grants]
             == [("cogito_readonly_mcp", "catalog_read")],
+            "grant_is_current_release": [(grant.server_version, grant.server_manifest_sha256) for grant in grants]
+            == [("1.0.1", "46d5827e9f5f248a8b7060fca33a4e02278eddfd55e900e3464ab13778ccf626")],
+            "retry_preserves_pinned_grant": retried == grants,
+            "role_policy_is_compatible": (await store.resolve_run_registration(
+                run_id, "developer", "phase12_initial", developer
+            )).registration_id == "developer",
         }, sort_keys=True))
     finally:
         async with store._engine.begin() as connection:
@@ -204,7 +235,7 @@ async def tools_for_permission(manager, settings, server_id: str, tool_name: str
 
 async def main() -> None:
     settings = load_settings()
-    server_id = settings.execution_mcp_gateway_server_ids["cogito_readonly_mcp"]
+    server_id = settings.execution_mcp_gateway_servers["cogito_readonly_mcp@1.0.1"].gateway_server_id
     manager = KubernetesLiteLLMRunKeyManager(
         settings.execution_namespace,
         settings.execution_litellm_endpoint,

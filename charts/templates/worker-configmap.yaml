@@ -3,11 +3,14 @@
 {{- $mcp := default (dict) .Values.mcp }}
 {{- $mcpService := default (dict) $mcp.service }}
 {{- $mcpPort := default 8000 $mcpService.port }}
-{{- $mcpGatewayServerIds := dict }}
-{{- $mcpGatewayServerRoutes := dict }}
+{{- $mcpGatewayServers := dict }}
 {{- if $mcp.enabled }}
-{{- $_ := set $mcpGatewayServerIds "cogito_readonly_mcp" (printf "cogito_readonly|http://%s-readonly-mcp.%s.svc:%v/mcp|http|none|" .Release.Name .Release.Namespace ($mcpPort | int) | sha256sum | trunc 32) }}
-{{- $_ := set $mcpGatewayServerRoutes "cogito_readonly_mcp" "cogito_readonly" }}
+{{- $gatewayServerID := printf "cogito_readonly|http://%s-readonly-mcp.%s.svc:%v/mcp|http|none|" .Release.Name .Release.Namespace ($mcpPort | int) | sha256sum | trunc 32 }}
+{{- $currentServer := dict "gateway_server_id" $gatewayServerID "route" "cogito_readonly" "server_manifest_sha256" "46d5827e9f5f248a8b7060fca33a4e02278eddfd55e900e3464ab13778ccf626" "tool_names" (list "catalog_read") }}
+{{- $_ := set $mcpGatewayServers "cogito_readonly_mcp@1.0.1" $currentServer }}
+{{- /* Retain the predecessor mapping so persisted in-flight grants remain executable after an upgrade. */ -}}
+{{- $legacyServer := dict "gateway_server_id" $gatewayServerID "route" "cogito_readonly" "server_manifest_sha256" "2084e3d093d38992d2d10acd7c3545189fe949e2778cd924f8f85bec8b93b0b7" "tool_names" (list "catalog_read") }}
+{{- $_ := set $mcpGatewayServers "cogito_readonly_mcp@1.0.0" $legacyServer }}
 {{- end }}
 {{- $telemetryEnabled := or .Values.observability.traces.enabled .Values.observability.metrics.enabled }}
 {{- if and $telemetryEnabled (not .Values.observability.otlp.endpoint) }}
@@ -54,8 +57,7 @@ data:
   COGITO_EXECUTION_LITELLM_MODEL: {{ .Values.worker.execution.harness.model | quote }}
   COGITO_EXECUTION_LITELLM_KEY_SECRET: {{ .Values.worker.execution.harness.existingSecret | quote }}
   COGITO_EXECUTION_LITELLM_KEY_SECRET_KEY: {{ .Values.worker.execution.harness.apiKeyKey | quote }}
-  COGITO_EXECUTION_MCP_GATEWAY_SERVER_IDS: {{ toJson $mcpGatewayServerIds | quote }}
-  COGITO_EXECUTION_MCP_GATEWAY_SERVER_ROUTES: {{ toJson $mcpGatewayServerRoutes | quote }}
+  COGITO_EXECUTION_MCP_GATEWAY_SERVERS: {{ toJson $mcpGatewayServers | quote }}
   COGITO_EXECUTION_GIT_CREDENTIALS_SECRET: {{ .Values.worker.execution.harness.gitCredentialsSecret | quote }}
   COGITO_EXECUTION_GIT_CREDENTIALS_SECRET_KEY: {{ .Values.worker.execution.harness.gitCredentialsKey | quote }}
   COGITO_EXECUTION_GIT_AUTHOR_NAME: {{ .Values.worker.execution.harness.gitAuthorName | quote }}

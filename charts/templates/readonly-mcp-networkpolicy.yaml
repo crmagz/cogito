@@ -1,0 +1,27 @@
+{{- $mcp := default (dict) .Values.mcp }}
+{{- if $mcp.enabled }}
+{{- $service := default (dict) $mcp.service }}
+{{- $port := default 8000 $service.port }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-readonly-mcp-ingress
+  labels:
+    app.kubernetes.io/name: readonly-mcp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: readonly-mcp
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: litellm
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: {{ $port | int }}
+{{- end }}

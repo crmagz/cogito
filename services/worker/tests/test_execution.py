@@ -16,6 +16,7 @@ from cogito_worker.execution import (
     _sanitize_diagnostics,
 )
 from cogito_worker.budgets import RunBudget, _run_key_payload, _validate_budget
+from cogito_worker.config import McpGatewayServer
 from cogito_worker.models import ExecutionRequest, McpToolGrant
 
 from .fakes import InMemoryExecutionJobClient
@@ -255,8 +256,14 @@ async def test_provisioned_run_key_maps_only_pinned_mcp_grants_to_gateway_identi
     gateway_server_id = "a" * 32
     settings = replace(
         execution_settings(),
-        mcp_gateway_server_ids={"cogito_readonly_mcp": gateway_server_id},
-        mcp_gateway_server_routes={"cogito_readonly_mcp": "cogito_readonly"},
+        mcp_gateway_servers={
+            "cogito_readonly_mcp@1.0.1": McpGatewayServer(
+                gateway_server_id=gateway_server_id,
+                route="cogito_readonly",
+                server_manifest_sha256="b" * 64,
+                tool_names=("catalog_read",),
+            )
+        },
     )
     run_keys = RecordingRunKeys()
     service = ExecutionWorkspaceService(settings, InMemoryExecutionJobClient(), run_keys)
@@ -269,7 +276,7 @@ async def test_provisioned_run_key_maps_only_pinned_mcp_grants_to_gateway_identi
         mcp_grants=[
             McpToolGrant(
                 server_id="cogito_readonly_mcp",
-                server_version="1.0.0",
+                server_version="1.0.1",
                 server_manifest_sha256="b" * 64,
                 tool_name="catalog_read",
                 input_schema_sha256="c" * 64,
@@ -281,6 +288,38 @@ async def test_provisioned_run_key_maps_only_pinned_mcp_grants_to_gateway_identi
     await service.cleanup(workspace)
 
     assert run_keys.budgets[0].mcp_tool_permissions == {gateway_server_id: ("catalog_read",)}
+
+
+async def test_provision_rejects_an_mcp_grant_that_does_not_match_the_configured_release() -> None:
+    settings = replace(
+        execution_settings(),
+        mcp_gateway_servers={
+            "cogito_readonly_mcp@1.0.1": McpGatewayServer(
+                gateway_server_id="a" * 32,
+                route="cogito_readonly",
+                server_manifest_sha256="b" * 64,
+                tool_names=("catalog_read",),
+            )
+        },
+    )
+    service = ExecutionWorkspaceService(settings, InMemoryExecutionJobClient())
+    request = ExecutionRequest(
+        run_id="run-1",
+        spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+        target_repos=[],
+        mcp_grants=[
+            McpToolGrant(
+                server_id="cogito_readonly_mcp",
+                server_version="1.0.0",
+                server_manifest_sha256="c" * 64,
+                tool_name="catalog_read",
+                input_schema_sha256="d" * 64,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="not configured"):
+        await service.provision(request)
 
 
 

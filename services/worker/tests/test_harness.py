@@ -11,6 +11,8 @@ from cogito_worker.models import (
     McpServerConfiguration,
     PhaseExecutionRequest,
     PlanPhase,
+    ReviewFinding,
+    ReviewRevisionRequest,
 )
 
 
@@ -155,6 +157,53 @@ async def test_harness_configures_only_the_workspace_mcp_routes_before_claude_ru
         "/workspace",
         "cogito_readonly",
         "http://cogito-litellm:4000/cogito_readonly/mcp",
+    ]
+
+
+async def test_review_revision_configures_workspace_mcp_routes_before_claude_runs() -> None:
+    workspaces = ScriptedWorkspaces()
+    phase_request = _request()
+    workspace = replace(
+        phase_request.workspace,
+        mcp_servers=[
+            McpServerConfiguration(
+                registration_id="cogito_readonly_mcp",
+                name="cogito_readonly",
+                url="http://cogito-litellm:4000/cogito_readonly/mcp",
+            )
+        ],
+    )
+    request = ReviewRevisionRequest(
+        workspace=workspace,
+        findings=[
+            ReviewFinding(
+                severity="blocking",
+                lens="correctness",
+                model="reviewer",
+                file="src/example.py",
+                line=1,
+                description="fix the verified blocker",
+                verified=True,
+            )
+        ],
+        phases=[phase_request.phase],
+        max_turns=7,
+        timeout_seconds=60,
+    )
+
+    result = await ClaudeCodeHarness(workspaces).address_review_findings(request)  # type: ignore[arg-type]
+
+    assert result.succeeded is True
+    mcp_index = next(index for index, (command, _) in enumerate(workspaces.calls) if "claude mcp add" in command[2])
+    claude_index = next(index for index, (command, _) in enumerate(workspaces.calls) if "exec claude" in command[2])
+    assert mcp_index < claude_index
+    assert workspaces.calls[claude_index][0] == [
+        "sh",
+        "-ec",
+        'cd "$1" && exec claude --print --output-format json --max-turns "$2" --dangerously-skip-permissions',
+        "sh",
+        "/workspace",
+        "7",
     ]
 
 

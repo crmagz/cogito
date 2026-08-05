@@ -193,6 +193,10 @@ class InMemorySupervisorStore:
         project_id: str,
         policy_revision: str,
     ) -> list[McpToolGrant]:
+        key = (run_id, role)
+        existing = self.run_mcp_tool_resolutions.get(key)
+        if existing is not None:
+            return existing
         policy = self.registry_mcp_policies.get(policy_revision)
         if policy is None:
             raise RegistryConflictError("registry policy revision is not available")
@@ -217,12 +221,6 @@ class InMemorySupervisorStore:
                         input_schema_sha256=input_schema_sha256,
                     )
                 )
-        key = (run_id, role)
-        existing = self.run_mcp_tool_resolutions.get(key)
-        if existing is not None:
-            if existing != expected:
-                raise RegistryConflictError("run MCP tools are already pinned to a different policy release")
-            return existing
         self.run_mcp_tool_resolutions[key] = expected
         return expected
 

@@ -1,10 +1,10 @@
 {
-  "policy_revision": "phase18_initial",
+  "policy_revision": "governed_mcp_initial",
   "bindings": [
     {
       "role": "developer",
       "server_id": "cogito_readonly_mcp",
-      "server_version": "1.0.0",
+      "server_version": "1.0.1",
       "tools": ["catalog_read"],
       "project_ids": ["default"]
     }

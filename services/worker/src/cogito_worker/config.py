@@ -2,8 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from urllib.parse import quote
+
+
+@dataclass(frozen=True)
+class McpGatewayServer:
+    """Trusted gateway configuration for one immutable MCP server release."""
+
+    gateway_server_id: str
+    route: str
+    server_manifest_sha256: str
+    tool_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -64,8 +75,7 @@ class Settings:
     supervisor_database_name: str
     supervisor_database_user: str
     supervisor_database_password: str
-    execution_mcp_gateway_server_ids: dict[str, str] = field(default_factory=dict)
-    execution_mcp_gateway_server_routes: dict[str, str] = field(default_factory=dict)
+    execution_mcp_gateway_servers: dict[str, McpGatewayServer] = field(default_factory=dict)
 
     @property
     def supervisor_database_url(self) -> str:
@@ -92,12 +102,7 @@ def load_settings() -> Settings:
         raise ValueError("COGITO_ALLOWED_GIT_HOSTS must be a non-empty JSON string array")
     if not isinstance(execution_resources, dict):
         raise ValueError("COGITO_EXECUTION_RESOURCES must be a JSON object")
-    execution_mcp_gateway_server_ids = _json_string_mapping(
-        "COGITO_EXECUTION_MCP_GATEWAY_SERVER_IDS", "{}"
-    )
-    execution_mcp_gateway_server_routes = _json_string_mapping(
-        "COGITO_EXECUTION_MCP_GATEWAY_SERVER_ROUTES", "{}"
-    )
+    execution_mcp_gateway_servers = _mcp_gateway_servers("COGITO_EXECUTION_MCP_GATEWAY_SERVERS", "{}")
     return Settings(
         temporal_host=os.environ.get("COGITO_TEMPORAL_HOST", "localhost:7233"),
         temporal_namespace=os.environ.get("COGITO_TEMPORAL_NAMESPACE", "default"),
@@ -181,17 +186,50 @@ def load_settings() -> Settings:
         supervisor_database_name=os.environ.get("COGITO_SUPERVISOR_DATABASE_NAME", "cogito"),
         supervisor_database_user=os.environ.get("COGITO_SUPERVISOR_DATABASE_USER", "postgres"),
         supervisor_database_password=os.environ.get("COGITO_SUPERVISOR_DATABASE_PASSWORD", "cogito"),
-        execution_mcp_gateway_server_ids=execution_mcp_gateway_server_ids,
-        execution_mcp_gateway_server_routes=execution_mcp_gateway_server_routes,
+        execution_mcp_gateway_servers=execution_mcp_gateway_servers,
     )
 
 
-def _json_string_mapping(name: str, default: str) -> dict[str, str]:
-    """Read a non-secret configuration mapping with strict scalar values."""
+def _mcp_gateway_servers(name: str, default: str) -> dict[str, McpGatewayServer]:
+    """Load exact gateway mappings keyed by immutable ``registration_id@version``."""
 
-    value = json.loads(os.environ.get(name, default))
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) and key and isinstance(item, str) and item for key, item in value.items()
-    ):
-        raise ValueError(f"{name} must be a JSON object with non-empty string keys and values")
-    return value
+    try:
+        value = json.loads(os.environ.get(name, default))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{name} must be a JSON object") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    servers: dict[str, McpGatewayServer] = {}
+    for release, server in value.items():
+        if not isinstance(release, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_-]{0,127}@[0-9]+(?:\.[0-9]+){0,2}", release
+        ):
+            raise ValueError(f"{name} keys must be registration_id@version values")
+        if not isinstance(server, dict) or set(server) != {
+            "gateway_server_id", "route", "server_manifest_sha256", "tool_names"
+        }:
+            raise ValueError(f"{name}.{release} must define the complete immutable gateway mapping")
+        gateway_server_id = server["gateway_server_id"]
+        route = server["route"]
+        manifest_sha256 = server["server_manifest_sha256"]
+        tool_names = server["tool_names"]
+        if not isinstance(gateway_server_id, str) or not re.fullmatch(r"[a-f0-9]{32}", gateway_server_id):
+            raise ValueError(f"{name}.{release}.gateway_server_id must be a 32-character lowercase digest")
+        if not isinstance(route, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,127}", route):
+            raise ValueError(f"{name}.{release}.route is invalid")
+        if not isinstance(manifest_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", manifest_sha256):
+            raise ValueError(f"{name}.{release}.server_manifest_sha256 must be a SHA-256 digest")
+        if (
+            not isinstance(tool_names, list)
+            or not tool_names
+            or not all(isinstance(tool, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,127}", tool) for tool in tool_names)
+            or len(set(tool_names)) != len(tool_names)
+        ):
+            raise ValueError(f"{name}.{release}.tool_names must be unique explicit tool names")
+        servers[release] = McpGatewayServer(
+            gateway_server_id=gateway_server_id,
+            route=route,
+            server_manifest_sha256=manifest_sha256,
+            tool_names=tuple(tool_names),
+        )
+    return servers

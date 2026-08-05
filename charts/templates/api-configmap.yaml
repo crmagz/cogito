@@ -63,6 +63,7 @@ data:
   COGITO_AUTH_OIDC_ADMIN_ROLE: {{ default "cogito-admin" $oidcAuth.adminRole | quote }}
   COGITO_WORKBENCH_DEFAULT_PROJECT_ID: {{ default "default" $auth.defaultProjectId | quote }}
   COGITO_REGISTRY_CATALOG_PATH: "/app/components"
+  COGITO_MCP_ENABLED: {{ .Values.mcp.enabled | quote }}
   COGITO_NOTIFICATION_ENABLED: {{ default false $notifications.enabled | quote }}
   COGITO_NOTIFICATION_WEBHOOK_URL: {{ default "" $notifications.webhookUrl | quote }}
   COGITO_NOTIFICATION_TIMEOUT_SECONDS: {{ default 10 $notifications.timeoutSeconds | quote }}

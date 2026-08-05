@@ -1,6 +1,6 @@
 {{- $mcp := default (dict) .Values.mcp }}
 {{- if $mcp.enabled }}
-{{- $image := merge (deepCopy .Values.worker.image) (default (dict) $mcp.image) }}
+{{- $image := merge (deepCopy (default (dict) $mcp.image)) .Values.worker.image }}
 {{- $service := default (dict) $mcp.service }}
 {{- $port := default 8000 $service.port }}
 apiVersion: apps/v1
@@ -34,6 +34,9 @@ spec:
           image: {{ include "cogito.image" (dict "root" . "image" $image) | quote }}
           imagePullPolicy: {{ $image.pullPolicy }}
           command: ["python", "-m", "cogito_worker.readonly_mcp"]
+          env:
+            - name: COGITO_MCP_PORT
+              value: {{ $port | quote }}
           ports:
             - name: http
               containerPort: {{ $port | int }}

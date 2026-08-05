@@ -1,9 +1,9 @@
 {
   "registration_id": "cogito_readonly_mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "kind": "mcp_server",
   "component_id": "cogito_readonly_mcp",
-  "component_version": "1.0.0",
+  "component_version": "1.0.1",
   "lifecycle": "active",
   "maturity": "incubating",
   "execution_class": "worker_service",
@@ -13,7 +13,7 @@
   "capabilities": ["read_capability_catalog"],
   "quality_gates": ["credentialless", "read_only", "internal_only"],
   "mcp_transport": "http",
-  "mcp_endpoint": "http://cogito-readonly-mcp.cogito.svc:8000/mcp",
+  "mcp_endpoint": "http://litellm-gateway/cogito_readonly/mcp",
   "mcp_tools": [
     {
       "name": "catalog_read",

@@ -88,9 +88,17 @@ options source credentials from the local machine.
 ### Governed MCP Kind E2E
 
 This opt-in test does not invoke a model or modify a repository. It verifies
-the persisted MCP policy, a real worker-issued LiteLLM run key, the allowed
-tool call, the denied-tool case, and temporary Secret cleanup. The selected
-release must have `mcp.enabled=true`.
+the persisted MCP policy, compatibility with the established agent policy, a
+revocation-safe retry of a pinned grant, a real worker-issued LiteLLM run key,
+the allowed tool call, the denied-tool case, and temporary Secret cleanup. The
+selected release must have `mcp.enabled=true`.
+
+When disabled, governed MCP emits no grants and normal agent runs continue
+without an MCP dependency. When enabled, the worker validates each grant
+against its exact server version, manifest digest, and allowed tool set before
+issuing a LiteLLM run key. The chart restricts the credentialless backing
+service to LiteLLM ingress with a Kubernetes `NetworkPolicy`; the cluster CNI
+must enforce NetworkPolicies for that isolation to be effective.
 
 ```sh
 COGITO_E2E_ENABLED=1 \

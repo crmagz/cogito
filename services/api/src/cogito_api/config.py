@@ -49,6 +49,7 @@ class Settings:
     auth_oidc_admin_role: str
     workbench_default_project_id: str
     registry_catalog_path: str
+    mcp_enabled: bool
     notification_enabled: bool
     notification_webhook_url: str
     notification_webhook_hmac_secret: str
@@ -135,6 +136,7 @@ def load_settings() -> Settings:
             "COGITO_REGISTRY_CATALOG_PATH",
             str(_default_registry_catalog_path()),
         ),
+        mcp_enabled=os.environ.get("COGITO_MCP_ENABLED", "false").lower() == "true",
         notification_enabled=os.environ.get("COGITO_NOTIFICATION_ENABLED", "false").lower() == "true",
         notification_webhook_url=os.environ.get("COGITO_NOTIFICATION_WEBHOOK_URL", ""),
         notification_webhook_hmac_secret=os.environ.get("COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET", ""),
