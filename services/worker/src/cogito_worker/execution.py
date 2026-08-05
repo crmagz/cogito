@@ -7,7 +7,7 @@ import json
 import re
 import shlex
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from .execution_prepare import feature_branch_name, repository_clone_url, repository_directory_name
@@ -57,6 +57,7 @@ class ExecutionJobSettings:
     git_author_name: str
     git_author_email: str
     command_output_limit_bytes: int
+    mcp_gateway_server_ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -538,6 +539,7 @@ class ExecutionWorkspaceService:
                         max_cost_usd=request.max_cost_usd,
                         model=self._settings.litellm_model,
                         expires_in_seconds=request.execution_timeout_seconds,
+                        mcp_tool_permissions=_gateway_mcp_tool_permissions(request, self._settings),
                     )
                 )
         except Exception:
@@ -631,6 +633,20 @@ class ExecutionWorkspaceService:
             timeout_seconds,
             self._settings.command_output_limit_bytes,
         )
+
+
+def _gateway_mcp_tool_permissions(
+    request: ExecutionRequest, settings: ExecutionJobSettings
+) -> dict[str, tuple[str, ...]]:
+    """Translate Supervisor-pinned MCP releases to trusted gateway identifiers."""
+
+    permissions: dict[str, set[str]] = {}
+    for grant in request.mcp_grants:
+        gateway_server_id = settings.mcp_gateway_server_ids.get(grant.server_id)
+        if gateway_server_id is None:
+            raise ValueError(f"MCP server '{grant.server_id}' is not configured in the execution gateway")
+        permissions.setdefault(gateway_server_id, set()).add(grant.tool_name)
+    return {server_id: tuple(sorted(tool_names)) for server_id, tool_names in permissions.items()}
 
 
 def _sanitize_diagnostics(value: str | bytes) -> str:

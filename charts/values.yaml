@@ -376,6 +376,8 @@ litellm:
 ## @section Governed MCP validation
 ## The deterministic read-only server is disabled by default. It is intended
 ## only for in-cluster authorization-path validation and has no credentials.
+## Enabling it also configures execution run keys with the derived LiteLLM
+## server identity; no endpoint or credential is exposed to execution jobs.
 mcp:
   enabled: false
   image: {}

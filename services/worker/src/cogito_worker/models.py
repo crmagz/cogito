@@ -208,6 +208,7 @@ class ExecutionRequest:
     target_repos: list[str]
     execution_timeout_seconds: int = 0
     max_cost_usd: float = 0.0
+    mcp_grants: list[McpToolGrant] = field(default_factory=list)
     run_key_secret: str = ""
     run_git_secret: str = ""
 

@@ -173,6 +173,7 @@ class DeveloperRunWorkflow:
                             + int(_BACKUP_ACTIVITY_TIMEOUT.total_seconds())
                         ),
                         max_cost_usd=max_cost_usd,
+                        mcp_grants=developer_registration.mcp_grants if developer_registration is not None else [],
                     )
                 ],
                 start_to_close_timeout=_PROVISION_ACTIVITY_TIMEOUT,

@@ -7,7 +7,7 @@ import base64
 import hashlib
 import json
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.request import Request, urlopen
 
@@ -20,6 +20,7 @@ class RunBudget:
     max_cost_usd: float
     model: str
     expires_in_seconds: int
+    mcp_tool_permissions: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 class RunKeyManager(Protocol):
@@ -73,15 +74,7 @@ class KubernetesLiteLLMRunKeyManager:
             await asyncio.to_thread(
                 self._post_json,
                 "/key/generate",
-                {
-                    "key": token,
-                    "key_alias": f"cogito-{_run_hash(budget.run_id)}",
-                    "models": [budget.model],
-                    "max_budget": budget.max_cost_usd,
-                    "budget_duration": f"{budget.expires_in_seconds}s",
-                    "key_type": "llm_api",
-                    "metadata": {"cogito_run_hash": _run_hash(budget.run_id)},
-                },
+                _run_key_payload(token, budget),
             )
             body = self._client.V1Secret(
                 metadata=self._client.V1ObjectMeta(
@@ -228,3 +221,31 @@ def _secret_token(secret: object, key: str = "api-key") -> str | None:
 def _validate_budget(budget: RunBudget) -> None:
     if budget.max_cost_usd <= 0 or budget.expires_in_seconds < 1 or not budget.model:
         raise ValueError("run budget must have a positive cost, expiry, and model")
+    for server_id, tool_names in budget.mcp_tool_permissions.items():
+        if not server_id or len(server_id) != 32 or any(character not in "0123456789abcdef" for character in server_id):
+            raise ValueError("MCP gateway server IDs must be 32-character lowercase digests")
+        if not tool_names or len(set(tool_names)) != len(tool_names) or any(not tool_name for tool_name in tool_names):
+            raise ValueError("MCP tool permissions must be explicit unique tool names")
+
+
+def _run_key_payload(token: str, budget: RunBudget) -> dict[str, object]:
+    """Build the non-persisted LiteLLM virtual-key request for one run."""
+
+    payload: dict[str, object] = {
+        "key": token,
+        "key_alias": f"cogito-{_run_hash(budget.run_id)}",
+        "models": [budget.model],
+        "max_budget": budget.max_cost_usd,
+        "budget_duration": f"{budget.expires_in_seconds}s",
+        "key_type": "llm_api",
+        "metadata": {"cogito_run_hash": _run_hash(budget.run_id)},
+    }
+    if budget.mcp_tool_permissions:
+        payload["object_permission"] = {
+            "mcp_servers": sorted(budget.mcp_tool_permissions),
+            "mcp_tool_permissions": {
+                server_id: list(tool_names)
+                for server_id, tool_names in sorted(budget.mcp_tool_permissions.items())
+            },
+        }
+    return payload

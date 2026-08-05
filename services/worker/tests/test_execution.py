@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -14,8 +15,8 @@ from cogito_worker.execution import (
     execution_job_name,
     _sanitize_diagnostics,
 )
-from cogito_worker.budgets import RunBudget
-from cogito_worker.models import ExecutionRequest
+from cogito_worker.budgets import RunBudget, _run_key_payload, _validate_budget
+from cogito_worker.models import ExecutionRequest, McpToolGrant
 
 from .fakes import InMemoryExecutionJobClient
 
@@ -143,6 +144,29 @@ def test_execution_job_uses_the_approved_budget_without_exceeding_operator_ceili
         )
 
 
+def test_run_key_payload_scopes_mcp_access_to_explicit_gateway_tools() -> None:
+    gateway_server_id = "a" * 32
+    budget = RunBudget(
+        run_id="run-1",
+        max_cost_usd=2.5,
+        model="complex",
+        expires_in_seconds=120,
+        mcp_tool_permissions={gateway_server_id: ("catalog_read",)},
+    )
+
+    _validate_budget(budget)
+    payload = _run_key_payload("test-token", budget)
+
+    assert payload["object_permission"] == {
+        "mcp_servers": [gateway_server_id],
+        "mcp_tool_permissions": {gateway_server_id: ["catalog_read"]},
+    }
+    with pytest.raises(ValueError, match="gateway server IDs"):
+        _validate_budget(
+            RunBudget("run-1", 2.5, "complex", 120, {"not-a-gateway-id": ("catalog_read",)})
+        )
+
+
 async def test_provisioning_removes_a_job_when_its_pod_never_becomes_active() -> None:
     """A failed startup does not leak a Job or its future workspace."""
 
@@ -214,6 +238,48 @@ async def test_provisioned_run_key_is_scoped_to_one_budget_and_execution_pod() -
     assert run_keys.cleaned == [("run-1", "cogito-run-key-abc")]
     assert run_git_credentials.provisioned == ["run-1"]
     assert run_git_credentials.cleaned == [("run-1", "cogito-run-git-abc")]
+
+
+async def test_provisioned_run_key_maps_only_pinned_mcp_grants_to_gateway_identity() -> None:
+    class RecordingRunKeys:
+        def __init__(self) -> None:
+            self.budgets: list[RunBudget] = []
+
+        async def provision(self, budget: RunBudget) -> str:
+            self.budgets.append(budget)
+            return "cogito-run-key-abc"
+
+        async def cleanup(self, run_id: str, secret_name: str) -> None:
+            return None
+
+    gateway_server_id = "a" * 32
+    settings = replace(
+        execution_settings(), mcp_gateway_server_ids={"cogito_readonly_mcp": gateway_server_id}
+    )
+    run_keys = RecordingRunKeys()
+    service = ExecutionWorkspaceService(settings, InMemoryExecutionJobClient(), run_keys)
+    request = ExecutionRequest(
+        run_id="run-1",
+        spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+        target_repos=[],
+        execution_timeout_seconds=120,
+        max_cost_usd=2.5,
+        mcp_grants=[
+            McpToolGrant(
+                server_id="cogito_readonly_mcp",
+                server_version="1.0.0",
+                server_manifest_sha256="b" * 64,
+                tool_name="catalog_read",
+                input_schema_sha256="c" * 64,
+            )
+        ],
+    )
+
+    workspace = await service.provision(request)
+    await service.cleanup(workspace)
+
+    assert run_keys.budgets[0].mcp_tool_permissions == {gateway_server_id: ("catalog_read",)}
+
 
 
 async def test_cleanup_revokes_run_credentials_when_job_deletion_fails() -> None:
