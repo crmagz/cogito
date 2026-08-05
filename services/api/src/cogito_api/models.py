@@ -299,6 +299,26 @@ class McpBindingPolicy(BaseModel):
         return self
 
 
+class McpToolGrant(BaseModel):
+    """Pinned tool-level authority for one MCP server release."""
+
+    server_id: str = Field(description="Immutable registered MCP server identifier")
+    server_version: str = Field(description="Immutable registered MCP server version")
+    server_manifest_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Canonical digest of the registered MCP server manifest",
+    )
+    tool_name: str = Field(description="Explicit MCP tool allow-listed for the role")
+    input_schema_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Pinned digest of the tool input-schema contract",
+    )
+
+
 class RegistrationManifest(BaseModel):
     """Declarative, non-secret definition of an immutable component release."""
 
@@ -408,6 +428,10 @@ class RegistrationReference(BaseModel):
     component_id: str = Field(description="Owning monorepo component identifier")
     component_version: str = Field(description="Owning immutable component release version")
     grants: list[ToolGrant] = Field(default_factory=list, description="Pinned tool releases and scopes for this role")
+    mcp_grants: list[McpToolGrant] = Field(
+        default_factory=list,
+        description="Pinned MCP server tools authorized for this role and run project",
+    )
 
 
 class PlanningRunResponse(BaseModel):

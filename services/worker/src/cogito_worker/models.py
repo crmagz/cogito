@@ -14,6 +14,17 @@ class ToolGrant:
 
 
 @dataclass(frozen=True)
+class McpToolGrant:
+    """Pinned tool-level authority for one gateway-routed MCP server release."""
+
+    server_id: str
+    server_version: str
+    server_manifest_sha256: str
+    tool_name: str
+    input_schema_sha256: str
+
+
+@dataclass(frozen=True)
 class RegistrationReference:
     """Pinned non-secret registry identity received from the Supervisor."""
 
@@ -24,6 +35,7 @@ class RegistrationReference:
     component_id: str
     component_version: str
     grants: list[ToolGrant] = field(default_factory=list)
+    mcp_grants: list[McpToolGrant] = field(default_factory=list)
 
 
 @dataclass

@@ -10,6 +10,8 @@ from cogito_api.models import (
     ImplementationApprovalDecision,
     PlanApprovalDecision,
     PlanningRunStatus,
+    McpBindingPolicy,
+    McpToolGrant,
     RegistrationManifest,
     RegistrationReference,
     RunEnvelope,
@@ -117,7 +119,9 @@ class InMemorySupervisorStore:
         self.implementation_outbox: dict[str, OutboxDelivery] = {}
         self.registrations: dict[tuple[str, str], RegistrationManifest] = {}
         self.registry_policies: dict[str, dict[str, str]] = {}
+        self.registry_mcp_policies: dict[str, McpBindingPolicy] = {}
         self.run_registration_resolutions: dict[tuple[str, str], RegistrationReference] = {}
+        self.run_mcp_tool_resolutions: dict[tuple[str, str], list[McpToolGrant]] = {}
         self.coordination_events: dict[str, CoordinationEvent] = {}
         self.notification_deliveries: dict[str, tuple[bool, int, str | None]] = {}
         self.leased_notification_event_ids: set[str] = set()
@@ -135,7 +139,11 @@ class InMemorySupervisorStore:
         manifests: list[RegistrationManifest],
         policy_revision: str,
         assignments: dict[str, str],
+        mcp_policy: McpBindingPolicy | None = None,
     ) -> None:
+        mcp_policy = mcp_policy or McpBindingPolicy(policy_revision=policy_revision)
+        if mcp_policy.policy_revision != policy_revision:
+            raise RegistryConflictError("MCP policy revision does not match the registry policy revision")
         for manifest in manifests:
             key = (manifest.registration_id, manifest.version)
             existing = self.registrations.get(key)
@@ -146,6 +154,10 @@ class InMemorySupervisorStore:
         if existing_policy is not None and existing_policy != assignments:
             raise RegistryConflictError("policy revision already exists with different assignments")
         self.registry_policies[policy_revision] = dict(assignments)
+        existing_mcp_policy = self.registry_mcp_policies.get(policy_revision)
+        if existing_mcp_policy is not None and existing_mcp_policy != mcp_policy:
+            raise RegistryConflictError("policy revision already exists with different MCP bindings")
+        self.registry_mcp_policies[policy_revision] = mcp_policy
 
     async def resolve_run_registration(
         self,
@@ -172,6 +184,46 @@ class InMemorySupervisorStore:
         if manifest_sha256(registered) != expected.manifest_sha256:
             raise RegistryConflictError("registration release does not match its declared manifest")
         self.run_registration_resolutions[key] = expected
+        return expected
+
+    async def resolve_run_mcp_tools(
+        self,
+        run_id: str,
+        role: str,
+        project_id: str,
+        policy_revision: str,
+    ) -> list[McpToolGrant]:
+        policy = self.registry_mcp_policies.get(policy_revision)
+        if policy is None:
+            raise RegistryConflictError("registry policy revision is not available")
+        expected: list[McpToolGrant] = []
+        for binding in policy.bindings:
+            if binding.role != role or project_id not in binding.project_ids:
+                continue
+            server = self.registrations.get((binding.server_id, binding.server_version))
+            if server is None or server.lifecycle.value != "active":
+                raise RegistryConflictError("MCP server release is not active")
+            tool_schemas = {tool.name: tool.input_schema_sha256 for tool in server.mcp_tools}
+            for tool_name in binding.tools:
+                input_schema_sha256 = tool_schemas.get(tool_name)
+                if input_schema_sha256 is None:
+                    raise RegistryConflictError("MCP policy references an unavailable server tool")
+                expected.append(
+                    McpToolGrant(
+                        server_id=binding.server_id,
+                        server_version=binding.server_version,
+                        server_manifest_sha256=manifest_sha256(server),
+                        tool_name=tool_name,
+                        input_schema_sha256=input_schema_sha256,
+                    )
+                )
+        key = (run_id, role)
+        existing = self.run_mcp_tool_resolutions.get(key)
+        if existing is not None:
+            if existing != expected:
+                raise RegistryConflictError("run MCP tools are already pinned to a different policy release")
+            return existing
+        self.run_mcp_tool_resolutions[key] = expected
         return expected
 
     async def create_planning_run(self, record: PlanningRunRecord) -> None:

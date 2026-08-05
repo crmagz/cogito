@@ -136,6 +136,28 @@ async def test_run_resolution_rejects_unselected_or_changed_release() -> None:
         await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
 
 
+async def test_mcp_run_resolution_is_project_scoped_and_immutable() -> None:
+    catalog = load_component_catalog(_catalog_root())
+    policy = load_mcp_binding_policy(_catalog_root(), catalog)
+    manifests = list(catalog.components)
+    assignments = {
+        item.registration_id: f"{item.registration_id}@{item.version}"
+        for item in manifests
+        if item.kind.value == "agent"
+    }
+    store = InMemorySupervisorStore()
+
+    await store.bootstrap_registry(manifests, policy.policy_revision, assignments, policy)
+    granted = await store.resolve_run_mcp_tools("run-1", "developer", "default", policy.policy_revision)
+    repeated = await store.resolve_run_mcp_tools("run-1", "developer", "default", policy.policy_revision)
+    denied = await store.resolve_run_mcp_tools("run-2", "developer", "different-project", policy.policy_revision)
+
+    assert repeated == granted
+    assert [(grant.server_id, grant.tool_name) for grant in granted] == [("cogito_readonly_mcp", "catalog_read")]
+    assert denied == []
+    assert store.run_mcp_tool_resolutions[("run-1", "developer")] == granted
+
+
 async def test_postgres_resolution_converges_when_a_concurrent_insert_wins() -> None:
     catalog = load_component_catalog(_catalog_root())
     planner = next(item for item in catalog.components if item.registration_id == "planner")
