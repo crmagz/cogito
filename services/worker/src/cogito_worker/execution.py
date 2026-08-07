@@ -637,7 +637,11 @@ class ExecutionWorkspaceService:
         collector = getattr(self._run_keys, "collect_mcp_invocations", None)
         if not callable(collector):
             return _unavailable_invocation_evidence("collector_unavailable")
-        routes = {(server.registration_id, server.server_version): server.name for server in workspace.mcp_servers}
+        routes = {
+            (server.registration_id, server.server_version): server.name
+            for server in workspace.mcp_servers
+            if server.server_version
+        }
         try:
             return await collector(workspace.run_id, workspace.run_key_secret, workspace.mcp_grants, routes)
         except Exception:
