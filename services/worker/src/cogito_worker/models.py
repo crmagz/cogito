@@ -25,6 +25,21 @@ class McpToolGrant:
 
 
 @dataclass(frozen=True)
+class AgentGatewayResolution:
+    """Pinned non-secret LiteLLM limits for one Supervisor-selected agent."""
+
+    policy_revision: str
+    project_id: str
+    role: str
+    registration_id: str
+    registration_version: str
+    manifest_sha256: str
+    model_alias: str
+    max_budget_usd: float
+    toolset: str
+
+
+@dataclass(frozen=True)
 class RegistrationReference:
     """Pinned non-secret registry identity received from the Supervisor."""
 
@@ -36,6 +51,7 @@ class RegistrationReference:
     component_version: str
     grants: list[ToolGrant] = field(default_factory=list)
     mcp_grants: list[McpToolGrant] = field(default_factory=list)
+    gateway: AgentGatewayResolution | None = None
 
 
 @dataclass
@@ -221,6 +237,7 @@ class ExecutionRequest:
     target_repos: list[str]
     execution_timeout_seconds: int = 0
     max_cost_usd: float = 0.0
+    gateway: AgentGatewayResolution | None = None
     mcp_grants: list[McpToolGrant] = field(default_factory=list)
     mcp_selection_explicit: bool = False
     run_key_secret: str = ""

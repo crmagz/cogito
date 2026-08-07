@@ -26,7 +26,13 @@ from cogito_worker.budgets import (
     run_key_secret_name,
 )
 from cogito_worker.config import McpGatewayServer
-from cogito_worker.models import ExecutionRequest, ExecutionWorkspace, McpServerConfiguration, McpToolGrant
+from cogito_worker.models import (
+    AgentGatewayResolution,
+    ExecutionRequest,
+    ExecutionWorkspace,
+    McpServerConfiguration,
+    McpToolGrant,
+)
 
 from .fakes import InMemoryExecutionJobClient
 
@@ -175,6 +181,79 @@ def test_run_key_payload_scopes_mcp_access_to_explicit_gateway_tools() -> None:
         _validate_budget(
             RunBudget("run-1", 2.5, "complex", 120, {"not-a-gateway-id": ("catalog_read",)})
         )
+
+
+def test_run_key_payload_records_the_pinned_agent_identity_without_a_credential() -> None:
+    budget = RunBudget(
+        run_id="run-1",
+        max_cost_usd=2.5,
+        model="balanced",
+        expires_in_seconds=120,
+        agent_registration_id="developer",
+        agent_manifest_sha256="a" * 64,
+    )
+
+    _validate_budget(budget)
+    payload = _run_key_payload("test-token", budget)
+
+    assert payload["models"] == ["balanced"]
+    assert payload["metadata"] == {
+        "cogito_run_hash": budgets._run_hash("run-1"),
+        "cogito_agent_registration": "developer",
+        "cogito_agent_manifest_sha256": "a" * 64,
+    }
+
+
+async def test_execution_workspace_uses_the_pinned_gateway_model_and_bounded_budget() -> None:
+    class RecordingRunKeys:
+        def __init__(self) -> None:
+            self.budgets: list[RunBudget] = []
+
+        async def provision(self, budget: RunBudget) -> str:
+            self.budgets.append(budget)
+            return "cogito-run-key-abc"
+
+        async def cleanup(self, run_id: str, secret_name: str) -> None:
+            return None
+
+    run_keys = RecordingRunKeys()
+    jobs = InMemoryExecutionJobClient()
+    service = ExecutionWorkspaceService(execution_settings(), jobs, run_keys)
+    gateway = AgentGatewayResolution(
+        policy_revision="agent_gateway_initial",
+        project_id="default",
+        role="developer",
+        registration_id="developer",
+        registration_version="1.0.0",
+        manifest_sha256="a" * 64,
+        model_alias="balanced",
+        max_budget_usd=1.25,
+        toolset="development-restricted",
+    )
+
+    await service.provision(
+        ExecutionRequest(
+            run_id="run-1",
+            spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            target_repos=[],
+            execution_timeout_seconds=120,
+            max_cost_usd=2.5,
+            gateway=gateway,
+        )
+    )
+
+    assert run_keys.budgets == [
+        RunBudget(
+            run_id="run-1",
+            max_cost_usd=1.25,
+            model="balanced",
+            expires_in_seconds=120,
+            agent_registration_id="developer",
+            agent_manifest_sha256="a" * 64,
+        )
+    ]
+    container = jobs.created[0][1]["spec"]["template"]["spec"]["containers"][0]
+    assert next(env["value"] for env in container["env"] if env["name"] == "ANTHROPIC_MODEL") == "balanced"
 
 
 def test_mcp_invocation_evidence_retains_only_pinned_grant_counts() -> None:

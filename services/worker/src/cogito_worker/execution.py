@@ -106,6 +106,7 @@ def build_execution_job(
     """Build the namespaced Job manifest for one isolated execution workspace."""
 
     run_hash = hashlib.sha256(request.run_id.encode()).hexdigest()[:20]
+    model_alias = request.gateway.model_alias if request.gateway is not None else settings.litellm_model
     labels = {
         "app.kubernetes.io/name": "execution",
         "app.kubernetes.io/component": "run-workspace",
@@ -221,7 +222,7 @@ def build_execution_job(
                                     "value": str(min(settings.idle_seconds, active_deadline_seconds)),
                                 },
                                 {"name": "ANTHROPIC_BASE_URL", "value": settings.litellm_endpoint},
-                                {"name": "ANTHROPIC_MODEL", "value": settings.litellm_model},
+                                {"name": "ANTHROPIC_MODEL", "value": model_alias},
                                 # Claude Code otherwise remaps an arbitrary gateway
                                 # alias to its legacy model selection. Keep the
                                 # immutable LiteLLM alias chosen by the run key.
@@ -531,6 +532,17 @@ class ExecutionWorkspaceService:
         run_key_secret = request.run_key_secret
         run_git_secret = request.run_git_secret
         mcp_servers = _gateway_mcp_servers(request, self._settings)
+        run_model = self._settings.litellm_model
+        run_budget = request.max_cost_usd
+        agent_registration_id = ""
+        agent_manifest_sha256 = ""
+        if request.gateway is not None:
+            if request.gateway.role != "developer" or request.gateway.registration_id != "developer":
+                raise ValueError("execution workspace requires the pinned developer gateway route")
+            run_model = request.gateway.model_alias
+            run_budget = min(run_budget, request.gateway.max_budget_usd)
+            agent_registration_id = request.gateway.registration_id
+            agent_manifest_sha256 = request.gateway.manifest_sha256
         try:
             if self._run_git_credentials is not None:
                 run_git_secret = await self._run_git_credentials.provision(request.run_id)
@@ -538,12 +550,14 @@ class ExecutionWorkspaceService:
                 run_key_secret = await self._run_keys.provision(
                     RunBudget(
                         run_id=request.run_id,
-                        max_cost_usd=request.max_cost_usd,
-                        model=self._settings.litellm_model,
+                        max_cost_usd=run_budget,
+                        model=run_model,
                         expires_in_seconds=request.execution_timeout_seconds,
                         mcp_tool_permissions={
                             server.gateway_server_id: server.tool_names for server in mcp_servers
                         },
+                        agent_registration_id=agent_registration_id,
+                        agent_manifest_sha256=agent_manifest_sha256,
                     )
                 )
         except Exception:

@@ -31,6 +31,8 @@ class RunBudget:
     model: str
     expires_in_seconds: int
     mcp_tool_permissions: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    agent_registration_id: str = ""
+    agent_manifest_sha256: str = ""
 
 
 class RunKeyManager(Protocol):
@@ -289,6 +291,13 @@ def _validate_budget(budget: RunBudget) -> None:
         raise ValueError("run budget must have a positive cost, expiry, and model")
     if not isinstance(budget.mcp_tool_permissions, Mapping):
         raise ValueError("MCP tool permissions must be a mapping")
+    if bool(budget.agent_registration_id) != bool(budget.agent_manifest_sha256):
+        raise ValueError("run budget must identify both the agent registration and manifest or neither")
+    if budget.agent_manifest_sha256 and (
+        len(budget.agent_manifest_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in budget.agent_manifest_sha256)
+    ):
+        raise ValueError("run budget agent manifest must be a lowercase SHA-256 digest")
     for server_id, tool_names in budget.mcp_tool_permissions.items():
         if (
             not isinstance(server_id, str)
@@ -376,6 +385,12 @@ def _run_key_payload(token: str, budget: RunBudget) -> dict[str, object]:
         "key_type": "llm_api",
         "metadata": {"cogito_run_hash": _run_hash(budget.run_id)},
     }
+    if budget.agent_registration_id:
+        payload["metadata"] = {
+            "cogito_run_hash": _run_hash(budget.run_id),
+            "cogito_agent_registration": budget.agent_registration_id,
+            "cogito_agent_manifest_sha256": budget.agent_manifest_sha256,
+        }
     if budget.mcp_tool_permissions:
         payload["object_permission"] = {
             "mcp_servers": sorted(budget.mcp_tool_permissions),

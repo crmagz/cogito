@@ -11,6 +11,12 @@ only policy, approval, credential-broker, audit, retry, and lifecycle
 authority. Components receive only immutable artifact references and scoped
 broker capabilities selected for a run.
 
+`agent_gateway_policy.json` is the separately versioned, non-secret policy
+that selects an agent release, LiteLLM model alias, budget ceiling, and
+toolset label for each project and role. It is an allow-list: a catalog release
+cannot execute merely because it is registered, and a policy route cannot
+grant a tool that the selected agent release does not declare.
+
 ## Lifecycles
 
 Component maturity describes the operational state of the capability:

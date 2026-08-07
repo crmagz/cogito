@@ -207,6 +207,8 @@ class DeveloperRunWorkflow:
                             + int(_BACKUP_ACTIVITY_TIMEOUT.total_seconds())
                         ),
                         max_cost_usd=max_cost_usd,
+<<<<<<< HEAD
+                        gateway=developer_registration.gateway if developer_registration is not None else None,
                         mcp_grants=developer_mcp_grants,
                         mcp_selection_explicit=approved_selection is not None,
                     )
@@ -553,6 +555,21 @@ def _implementation_evidence(envelope: RunEnvelope, workspace, phase_results: li
                     }
                     for grant in resolution.mcp_grants
                 ],
+                "gateway": (
+                    {
+                        "policy_revision": resolution.gateway.policy_revision,
+                        "project_id": resolution.gateway.project_id,
+                        "role": resolution.gateway.role,
+                        "registration_id": resolution.gateway.registration_id,
+                        "registration_version": resolution.gateway.registration_version,
+                        "manifest_sha256": resolution.gateway.manifest_sha256,
+                        "model_alias": resolution.gateway.model_alias,
+                        "max_budget_usd": resolution.gateway.max_budget_usd,
+                        "toolset": resolution.gateway.toolset,
+                    }
+                    if resolution.gateway is not None
+                    else None
+                ),
             }
             for resolution in envelope.registry_resolutions
         ],
