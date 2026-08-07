@@ -238,9 +238,14 @@ def create_app(
             resolutions = []
             for role in roles:
                 resolution = await supervisor_store.resolve_run_registration(run_id, role, policy_revision, agents[role])
-                gateway = await supervisor_store.resolve_run_agent_gateway(
-                    run_id, role, project_id, resolution, agent_gateway_policy
-                )
+                gateway = None
+                if any(
+                    binding.role == role and project_id in binding.project_ids
+                    for binding in agent_gateway_policy.bindings
+                ):
+                    gateway = await supervisor_store.resolve_run_agent_gateway(
+                        run_id, role, project_id, resolution, agent_gateway_policy
+                    )
                 mcp_grants = (
                     await supervisor_store.resolve_run_mcp_tools(
                         run_id, role, project_id, mcp_policy.policy_revision
@@ -475,6 +480,8 @@ def create_app(
                     await resolve_roles(run_id, ["planner"], record.project_id or settings.workbench_default_project_id)
                 )[0]
                 require_tool(planner_resolution, "planning_model", "plan_generation")
+                if planner_resolution.gateway is None:
+                    raise RegistryConflictError("planner gateway route is unavailable")
             except (RegistryAuthorizationError, RegistryConflictError) as error:
                 raise HTTPException(status_code=503, detail="planner registry grant is unavailable") from error
             try:
@@ -488,7 +495,8 @@ def create_app(
                         target_repos=record.target_repos,
                         spec_set=record.spec_set,
                         constraints=record.constraints,
-                    )
+                    ),
+                    planner_resolution.gateway,
                 )
             except PlannerError as error:
                 raise HTTPException(status_code=502, detail="planner failed to produce a valid plan") from error
@@ -502,7 +510,7 @@ def create_app(
                 updated = await supervisor_store.attach_generated_plan(
                     run_id,
                     plan_artifact=ArtifactReference(ref=snapshot.ref, sha256=snapshot.sha256),
-                    planner_model=settings.litellm_planner_model,
+                    planner_model=planner_resolution.gateway.model_alias,
                     workflow_id=workflow_id,
                     expected_plan_revision=record.plan_revision,
                 )

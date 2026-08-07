@@ -207,7 +207,7 @@ class DeveloperRunWorkflow:
                             + int(_BACKUP_ACTIVITY_TIMEOUT.total_seconds())
                         ),
                         max_cost_usd=max_cost_usd,
-<<<<<<< HEAD
+                        registration=developer_registration,
                         gateway=developer_registration.gateway if developer_registration is not None else None,
                         mcp_grants=developer_mcp_grants,
                         mcp_selection_explicit=approved_selection is not None,

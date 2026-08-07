@@ -13,9 +13,12 @@ broker capabilities selected for a run.
 
 `agent_gateway_policy.json` is the separately versioned, non-secret policy
 that selects an agent release, LiteLLM model alias, budget ceiling, and
-toolset label for each project and role. It is an allow-list: a catalog release
-cannot execute merely because it is registered, and a policy route cannot
-grant a tool that the selected agent release does not declare.
+toolset label for each project and active LLM role. It is an allow-list: a
+catalog release cannot execute merely because it is registered, and a policy
+route cannot grant a tool that the selected agent release does not declare.
+This first substrate routes the planner and developer paths; separate reviewer,
+validator, environment-test, and publishing adapters must be added before a
+route is declared for those roles.
 
 ## Lifecycles
 

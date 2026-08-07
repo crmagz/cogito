@@ -36,6 +36,7 @@ def make_settings(**overrides) -> Settings:
         supervisor_database_password="cogito",
         litellm_endpoint="http://litellm.test:4000",
         litellm_planner_model="balanced",
+        litellm_planner_max_budget_usd=5.0,
         litellm_planner_api_key="planner-test-key",
         litellm_planner_timeout_seconds=60.0,
         deployment_mode="development",

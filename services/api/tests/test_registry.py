@@ -80,6 +80,16 @@ def test_agent_gateway_policy_selects_a_project_scoped_route_for_each_registered
     assert developer.toolset == "development-restricted"
 
 
+def test_agent_gateway_policy_rejects_a_non_finite_budget(tmp_path: Path) -> None:
+    shutil.copytree(_catalog_root(), tmp_path, dirs_exist_ok=True)
+    policy = json.loads((tmp_path / "agent_gateway_policy.json").read_text(encoding="utf-8"))
+    policy["bindings"][0]["max_budget_usd"] = float("inf")
+    (tmp_path / "agent_gateway_policy.json").write_text(json.dumps(policy), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be finite"):
+        load_agent_gateway_policy(tmp_path, load_component_catalog(tmp_path))
+
+
 def test_chart_gateway_mapping_tracks_the_current_mcp_manifest() -> None:
     catalog = load_component_catalog(_catalog_root())
     server = next(item for item in catalog.components if item.registration_id == "cogito_readonly_mcp")

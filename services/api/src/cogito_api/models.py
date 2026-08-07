@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum, StrEnum
+from math import isfinite
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -324,6 +325,8 @@ class AgentGatewayBinding(BaseModel):
     def validate_unique_projects(self) -> "AgentGatewayBinding":
         """Require each project to appear only once in one binding."""
 
+        if not isfinite(self.max_budget_usd):
+            raise ValueError("agent gateway binding max budget must be finite")
         if len(set(self.project_ids)) != len(self.project_ids):
             raise ValueError("agent gateway binding project IDs must be unique")
         return self
