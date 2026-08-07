@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -51,6 +52,8 @@ class Settings:
     workbench_default_project_id: str
     registry_catalog_path: str
     mcp_enabled: bool
+    mcp_github_enabled: bool
+    mcp_target_repository_scopes: dict[str, str]
     notification_enabled: bool
     notification_webhook_url: str
     notification_webhook_hmac_secret: str
@@ -91,6 +94,7 @@ def load_settings() -> Settings:
         raise ValueError("COGITO_ALLOWED_GIT_HOSTS must be a non-empty JSON string array")
     static_projects = _json_string_array("COGITO_AUTH_STATIC_PROJECTS", '["default"]')
     static_roles = _json_string_array("COGITO_AUTH_STATIC_ROLES", '["cogito-viewer", "cogito-approver"]')
+    mcp_target_repository_scopes = _mcp_target_repository_scopes("COGITO_MCP_TARGET_REPOSITORY_SCOPES")
     settings = Settings(
         minio_endpoint=os.environ.get("MINIO_ENDPOINT", "localhost:9000"),
         minio_access_key=os.environ.get("MINIO_ACCESS_KEY", "minioadmin"),
@@ -139,6 +143,8 @@ def load_settings() -> Settings:
             str(_default_registry_catalog_path()),
         ),
         mcp_enabled=os.environ.get("COGITO_MCP_ENABLED", "false").lower() == "true",
+        mcp_github_enabled=os.environ.get("COGITO_MCP_GITHUB_ENABLED", "false").lower() == "true",
+        mcp_target_repository_scopes=mcp_target_repository_scopes,
         notification_enabled=os.environ.get("COGITO_NOTIFICATION_ENABLED", "false").lower() == "true",
         notification_webhook_url=os.environ.get("COGITO_NOTIFICATION_WEBHOOK_URL", ""),
         notification_webhook_hmac_secret=os.environ.get("COGITO_NOTIFICATION_WEBHOOK_HMAC_SECRET", ""),
@@ -157,6 +163,24 @@ def _default_registry_catalog_path() -> Path:
 
     local_catalog = Path(__file__).parents[4] / "components"
     return local_catalog if local_catalog.is_dir() else Path("/app/components")
+
+
+def _mcp_target_repository_scopes(name: str) -> dict[str, str]:
+    """Read non-secret server-release to repository scopes without coercion."""
+
+    try:
+        value = json.loads(os.environ.get(name, "{}"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{name} must be a JSON object") from error
+    if not isinstance(value, dict) or not all(
+        isinstance(release, str)
+        and isinstance(repository, str)
+        and re.fullmatch(r"[a-z][a-z0-9_-]{0,127}@[0-9]+(?:\.[0-9]+){0,2}", release)
+        and re.fullmatch(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", repository)
+        for release, repository in value.items()
+    ):
+        raise ValueError(f"{name} must map server releases to owner/repository values")
+    return {release: repository.casefold() for release, repository in value.items()}
 
 
 def _json_string_array(name: str, default: str) -> tuple[str, ...]:

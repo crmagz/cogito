@@ -1,0 +1,48 @@
+{{- $mcp := default (dict) .Values.mcp }}
+{{- $github := default (dict) $mcp.github }}
+{{- if $github.enabled }}
+{{- $service := default (dict) $github.service }}
+{{- $port := default 8001 $service.port }}
+{{- $proxy := default (dict) $github.egressProxy }}
+{{- $proxyPort := default 3128 $proxy.port | int }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-github-readonly-mcp-boundary
+  labels:
+    app.kubernetes.io/name: github-readonly-mcp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: github-readonly-mcp
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: litellm
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: {{ $port | int }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        {{- toYaml $proxy.networkPolicyPeers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ $proxyPort }}
+{{- end }}

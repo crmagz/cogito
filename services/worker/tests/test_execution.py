@@ -719,6 +719,40 @@ async def test_provision_rejects_an_mcp_grant_that_does_not_match_the_configured
         await service.provision(request)
 
 
+async def test_provision_rejects_a_repository_scoped_grant_after_connector_scope_changes() -> None:
+    settings = replace(
+        execution_settings(),
+        mcp_gateway_servers={
+            "github_readonly_mcp@1.0.0": McpGatewayServer(
+                gateway_server_id="a" * 32,
+                route="github_readonly",
+                server_manifest_sha256="b" * 64,
+                tool_names=("repository_get",),
+                repository_scope="acme/second-repository",
+            )
+        },
+    )
+    service = ExecutionWorkspaceService(settings, InMemoryExecutionJobClient())
+    request = ExecutionRequest(
+        run_id="run-1",
+        spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+        target_repos=[],
+        mcp_grants=[
+            McpToolGrant(
+                server_id="github_readonly_mcp",
+                server_version="1.0.0",
+                server_manifest_sha256="b" * 64,
+                tool_name="repository_get",
+                input_schema_sha256="c" * 64,
+                repository_scope="acme/first-repository",
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="pinned repository scope"):
+        await service.provision(request)
+
+
 
 async def test_cleanup_revokes_run_credentials_when_job_deletion_fails() -> None:
     class FailingDeleteExecutionJobClient(InMemoryExecutionJobClient):

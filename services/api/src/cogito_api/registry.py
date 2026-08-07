@@ -66,6 +66,8 @@ def canonical_manifest_bytes(manifest: RegistrationManifest) -> bytes:
         value.pop("mcp_transport")
     if manifest.mcp_endpoint is None:
         value.pop("mcp_endpoint")
+    if manifest.mcp_endpoint_template is None:
+        value.pop("mcp_endpoint_template")
     if not manifest.mcp_tools:
         value.pop("mcp_tools")
     return json.dumps(
@@ -119,10 +121,12 @@ def load_component_catalog(catalog_root: Path) -> ComponentCatalog:
     return ComponentCatalog(components=components)
 
 
-def load_mcp_binding_policy(catalog_root: Path, catalog: ComponentCatalog) -> McpBindingPolicy:
-    """Load the reviewed MCP allow-list and reject references outside the catalog."""
+def load_mcp_binding_policy(
+    catalog_root: Path, catalog: ComponentCatalog, filename: str = "mcp_policy.json"
+) -> McpBindingPolicy:
+    """Load one reviewed MCP allow-list and reject references outside the catalog."""
 
-    definition = catalog_root / "mcp_policy.json"
+    definition = catalog_root / filename
     try:
         value = json.loads(definition.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:

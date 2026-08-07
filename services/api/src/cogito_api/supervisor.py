@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from typing import Any, Mapping, Protocol
+from urllib.parse import urlparse
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -192,7 +193,7 @@ def _matches_registration_resolution(
     )
 
 
-def _mcp_grant_key(grant: McpToolGrant) -> tuple[str, str, str, str, str]:
+def _mcp_grant_key(grant: McpToolGrant) -> tuple[str, str, str, str, str, str, str]:
     """Return a stable identity for a pinned MCP tool authorization."""
 
     return (
@@ -201,6 +202,7 @@ def _mcp_grant_key(grant: McpToolGrant) -> tuple[str, str, str, str, str]:
         grant.server_manifest_sha256,
         grant.tool_name,
         grant.input_schema_sha256,
+        grant.repository_scope or "",
     )
 
 
@@ -346,6 +348,8 @@ class SupervisorStore(Protocol):
         role: str,
         project_id: str,
         policy_revision: str,
+        target_repositories: list[str] | None = None,
+        target_repository_scopes: Mapping[str, str] | None = None,
     ) -> list[McpToolGrant]: ...
 
     async def bootstrap_agent_gateway_policy(self, policy: AgentGatewayPolicy) -> None: ...
@@ -873,6 +877,8 @@ class PostgresSupervisorStore:
         role: str,
         project_id: str,
         policy_revision: str,
+        target_repositories: list[str] | None = None,
+        target_repository_scopes: Mapping[str, str] | None = None,
     ) -> list[McpToolGrant]:
         """Pin project-scoped MCP tool authority from the immutable policy revision."""
 
@@ -881,7 +887,7 @@ class PostgresSupervisorStore:
                 text(
                     """
                     SELECT server_registration_id, server_version, server_manifest_sha256,
-                           tool_name, input_schema_sha256, policy_revision
+                           tool_name, input_schema_sha256, repository_scope, policy_revision
                     FROM run_mcp_tool_resolutions
                     WHERE run_id = :run_id AND role = :role
                     FOR UPDATE
@@ -901,6 +907,7 @@ class PostgresSupervisorStore:
                             server_manifest_sha256=item["server_manifest_sha256"],
                             tool_name=item["tool_name"],
                             input_schema_sha256=item["input_schema_sha256"],
+                            repository_scope=item["repository_scope"],
                         )
                         for item in persisted
                     ],
@@ -923,6 +930,18 @@ class PostgresSupervisorStore:
             for binding in bindings.bindings:
                 if binding.role != role or project_id not in binding.project_ids:
                     continue
+                if not _binding_targets_a_run_repository(
+                    binding.server_id,
+                    binding.server_version,
+                    target_repositories or [],
+                    target_repository_scopes or {},
+                ):
+                    continue
+                repository_scope = (target_repository_scopes or {}).get(
+                    f"{binding.server_id}@{binding.server_version}"
+                )
+                if repository_scope is not None:
+                    repository_scope = repository_scope.casefold()
                 registration = await connection.execute(
                     text(
                         """
@@ -952,6 +971,7 @@ class PostgresSupervisorStore:
                             server_manifest_sha256=row["manifest_sha256"],
                             tool_name=tool_name,
                             input_schema_sha256=input_schema_sha256,
+                            repository_scope=repository_scope,
                         )
                     )
             expected = sorted(grants, key=_mcp_grant_key)
@@ -961,10 +981,10 @@ class PostgresSupervisorStore:
                         """
                         INSERT INTO run_mcp_tool_resolutions (
                             run_id, role, server_registration_id, server_version, server_manifest_sha256,
-                            tool_name, input_schema_sha256, policy_revision, created_at
+                            tool_name, input_schema_sha256, repository_scope, policy_revision, created_at
                         ) VALUES (
                             :run_id, :role, :server_id, :server_version, :server_manifest_sha256,
-                            :tool_name, :input_schema_sha256, :policy_revision, now()
+                            :tool_name, :input_schema_sha256, :repository_scope, :policy_revision, now()
                         ) ON CONFLICT DO NOTHING
                         """
                     ),
@@ -976,6 +996,7 @@ class PostgresSupervisorStore:
                         "server_manifest_sha256": grant.server_manifest_sha256,
                         "tool_name": grant.tool_name,
                         "input_schema_sha256": grant.input_schema_sha256,
+                        "repository_scope": grant.repository_scope,
                         "policy_revision": policy_revision,
                     },
                 )
@@ -991,11 +1012,11 @@ class PostgresSupervisorStore:
                 text(
                     """
                     SELECT role, server_registration_id, server_version, server_manifest_sha256,
-                           tool_name, input_schema_sha256
+                           tool_name, input_schema_sha256, repository_scope
                     FROM run_mcp_tool_resolutions
                     WHERE run_id = :run_id AND role = 'developer'
                     ORDER BY role, server_registration_id, server_version, server_manifest_sha256,
-                             tool_name, input_schema_sha256
+                             tool_name, input_schema_sha256, repository_scope
                     """
                 ),
                 {"run_id": run_id},
@@ -2168,6 +2189,7 @@ def _mcp_tool_selection(row: Mapping[str, Any]) -> McpToolSelection:
         server_manifest_sha256=row["server_manifest_sha256"],
         tool_name=row["tool_name"],
         input_schema_sha256=row["input_schema_sha256"],
+        repository_scope=row["repository_scope"],
     )
 
 
@@ -2197,6 +2219,37 @@ def _canonical_mcp_selection(selection: list[McpToolSelection] | None) -> list[M
     return sorted(selection, key=McpToolSelection.key)
 
 
+def _binding_targets_a_run_repository(
+    server_id: str,
+    server_version: str,
+    target_repositories: list[str],
+    target_repository_scopes: Mapping[str, str],
+) -> bool:
+    """Allow an MCP release only when its configured repository is in this run."""
+
+    scope = target_repository_scopes.get(f"{server_id}@{server_version}")
+    if scope is None:
+        return True
+    return scope.casefold() in {
+        repository_id
+        for target in target_repositories
+        if (repository_id := _github_repository_id(target)) is not None
+    }
+
+
+def _github_repository_id(target: str) -> str | None:
+    """Return a canonical GitHub owner/repository identity for an immutable target URL."""
+
+    parsed = urlparse(target)
+    if parsed.scheme != "https" or parsed.hostname != "github.com" or parsed.username or parsed.password:
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    repository = parts[1].removesuffix(".git")
+    return f"{parts[0]}/{repository}".casefold() if repository else None
+
+
 async def _require_mcp_selection_subset(
     connection, run_id: str, selection: list[McpToolSelection] | None
 ) -> None:  # type: ignore[no-untyped-def]
@@ -2208,7 +2261,7 @@ async def _require_mcp_selection_subset(
         text(
             """
             SELECT role, server_registration_id, server_version, server_manifest_sha256,
-                   tool_name, input_schema_sha256
+                   tool_name, input_schema_sha256, repository_scope
             FROM run_mcp_tool_resolutions
             WHERE run_id = :run_id AND role = 'developer'
             """

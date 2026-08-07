@@ -39,6 +39,9 @@ audience, and JWKS values. They must also provision these outside Helm:
 - separate, least-privilege LiteLLM role-key Secrets for planner, developer,
   and reviewers;
 - external database, object-store, and GitHub pull-request credential Secrets;
+- when enabling the GitHub read-only MCP connector: a separate GitHub App
+  Secret (`app-id`, `installation-id`, and `private-key`), an explicit
+  single-repository allow-list, and an egress-proxy NetworkPolicy peer;
 - the Workbench's environment-owned OIDC session relay.
 
 The chart never reads a local cloud profile or creates provider credentials.
@@ -99,6 +102,15 @@ against its exact server version, manifest digest, and allowed tool set before
 issuing a LiteLLM run key. The chart restricts the credentialless backing
 service to LiteLLM ingress with a Kubernetes `NetworkPolicy`; the cluster CNI
 must enforce NetworkPolicies for that isolation to be effective.
+
+The optional GitHub connector is a separate, read-only MCP service. It mints a
+short-lived GitHub App installation token limited to its one configured
+repository and Contents, Issues, and Pull requests read permissions. Its App
+private key is mounted only into the connector pod; it accepts LiteLLM ingress
+only and can reach GitHub only through the required environment-owned egress
+proxy. A run receives its GitHub tool grants only when its immutable target
+repositories include that configured repository. It is owned by
+`cogito-platform` for maintenance and incident response.
 
 ```sh
 COGITO_E2E_ENABLED=1 \

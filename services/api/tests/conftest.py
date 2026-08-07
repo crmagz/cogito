@@ -56,6 +56,8 @@ def make_settings(**overrides) -> Settings:
         workbench_default_project_id="default",
         registry_catalog_path=str(Path(__file__).parents[3] / "components"),
         mcp_enabled=False,
+        mcp_github_enabled=False,
+        mcp_target_repository_scopes={},
         notification_enabled=False,
         notification_webhook_url="",
         notification_webhook_hmac_secret="",

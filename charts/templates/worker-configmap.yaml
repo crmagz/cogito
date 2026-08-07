@@ -3,6 +3,10 @@
 {{- $mcp := default (dict) .Values.mcp }}
 {{- $mcpService := default (dict) $mcp.service }}
 {{- $mcpPort := default 8000 $mcpService.port }}
+{{- $github := default (dict) $mcp.github }}
+{{- $githubService := default (dict) $github.service }}
+{{- $githubPort := default 8001 $githubService.port }}
+{{- $githubApp := default (dict) $github.app }}
 {{- $mcpGatewayServers := dict }}
 {{- if $mcp.enabled }}
 {{- $gatewayServerID := printf "cogito_readonly|http://%s-readonly-mcp.%s.svc:%v/mcp|http|none|" .Release.Name .Release.Namespace ($mcpPort | int) | sha256sum | trunc 32 }}
@@ -11,6 +15,14 @@
 {{- /* Retain the predecessor mapping so persisted in-flight grants remain executable after an upgrade. */ -}}
 {{- $legacyServer := dict "gateway_server_id" $gatewayServerID "route" "cogito_readonly" "server_manifest_sha256" "2084e3d093d38992d2d10acd7c3545189fe949e2778cd924f8f85bec8b93b0b7" "tool_names" (list "catalog_read") }}
 {{- $_ := set $mcpGatewayServers "cogito_readonly_mcp@1.0.0" $legacyServer }}
+{{- end }}
+{{- if $github.enabled }}
+{{- $githubRepositoryScope := index $githubApp.allowedRepositories 0 | lower }}
+{{- /* A route is scoped to the configured repository, so a Helm change cannot redirect an in-flight run to another repository. */ -}}
+{{- $githubRoute := printf "github_readonly_%s" ($githubRepositoryScope | sha256sum | trunc 12) }}
+{{- $githubGatewayServerID := printf "%s|http://%s-github-readonly-mcp.%s.svc:%v/mcp|http|none|" $githubRoute .Release.Name .Release.Namespace ($githubPort | int) | sha256sum | trunc 32 }}
+{{- $githubServer := dict "gateway_server_id" $githubGatewayServerID "route" $githubRoute "server_manifest_sha256" "33aab86822040fa5880ce0f9d89eebd000d24fc3c9986e020bd7b89ac0e2a298" "tool_names" (list "repository_get" "file_get" "issue_get" "pull_request_get") "repository_scope" $githubRepositoryScope }}
+{{- $_ := set $mcpGatewayServers "github_readonly_mcp@1.0.0" $githubServer }}
 {{- end }}
 {{- $telemetryEnabled := or .Values.observability.traces.enabled .Values.observability.metrics.enabled }}
 {{- if and $telemetryEnabled (not .Values.observability.otlp.endpoint) }}

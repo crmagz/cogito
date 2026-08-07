@@ -720,6 +720,8 @@ def _gateway_mcp_servers(request: ExecutionRequest, settings: ExecutionJobSettin
             raise ValueError(f"MCP server release '{release}' does not match its configured manifest")
         if grant.tool_name not in server.tool_names:
             raise ValueError(f"MCP tool '{grant.tool_name}' is not configured for server release '{release}'")
+        if grant.repository_scope != server.repository_scope:
+            raise ValueError(f"MCP server release '{release}' does not match its pinned repository scope")
         configured_servers[release] = server
         permissions.setdefault(release, set()).add(grant.tool_name)
     return [

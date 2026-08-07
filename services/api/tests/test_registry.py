@@ -46,13 +46,14 @@ def test_component_catalog_is_complete_and_versioned() -> None:
         "ephemeral_environment",
         "github_publisher",
         "cogito_readonly_mcp",
+        "github_readonly_mcp",
     }
     assert all(
         item.version == ("1.0.1" if item.registration_id == "cogito_readonly_mcp" else "1.0.0")
         for item in catalog.components
     )
     assert all(
-        item.execution_class.value == ("worker_service" if item.registration_id == "cogito_readonly_mcp" else "adapter")
+        item.execution_class.value == ("worker_service" if item.registration_id in {"cogito_readonly_mcp", "github_readonly_mcp"} else "adapter")
         for item in catalog.components
     )
     assert all(item.owner == "cogito-platform" for item in catalog.components)
@@ -90,6 +91,25 @@ def test_agent_gateway_policy_rejects_a_non_finite_budget(tmp_path: Path) -> Non
         load_agent_gateway_policy(tmp_path, load_component_catalog(tmp_path))
 
 
+def test_github_mcp_policy_is_independently_pinned_to_github_tools() -> None:
+    catalog = load_component_catalog(_catalog_root())
+
+    policy = load_mcp_binding_policy(_catalog_root(), catalog, "github_mcp_policy.json")
+
+    assert policy.policy_revision == "governed_mcp_github_initial"
+    github_binding = next(binding for binding in policy.bindings if binding.server_id == "github_readonly_mcp")
+    assert github_binding.tools == ["repository_get", "file_get", "issue_get", "pull_request_get"]
+
+
+def test_github_mcp_registration_declares_a_deployment_scoped_gateway_endpoint() -> None:
+    catalog = load_component_catalog(_catalog_root())
+
+    github_server = next(item for item in catalog.components if item.registration_id == "github_readonly_mcp")
+
+    assert github_server.mcp_endpoint is None
+    assert github_server.mcp_endpoint_template == "http://litellm-gateway/github_readonly_{scope_sha256_12}/mcp"
+
+
 def test_chart_gateway_mapping_tracks_the_current_mcp_manifest() -> None:
     catalog = load_component_catalog(_catalog_root())
     server = next(item for item in catalog.components if item.registration_id == "cogito_readonly_mcp")
@@ -99,6 +119,10 @@ def test_chart_gateway_mapping_tracks_the_current_mcp_manifest() -> None:
 
     assert f'"cogito_readonly_mcp@{server.version}"' in template
     assert manifest_sha256(server) in template
+    github_server = next(item for item in catalog.components if item.registration_id == "github_readonly_mcp")
+    assert f'"github_readonly_mcp@{github_server.version}"' in template
+    assert manifest_sha256(github_server) in template
+    assert 'github_readonly_%s' in template
 
 
 def test_mcp_policy_rejects_unknown_tool(tmp_path: Path) -> None:

@@ -77,11 +77,17 @@ secret-management infrastructure into distinct Kubernetes Secrets; the chart
 never creates or aggregates them. For execution, the worker mints a
 short-lived, run-scoped LiteLLM key from the immutable role, project, MCP
 policy, server-release, manifest-digest, and tool-grant resolution. Governed
-MCP is disabled by default; when enabled, the first credentialless internal
-read-only MCP server is reachable only through LiteLLM and only for the exact
-tools pinned to that run. Before revoking the run key, the worker records only
-versioned, grant-bound observed invocation counts and success or failure outcomes; it
-does not retain gateway request URLs, prompts, outputs, or credentials.
+MCP is disabled by default; when enabled, the credentialless internal validation
+server and any separately enabled connector are reachable only through LiteLLM
+and only for the exact tools pinned to that run. The GitHub connector is
+read-only and uses a GitHub App installation token constrained to its one
+configured repository and read permissions. Its App key is mounted
+only in that connector's pod, which accepts LiteLLM ingress only and has egress
+only to its environment-owned proxy. A run receives its connector grants only
+when that repository is among its immutable targets. Before revoking the run key, the worker
+records only versioned, grant-bound observed invocation counts and success or
+failure outcomes; it does not retain gateway request URLs, prompts, outputs, or
+credentials.
 Semantic selection may narrow that resolved set but must never create or expand
 authority.
 
@@ -136,9 +142,10 @@ long-lived Git credential.
 
 Delegated A2A sub-agents and semantic tool discovery are deliberately not
 represented as completed features yet. Governed MCP execution and durable,
-bounded invocation evidence are available for the registered, credentialless
-read-only validation server; real downstream connectors remain separate
-follow-on work. The Operator Workbench is an independently deployable,
+bounded invocation evidence are available for the credentialless validation
+server and the optional GitHub read-only connector. Future systems such as Jira
+must use the same separate policy, deployment, credential, allow-list, and
+network boundary model. The Operator Workbench is an independently deployable,
 evidence-first UI over the scoped API; it does not add authority to the worker
 or browser client. Its production promotion still requires an environment-owned
 OIDC session relay and production values.

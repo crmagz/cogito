@@ -22,6 +22,7 @@ class McpToolGrant:
     server_manifest_sha256: str
     tool_name: str
     input_schema_sha256: str
+    repository_scope: str | None = None
 
 
 @dataclass(frozen=True)

@@ -57,6 +57,36 @@ jobs:
           grep -Fq 'name: COGITO_MCP_PORT' "$rendered"
           grep -Fq 'value: "9000"' "$rendered"
           grep -Fq 'name: governed-mcp-readonly-mcp-ingress' "$rendered"
+      - name: Render GitHub read-only MCP connector
+        run: |
+          rendered="$(mktemp)"
+          helm template github-mcp charts --namespace connector-system \
+            --set mcp.enabled=true \
+            --set mcp.github.enabled=true \
+            --set mcp.github.app.existingSecret=cogito-github-readonly-app \
+            --set 'mcp.github.app.allowedRepositories[0]=acme/widget' \
+            --set mcp.github.egressProxy.url=http://egress-proxy.connector-system.svc:3128 \
+            --set 'mcp.github.egressProxy.networkPolicyPeers[0].ipBlock.cidr=10.0.0.0/8' > "$rendered"
+          grep -Fq 'COGITO_MCP_GITHUB_ENABLED: "true"' "$rendered"
+          grep -Fq 'COGITO_MCP_TARGET_REPOSITORY_SCOPES: "{\"github_readonly_mcp@1.0.0\":\"acme/widget\"}"' "$rendered"
+          grep -Fq 'github_readonly_mcp@1.0.0' "$rendered"
+          github_route="$(sed -n 's/.*\\\"route\\\":\\\"\(github_readonly_[a-f0-9]*\)\\\".*/\1/p' "$rendered" | head -n1)"
+          test -n "$github_route"
+          grep -Fq "      $github_route:" "$rendered"
+          grep -Fq 'name: github-mcp-github-readonly-mcp-boundary' "$rendered"
+          grep -Fq 'name: COGITO_GITHUB_MCP_PRIVATE_KEY_FILE' "$rendered"
+          grep -Fq 'secretName: cogito-github-readonly-app' "$rendered"
+          if helm template invalid-github-mcp charts \
+            --set mcp.enabled=true \
+            --set mcp.github.enabled=true \
+            --set mcp.github.app.existingSecret=cogito-github-readonly-app \
+            --set 'mcp.github.app.allowedRepositories[0]=acme/widget' \
+            --set mcp.github.egressProxy.url=http://egress-proxy.connector-system.svc:3128 \
+            --set mcp.github.egressProxy.port=8080 \
+            --set 'mcp.github.egressProxy.networkPolicyPeers[0].ipBlock.cidr=10.0.0.0/8' > /dev/null 2>&1; then
+            echo "GitHub connector accepted a proxy URL and NetworkPolicy port mismatch"
+            exit 1
+          fi
       - name: Render production values
         run: |
           helm template cogito charts -f charts/values-production.yaml \
