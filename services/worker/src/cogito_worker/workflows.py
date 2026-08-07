@@ -294,6 +294,7 @@ class DeveloperRunWorkflow:
                             args=[
                                 envelope.run_id,
                                 implementation_evidence,
+                                workspace,
                             ],
                             start_to_close_timeout=_ACTIVITY_TIMEOUT,
                         )

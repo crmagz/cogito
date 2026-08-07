@@ -5,7 +5,7 @@ from temporalio.testing import ActivityEnvironment
 
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.execution import ExecutionJobSettings, ExecutionWorkspaceService
-from cogito_worker.models import ExecutionRequest, ValidationRequest
+from cogito_worker.models import ExecutionRequest, ExecutionWorkspace, McpToolGrant, ValidationRequest
 from cogito_worker.run_state import RunStateReporter
 
 from .fakes import (
@@ -109,6 +109,32 @@ async def test_validator_rejects_missing_or_failed_verification(
 
     assert result.status == "failed"
     assert result.reason == "verification_not_passed"
+
+
+async def test_freeze_implementation_artifact_adds_only_bounded_mcp_evidence(
+    env: ActivityEnvironment, activities: WorkerActivities, store: InMemoryRunStore
+) -> None:
+    workspace = ExecutionWorkspace(
+        run_id="run-1",
+        job_name="cogito-execution-example",
+        workspace_root="/workspace",
+        mcp_grants=[
+            McpToolGrant(
+                server_id="cogito_readonly_mcp",
+                server_version="1.0.1",
+                server_manifest_sha256="b" * 64,
+                tool_name="catalog_read",
+                input_schema_sha256="c" * 64,
+            )
+        ],
+    )
+
+    artifact = await env.run(activities.freeze_implementation_artifact, "run-1", {"review": {}}, workspace)
+
+    assert store.implementation_artifacts[artifact.sha256] == {
+        "review": {},
+        "mcp_invocations": {"version": 1, "status": "observed", "events": []},
+    }
 
 
 async def test_execution_workspace_activities_manage_only_the_current_run(

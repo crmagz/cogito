@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 from .execution_prepare import feature_branch_name, repository_clone_url, repository_directory_name
 from .models import ExecutionRequest, ExecutionWorkspace, McpServerConfiguration
-from .budgets import RunBudget, RunGitCredentialManager, RunKeyManager
+from .budgets import RunBudget, RunGitCredentialManager, RunKeyManager, _unavailable_invocation_evidence
 from .config import McpGatewayServer
 
 _EXECUTION_JOB_PREFIX = "cogito-execution-"
@@ -590,11 +590,13 @@ class ExecutionWorkspaceService:
             mcp_servers=[
                 McpServerConfiguration(
                     registration_id=server.registration_id,
+                    server_version=server.server_version,
                     name=server.name,
                     url=server.url,
                 )
                 for server in mcp_servers
             ],
+            mcp_grants=list(request.mcp_grants),
         )
         try:
             base_commits: dict[str, str] = {}
@@ -627,6 +629,22 @@ class ExecutionWorkspaceService:
                 if self._run_git_credentials is not None:
                     await self._run_git_credentials.cleanup(workspace.run_id, workspace.run_git_secret)
 
+    async def collect_mcp_invocations(self, workspace: ExecutionWorkspace) -> dict[str, object] | None:
+        """Collect trusted, bounded MCP invocation evidence before key revocation."""
+
+        if not workspace.mcp_grants:
+            return None
+        collector = getattr(self._run_keys, "collect_mcp_invocations", None)
+        if not callable(collector):
+            return _unavailable_invocation_evidence("collector_unavailable")
+        routes = {(server.registration_id, server.server_version): server.name for server in workspace.mcp_servers}
+        try:
+            return await collector(workspace.run_id, workspace.run_key_secret, workspace.mcp_grants, routes)
+        except Exception:
+            # Invocation evidence is audit enrichment, never a reason to
+            # fail an otherwise converged implementation run.
+            return _unavailable_invocation_evidence("collector_configuration_invalid")
+
     async def execute(
         self,
         workspace: ExecutionWorkspace,
@@ -652,6 +670,7 @@ class _GatewayMcpServer:
     """Trusted runtime mapping for one Supervisor-pinned MCP release."""
 
     registration_id: str
+    server_version: str
     gateway_server_id: str
     name: str
     url: str
@@ -677,6 +696,7 @@ def _gateway_mcp_servers(request: ExecutionRequest, settings: ExecutionJobSettin
     return [
         _GatewayMcpServer(
             registration_id=release.split("@", maxsplit=1)[0],
+            server_version=release.split("@", maxsplit=1)[1],
             gateway_server_id=configured_servers[release].gateway_server_id,
             name=configured_servers[release].route,
             url=f"{settings.litellm_endpoint.rstrip('/')}/{configured_servers[release].route}/mcp",

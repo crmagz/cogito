@@ -72,11 +72,18 @@ class WorkerActivities:
         await self._run_state.report(run_id, status, failure_detail, metadata)
 
     @activity.defn
-    async def freeze_implementation_artifact(self, run_id: str, evidence: dict[str, Any]) -> ImplementationArtifact:
+    async def freeze_implementation_artifact(
+        self, run_id: str, evidence: dict[str, Any], workspace: ExecutionWorkspace | None = None
+    ) -> ImplementationArtifact:
         """Persist the exact converged implementation evidence before human approval."""
 
         activity.logger.info("freezing implementation artifact", extra={"run_id": run_id})
-        return self._store.put_implementation_artifact(run_id, evidence)
+        frozen_evidence = dict(evidence)
+        if workspace is not None and workspace.mcp_grants:
+            invocation_evidence = await self._execution_workspaces.collect_mcp_invocations(workspace)
+            if invocation_evidence is not None:
+                frozen_evidence["mcp_invocations"] = invocation_evidence
+        return self._store.put_implementation_artifact(run_id, frozen_evidence)
 
     @activity.defn
     async def validate_implementation(self, request: ValidationRequest) -> ValidationResult:

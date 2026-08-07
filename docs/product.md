@@ -25,7 +25,7 @@ Today, Cogito provides the production foundation for that workflow:
   namespace with a constrained service account and network policy.
 - MinIO is used locally; production deployment is configured for external S3
   and PostgreSQL.
-- LiteLLM is deployed as the model gateway and is the future control point for
+- LiteLLM is deployed as the model gateway and is the control point for
   model routing, virtual keys, toolsets, MCP servers, A2A registration, and
   spend tracking.
 
@@ -70,17 +70,20 @@ through the existing digest-bound approval action. The dossier calls lifecycle
 events “audit activity,” not agent logs; raw agent output is intentionally not
 displayed until a separate classified, redacted-output policy exists.
 
-The Helm chart declares three stable role policies: `planner`, `developer`,
-and `reviewer`. Each names one model alias, a positive LiteLLM virtual-key
-budget ceiling and reset period, and a toolset label. Keys are provisioned by
-trusted secret-management infrastructure into distinct Kubernetes Secrets;
-the chart never creates or aggregates them. Only the planner Secret is mounted
-by the API today. Developer and reviewer runtimes do not yet exist, so their
-keys are deliberately not mounted anywhere. No MCP server is registered in
-this release, which means every role has zero tool authority. When MCP arrives,
-the provisioning layer must map the role's toolset label to an explicit LiteLLM
-MCP-server and per-tool allow-list—semantic discovery may narrow that list but
-must never expand it.
+The Helm chart declares stable role policies for `planner`, `developer`, and
+`reviewer`. Each names one model alias, a positive LiteLLM virtual-key budget
+ceiling and reset period, and a toolset label. Keys are provisioned by trusted
+secret-management infrastructure into distinct Kubernetes Secrets; the chart
+never creates or aggregates them. For execution, the worker mints a
+short-lived, run-scoped LiteLLM key from the immutable role, project, MCP
+policy, server-release, manifest-digest, and tool-grant resolution. Governed
+MCP is disabled by default; when enabled, the first credentialless internal
+read-only MCP server is reachable only through LiteLLM and only for the exact
+tools pinned to that run. Before revoking the run key, the worker records only
+versioned, grant-bound observed invocation counts and success or failure outcomes; it
+does not retain gateway request URLs, prompts, outputs, or credentials.
+Semantic selection may narrow that resolved set but must never create or expand
+authority.
 
 LiteLLM tier definitions also carry explicit positive per-token input and
 output costs. This is essential: a virtual-key budget is meaningful only when
@@ -131,11 +134,14 @@ run-private Secret in the execution namespace, and cleanup removes that
 Secret with the run key and Job. The execution namespace therefore contains no
 long-lived Git credential.
 
-Delegated A2A sub-agents, semantic tool discovery, and MCP tool execution are
-deliberately not represented as completed features yet. The Operator Workbench
-is an independently deployable, evidence-first UI over the scoped API; it does
-not add authority to the worker or browser client. Its production promotion
-still requires an environment-owned OIDC session relay and production values.
+Delegated A2A sub-agents and semantic tool discovery are deliberately not
+represented as completed features yet. Governed MCP execution and durable,
+bounded invocation evidence are available for the registered, credentialless
+read-only validation server; real downstream connectors remain separate
+follow-on work. The Operator Workbench is an independently deployable,
+evidence-first UI over the scoped API; it does not add authority to the worker
+or browser client. Its production promotion still requires an environment-owned
+OIDC session relay and production values.
 
 ## Target agentic ecosystem
 
