@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import replace
 
 import pytest
@@ -185,6 +186,12 @@ def test_run_key_payload_scopes_mcp_access_to_explicit_gateway_tools() -> None:
         )
 
 
+@pytest.mark.parametrize("max_cost_usd", [math.inf, math.nan])
+def test_run_key_rejects_non_finite_budget(max_cost_usd: float) -> None:
+    with pytest.raises(ValueError, match="positive cost"):
+        _validate_budget(RunBudget("run-1", max_cost_usd, "complex", 120))
+
+
 def test_run_key_payload_records_the_pinned_agent_identity_without_a_credential() -> None:
     budget = RunBudget(
         run_id="run-1",
@@ -296,6 +303,27 @@ async def test_execution_workspace_rejects_a_gateway_not_matching_the_pinned_reg
                     component_version="1.0.0",
                 ),
                 gateway=gateway,
+            )
+        )
+
+
+async def test_execution_workspace_rejects_a_resolved_developer_without_a_gateway() -> None:
+    service = ExecutionWorkspaceService(execution_settings(), InMemoryExecutionJobClient())
+
+    with pytest.raises(ValueError, match="pinned developer gateway route"):
+        await service.provision(
+            ExecutionRequest(
+                run_id="run-1",
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+                target_repos=[],
+                registration=RegistrationReference(
+                    role="developer",
+                    registration_id="developer",
+                    version="1.0.0",
+                    manifest_sha256="a" * 64,
+                    component_id="developer",
+                    component_version="1.0.0",
+                ),
             )
         )
 
