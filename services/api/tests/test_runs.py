@@ -178,6 +178,22 @@ def test_default_configuration_does_not_issue_mcp_grants(
     assert set(supervisor_store.registry_policies) == {"phase12_initial"}
 
 
+def test_submit_resolves_a_pinned_agent_gateway_route(
+    client: TestClient, valid_plan: dict, starter: FakeRunStarter, supervisor_store: InMemorySupervisorStore
+) -> None:
+    response = client.post("/api/v1/runs", json={"plan": valid_plan})
+
+    assert response.status_code == 202
+    developer = next(
+        resolution for resolution in starter.started_runs[0].registry_resolutions if resolution.role == "developer"
+    )
+    assert developer.gateway is not None
+    assert developer.gateway.model_alias == "complex"
+    assert developer.gateway.max_budget_usd == 25
+    assert developer.gateway.toolset == "development-restricted"
+    assert set(supervisor_store.registry_agent_gateway_policies) == {"agent_gateway_initial"}
+
+
 def test_enabled_configuration_uses_independent_mcp_policy(
     valid_plan: dict, store: InMemoryPlanStore, starter: FakeRunStarter
 ) -> None:

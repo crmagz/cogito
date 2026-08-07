@@ -11,6 +11,7 @@ from cogito_api.models import RegistrationLifecycle, RegistrationManifest
 from cogito_api.registry import (
     RegistryAuthorizationError,
     canonical_manifest_bytes,
+    load_agent_gateway_policy,
     load_component_catalog,
     load_mcp_binding_policy,
     manifest_sha256,
@@ -65,6 +66,18 @@ def test_mcp_policy_is_explicit_and_references_only_catalog_tools() -> None:
     assert policy.policy_revision == "governed_mcp_initial"
     assert policy.bindings[0].role == "developer"
     assert policy.bindings[0].tools == ["catalog_read"]
+
+
+def test_agent_gateway_policy_selects_a_project_scoped_route_for_each_registered_agent() -> None:
+    catalog = load_component_catalog(_catalog_root())
+
+    policy = load_agent_gateway_policy(_catalog_root(), catalog)
+
+    assert policy.policy_revision == "agent_gateway_initial"
+    developer = next(binding for binding in policy.bindings if binding.role == "developer")
+    assert developer.registration_id == "developer"
+    assert developer.model_alias == "complex"
+    assert developer.toolset == "development-restricted"
 
 
 def test_chart_gateway_mapping_tracks_the_current_mcp_manifest() -> None:
@@ -157,6 +170,44 @@ async def test_run_resolution_rejects_unselected_or_changed_release() -> None:
 
     with pytest.raises(RegistryConflictError, match="does not select"):
         await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
+
+
+async def test_agent_gateway_route_is_project_scoped_and_remains_pinned_after_revocation() -> None:
+    catalog = load_component_catalog(_catalog_root())
+    manifests = list(catalog.components)
+    policy = load_agent_gateway_policy(_catalog_root(), catalog)
+    developer = next(item for item in manifests if item.registration_id == "developer")
+    store = InMemorySupervisorStore()
+
+    await store.bootstrap_registry(manifests, "phase12_initial", {"developer": "developer@1.0.0"})
+    await store.bootstrap_agent_gateway_policy(policy)
+    registration = await store.resolve_run_registration("run-1", "developer", "phase12_initial", developer)
+    route = await store.resolve_run_agent_gateway("run-1", "developer", "default", registration, policy)
+    store.registrations[("developer", "1.0.0")] = developer.model_copy(
+        update={"lifecycle": RegistrationLifecycle.REVOKED}
+    )
+
+    retried = await store.resolve_run_agent_gateway("run-1", "developer", "default", registration, policy)
+
+    assert retried == route
+    assert route.model_alias == "complex"
+    assert route.max_budget_usd == 25
+    assert route.toolset == "development-restricted"
+
+
+async def test_agent_gateway_route_rejects_a_project_without_a_binding() -> None:
+    catalog = load_component_catalog(_catalog_root())
+    manifests = list(catalog.components)
+    policy = load_agent_gateway_policy(_catalog_root(), catalog)
+    planner = next(item for item in manifests if item.registration_id == "planner")
+    store = InMemorySupervisorStore()
+
+    await store.bootstrap_registry(manifests, "phase12_initial", {"planner": "planner@1.0.0"})
+    await store.bootstrap_agent_gateway_policy(policy)
+    registration = await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
+
+    with pytest.raises(RegistryConflictError, match="does not authorize"):
+        await store.resolve_run_agent_gateway("run-1", "planner", "other-project", registration, policy)
 
 
 async def test_mcp_run_resolution_is_project_scoped_and_immutable() -> None:

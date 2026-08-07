@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from cogito_api.models import (
+    AgentGatewayPolicy,
+    AgentGatewayResolution,
     AgentRunStatus,
     AiPlan,
     ArtifactReference,
@@ -121,8 +123,10 @@ class InMemorySupervisorStore:
         self.registrations: dict[tuple[str, str], RegistrationManifest] = {}
         self.registry_policies: dict[str, dict[str, str]] = {}
         self.registry_mcp_policies: dict[str, McpBindingPolicy] = {}
+        self.registry_agent_gateway_policies: dict[str, AgentGatewayPolicy] = {}
         self.run_registration_resolutions: dict[tuple[str, str], RegistrationReference] = {}
         self.run_mcp_tool_resolutions: dict[tuple[str, str], list[McpToolGrant]] = {}
+        self.run_agent_gateway_resolutions: dict[tuple[str, str], AgentGatewayResolution] = {}
         self.coordination_events: dict[str, CoordinationEvent] = {}
         self.notification_deliveries: dict[str, tuple[bool, int, str | None]] = {}
         self.leased_notification_event_ids: set[str] = set()
@@ -159,6 +163,63 @@ class InMemorySupervisorStore:
         if existing_mcp_policy is not None and existing_mcp_policy != mcp_policy:
             raise RegistryConflictError("policy revision already exists with different MCP bindings")
         self.registry_mcp_policies[policy_revision] = mcp_policy
+
+    async def bootstrap_agent_gateway_policy(self, policy: AgentGatewayPolicy) -> None:
+        existing = self.registry_agent_gateway_policies.get(policy.policy_revision)
+        if existing is not None and existing != policy:
+            raise RegistryConflictError("agent gateway policy revision already exists with different bindings")
+        self.registry_agent_gateway_policies[policy.policy_revision] = policy
+
+    async def resolve_run_agent_gateway(
+        self,
+        run_id: str,
+        role: str,
+        project_id: str,
+        registration: RegistrationReference,
+        policy: AgentGatewayPolicy,
+    ) -> AgentGatewayResolution:
+        key = (run_id, role)
+        existing = self.run_agent_gateway_resolutions.get(key)
+        if existing is not None:
+            if existing.project_id != project_id:
+                raise RegistryConflictError("run role is already pinned to a different project route")
+            return existing
+        durable_policy = self.registry_agent_gateway_policies.get(policy.policy_revision)
+        if durable_policy is None:
+            raise RegistryConflictError("agent gateway policy revision is not available")
+        binding = next(
+            (
+                candidate
+                for candidate in durable_policy.bindings
+                if candidate.role == role and project_id in candidate.project_ids
+            ),
+            None,
+        )
+        if binding is None:
+            raise RegistryConflictError("agent gateway policy does not authorize the requested role and project")
+        if (
+            binding.registration_id != registration.registration_id
+            or binding.registration_version != registration.version
+        ):
+            raise RegistryConflictError("agent gateway policy does not select the pinned registration release")
+        registered = self.registrations.get((registration.registration_id, registration.version))
+        if registered is None or registered.lifecycle.value != "active":
+            raise RegistryConflictError("agent gateway registration release is not active")
+        if manifest_sha256(registered) != registration.manifest_sha256:
+            raise RegistryConflictError("agent gateway registration release does not match its declared manifest")
+        route = AgentGatewayResolution(
+            policy_revision=durable_policy.policy_revision,
+            project_id=project_id,
+            role=role,
+            registration_id=registration.registration_id,
+            registration_version=registration.version,
+            manifest_sha256=registration.manifest_sha256,
+            model_alias=binding.model_alias,
+            max_budget_usd=binding.max_budget_usd,
+            toolset=binding.toolset,
+        )
+        self.run_agent_gateway_resolutions[key] = route
+        return route
 
     async def resolve_run_registration(
         self,

@@ -76,7 +76,13 @@ from .observability import Telemetry, TelemetrySettings
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
 from .reconciliation import ReconciliationHealth, WorkflowProjectionReconciler, stop_reconciler
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
-from .registry import RegistryAuthorizationError, load_component_catalog, load_mcp_binding_policy, require_tool
+from .registry import (
+    RegistryAuthorizationError,
+    load_agent_gateway_policy,
+    load_component_catalog,
+    load_mcp_binding_policy,
+    require_tool,
+)
 from .supervisor import (
     AgentRunRecord,
     ApprovalConflictError,
@@ -191,6 +197,7 @@ def create_app(
     mcp_policy = (
         load_mcp_binding_policy(Path(settings.registry_catalog_path), catalog) if settings.mcp_enabled else None
     )
+    agent_gateway_policy = load_agent_gateway_policy(Path(settings.registry_catalog_path), catalog)
     agents = {item.registration_id: item for item in catalog.components if item.kind.value == "agent"}
     policy_revision = "phase12_initial"
     assignments = {role: f"{manifest.registration_id}@{manifest.version}" for role, manifest in agents.items()}
@@ -216,9 +223,10 @@ def create_app(
     readiness = ApplicationReadiness(reconciler.health if reconciler is not None else None)
 
     async def bootstrap_registry() -> None:
-        """Persist the established agent policy and optional MCP policy independently."""
+        """Persist the established registry, MCP, and agent gateway policies."""
 
         await supervisor_store.bootstrap_registry(catalog.components, policy_revision, assignments)
+        await supervisor_store.bootstrap_agent_gateway_policy(agent_gateway_policy)
         if mcp_policy is not None:
             await supervisor_store.bootstrap_registry(
                 catalog.components, mcp_policy.policy_revision, assignments, mcp_policy
@@ -230,6 +238,9 @@ def create_app(
             resolutions = []
             for role in roles:
                 resolution = await supervisor_store.resolve_run_registration(run_id, role, policy_revision, agents[role])
+                gateway = await supervisor_store.resolve_run_agent_gateway(
+                    run_id, role, project_id, resolution, agent_gateway_policy
+                )
                 mcp_grants = (
                     await supervisor_store.resolve_run_mcp_tools(
                         run_id, role, project_id, mcp_policy.policy_revision
@@ -237,7 +248,7 @@ def create_app(
                     if mcp_policy is not None
                     else []
                 )
-                resolutions.append(resolution.model_copy(update={"mcp_grants": mcp_grants}))
+                resolutions.append(resolution.model_copy(update={"gateway": gateway, "mcp_grants": mcp_grants}))
             return resolutions
         except KeyError as error:
             raise RegistryConflictError("registry policy does not define the requested role") from error

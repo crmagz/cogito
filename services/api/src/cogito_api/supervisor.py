@@ -13,6 +13,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from .models import (
+    AgentGatewayPolicy,
+    AgentGatewayResolution,
     AgentRunStatus,
     ArtifactReference,
     ImplementationApprovalDecision,
@@ -202,6 +204,22 @@ def _mcp_grant_key(grant: McpToolGrant) -> tuple[str, str, str, str, str]:
     )
 
 
+def _gateway_resolution_from_row(row: Mapping[str, Any]) -> AgentGatewayResolution:
+    """Materialize one immutable agent gateway route from durable storage."""
+
+    return AgentGatewayResolution(
+        policy_revision=row["policy_revision"],
+        project_id=row["project_id"],
+        role=row["role"],
+        registration_id=row["registration_id"],
+        registration_version=row["registration_version"],
+        manifest_sha256=row["manifest_sha256"],
+        model_alias=row["model_alias"],
+        max_budget_usd=float(row["max_budget_usd"]),
+        toolset=row["toolset"],
+    )
+
+
 def _planning_run_record(row: Mapping[str, Any]) -> PlanningRunRecord:
     """Materialize a planning-run projection returned by PostgreSQL."""
 
@@ -329,6 +347,17 @@ class SupervisorStore(Protocol):
         project_id: str,
         policy_revision: str,
     ) -> list[McpToolGrant]: ...
+
+    async def bootstrap_agent_gateway_policy(self, policy: AgentGatewayPolicy) -> None: ...
+
+    async def resolve_run_agent_gateway(
+        self,
+        run_id: str,
+        role: str,
+        project_id: str,
+        registration: RegistrationReference,
+        policy: AgentGatewayPolicy,
+    ) -> AgentGatewayResolution: ...
 
     async def list_coordination_events(self, run_id: str, *, limit: int = 100) -> list[tuple[CoordinationEvent, bool, int, str | None]]: ...
 
@@ -588,6 +617,156 @@ class PostgresSupervisorStore:
                 or list(persisted_policy["mcp_bindings"]) != mcp_bindings
             ):
                 raise RegistryConflictError("policy revision already exists with different assignments")
+
+    async def bootstrap_agent_gateway_policy(self, policy: AgentGatewayPolicy) -> None:
+        """Persist one immutable agent routing policy without rewriting it."""
+
+        bindings = policy.model_dump(mode="json")["bindings"]
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO registry_agent_gateway_policy_revisions (policy_revision, bindings, created_at)
+                    VALUES (:policy_revision, CAST(:bindings AS jsonb), now())
+                    ON CONFLICT (policy_revision) DO NOTHING
+                    """
+                ),
+                {
+                    "policy_revision": policy.policy_revision,
+                    "bindings": json.dumps(bindings, sort_keys=True),
+                },
+            )
+            persisted = await connection.execute(
+                text(
+                    "SELECT bindings FROM registry_agent_gateway_policy_revisions "
+                    "WHERE policy_revision = :policy_revision"
+                ),
+                {"policy_revision": policy.policy_revision},
+            )
+            row = persisted.mappings().one()
+            if list(row["bindings"]) != bindings:
+                raise RegistryConflictError("agent gateway policy revision already exists with different bindings")
+
+    async def resolve_run_agent_gateway(
+        self,
+        run_id: str,
+        role: str,
+        project_id: str,
+        registration: RegistrationReference,
+        policy: AgentGatewayPolicy,
+    ) -> AgentGatewayResolution:
+        """Pin one project-authorized LiteLLM route before a role can execute."""
+
+        async with self._engine.begin() as connection:
+            existing = await connection.execute(
+                text(
+                    """
+                    SELECT policy_revision, project_id, role, registration_id, registration_version, manifest_sha256,
+                           model_alias, max_budget_usd, toolset
+                    FROM run_agent_gateway_resolutions
+                    WHERE run_id = :run_id AND role = :role
+                    FOR UPDATE
+                    """
+                ),
+                {"run_id": run_id, "role": role},
+            )
+            current = existing.mappings().one_or_none()
+            if current is not None:
+                route = _gateway_resolution_from_row(current)
+                if route.project_id != project_id:
+                    raise RegistryConflictError("run role is already pinned to a different project route")
+                return route
+
+            persisted = await connection.execute(
+                text(
+                    "SELECT bindings FROM registry_agent_gateway_policy_revisions "
+                    "WHERE policy_revision = :policy_revision"
+                ),
+                {"policy_revision": policy.policy_revision},
+            )
+            policy_row = persisted.mappings().one_or_none()
+            if policy_row is None:
+                raise RegistryConflictError("agent gateway policy revision is not available")
+            durable_policy = AgentGatewayPolicy.model_validate(
+                {"policy_revision": policy.policy_revision, "bindings": list(policy_row["bindings"])}
+            )
+            binding = next(
+                (
+                    candidate
+                    for candidate in durable_policy.bindings
+                    if candidate.role == role and project_id in candidate.project_ids
+                ),
+                None,
+            )
+            if binding is None:
+                raise RegistryConflictError("agent gateway policy does not authorize the requested role and project")
+            if (
+                binding.registration_id != registration.registration_id
+                or binding.registration_version != registration.version
+            ):
+                raise RegistryConflictError("agent gateway policy does not select the pinned registration release")
+            registered = await connection.execute(
+                text(
+                    """
+                    SELECT lifecycle, manifest_sha256
+                    FROM registry_registrations
+                    WHERE registration_id = :registration_id AND version = :version
+                    FOR UPDATE
+                    """
+                ),
+                {"registration_id": registration.registration_id, "version": registration.version},
+            )
+            registered_row = registered.mappings().one_or_none()
+            if registered_row is None or registered_row["lifecycle"] != "active":
+                raise RegistryConflictError("agent gateway registration release is not active")
+            if registered_row["manifest_sha256"] != registration.manifest_sha256:
+                raise RegistryConflictError("agent gateway registration release does not match its declared manifest")
+            route = AgentGatewayResolution(
+                policy_revision=durable_policy.policy_revision,
+                project_id=project_id,
+                role=role,
+                registration_id=registration.registration_id,
+                registration_version=registration.version,
+                manifest_sha256=registration.manifest_sha256,
+                model_alias=binding.model_alias,
+                max_budget_usd=binding.max_budget_usd,
+                toolset=binding.toolset,
+            )
+            inserted = await connection.execute(
+                text(
+                    """
+                    INSERT INTO run_agent_gateway_resolutions (
+                        run_id, role, project_id, registration_id, registration_version, manifest_sha256,
+                        policy_revision, model_alias, max_budget_usd, toolset, created_at
+                    ) VALUES (
+                        :run_id, :role, :project_id, :registration_id, :registration_version, :manifest_sha256,
+                        :policy_revision, :model_alias, :max_budget_usd, :toolset, now()
+                    ) ON CONFLICT (run_id, role) DO NOTHING
+                    RETURNING run_id
+                    """
+                ),
+                {"run_id": run_id, **route.model_dump()},
+            )
+            if inserted.mappings().one_or_none() is not None:
+                return route
+            concurrent = await connection.execute(
+                text(
+                    """
+                    SELECT policy_revision, project_id, role, registration_id, registration_version, manifest_sha256,
+                           model_alias, max_budget_usd, toolset
+                    FROM run_agent_gateway_resolutions
+                    WHERE run_id = :run_id AND role = :role
+                    """
+                ),
+                {"run_id": run_id, "role": role},
+            )
+            current = concurrent.mappings().one_or_none()
+            if current is None:
+                raise RegistryConflictError("agent gateway route could not be persisted")
+            route = _gateway_resolution_from_row(current)
+            if route.project_id != project_id:
+                raise RegistryConflictError("run role is already pinned to a different project route")
+            return route
 
     async def resolve_run_registration(
         self,

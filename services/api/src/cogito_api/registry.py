@@ -8,7 +8,13 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
-from .models import McpBindingPolicy, RegistrationKind, RegistrationManifest, RegistrationReference
+from .models import (
+    AgentGatewayPolicy,
+    McpBindingPolicy,
+    RegistrationKind,
+    RegistrationManifest,
+    RegistrationReference,
+)
 
 
 class RegistryAuthorizationError(RuntimeError):
@@ -135,4 +141,26 @@ def load_mcp_binding_policy(catalog_root: Path, catalog: ComponentCatalog) -> Mc
         known_tools = {tool.name for tool in server.mcp_tools}
         if not set(binding.tools).issubset(known_tools):
             raise ValueError(f"MCP policy binding references an unknown tool on server '{binding.server_id}'")
+    return policy
+
+
+def load_agent_gateway_policy(catalog_root: Path, catalog: ComponentCatalog) -> AgentGatewayPolicy:
+    """Load project-scoped model and toolset routing for registered agents."""
+
+    definition = catalog_root / "agent_gateway_policy.json"
+    try:
+        value = json.loads(definition.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"agent gateway policy '{definition}' is not valid JSON") from error
+    policy = AgentGatewayPolicy.model_validate(value)
+    registrations = {(item.registration_id, item.version): item for item in catalog.components}
+    for binding in policy.bindings:
+        agent = registrations.get((binding.registration_id, binding.registration_version))
+        if agent is None or agent.kind is not RegistrationKind.AGENT:
+            raise ValueError(
+                "agent gateway policy binding references unknown agent "
+                f"'{binding.registration_id}' version '{binding.registration_version}'"
+            )
+        if binding.role != binding.registration_id:
+            raise ValueError("agent gateway policy role must match the registered agent identifier")
     return policy

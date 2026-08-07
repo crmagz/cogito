@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from temporalio.converter import DataConverter
 
-from cogito_worker.models import McpToolGrant, RegistrationReference, RunEnvelope, ToolGrant
+from cogito_worker.models import AgentGatewayResolution, McpToolGrant, RegistrationReference, RunEnvelope, ToolGrant
 from cogito_worker.registry import RegistryAuthorizationError, require_mcp_tool, require_role, require_tool
 
 
@@ -106,6 +106,17 @@ async def test_temporal_deserializes_pinned_grants_into_typed_worker_contracts()
                                 "input_schema_sha256": "c" * 64,
                             }
                         ],
+                        "gateway": {
+                            "policy_revision": "agent_gateway_initial",
+                            "project_id": "default",
+                            "role": "planner",
+                            "registration_id": "planner",
+                            "registration_version": "1.0.0",
+                            "manifest_sha256": "a" * 64,
+                            "model_alias": "balanced",
+                            "max_budget_usd": 5.0,
+                            "toolset": "planning-readonly",
+                        },
                     }
                 ],
             }
@@ -117,4 +128,15 @@ async def test_temporal_deserializes_pinned_grants_into_typed_worker_contracts()
     grant = envelope.registry_resolutions[0].grants[0]
     assert grant == ToolGrant(tool_id="planning_model", tool_version="1.0.0", scope="plan_generation")
     assert envelope.registry_resolutions[0].mcp_grants[0].tool_name == "catalog_read"
+    assert envelope.registry_resolutions[0].gateway == AgentGatewayResolution(
+        policy_revision="agent_gateway_initial",
+        project_id="default",
+        role="planner",
+        registration_id="planner",
+        registration_version="1.0.0",
+        manifest_sha256="a" * 64,
+        model_alias="balanced",
+        max_budget_usd=5.0,
+        toolset="planning-readonly",
+    )
     require_tool(envelope.registry_resolutions[0], "planning_model", "plan_generation")

@@ -299,6 +299,71 @@ class McpBindingPolicy(BaseModel):
         return self
 
 
+class AgentGatewayBinding(BaseModel):
+    """Explicit non-secret policy binding for one agent role and project."""
+
+    role: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    registration_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    registration_version: str = Field(min_length=1, max_length=32, pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$")
+    project_ids: list[str] = Field(min_length=1, max_length=32, description="Projects eligible to resolve this agent")
+    model_alias: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_-]{0,127}$",
+        description="LiteLLM model alias permitted for the resolved invocation",
+    )
+    max_budget_usd: float = Field(gt=0, description="Maximum LiteLLM budget for one resolved invocation")
+    toolset: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_-]{0,127}$",
+        description="Non-secret LiteLLM toolset label recorded with the resolved route",
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_projects(self) -> "AgentGatewayBinding":
+        """Require each project to appear only once in one binding."""
+
+        if len(set(self.project_ids)) != len(self.project_ids):
+            raise ValueError("agent gateway binding project IDs must be unique")
+        return self
+
+
+class AgentGatewayPolicy(BaseModel):
+    """Immutable reviewed routing policy for registered agents."""
+
+    policy_revision: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    bindings: list[AgentGatewayBinding] = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_unique_role_project_bindings(self) -> "AgentGatewayPolicy":
+        """Reject ambiguous agent-route selection for one role and project."""
+
+        keys = [(binding.role, project_id) for binding in self.bindings for project_id in binding.project_ids]
+        if len(set(keys)) != len(keys):
+            raise ValueError("agent gateway policy contains duplicate role/project bindings")
+        return self
+
+
+class AgentGatewayResolution(BaseModel):
+    """Pinned gateway limits selected for one run role without a credential."""
+
+    policy_revision: str = Field(description="Immutable agent gateway policy revision")
+    project_id: str = Field(description="Project scope that authorized the route")
+    role: str = Field(description="Supervisor role alias authorized by the route")
+    registration_id: str = Field(description="Pinned registered agent identifier")
+    registration_version: str = Field(description="Pinned registered agent version")
+    manifest_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Canonical digest of the selected non-secret agent manifest",
+    )
+    model_alias: str = Field(description="Only LiteLLM model alias permitted for this agent")
+    max_budget_usd: float = Field(gt=0, description="Maximum spend allowed for this agent invocation")
+    toolset: str = Field(description="Non-secret toolset label pinned with the gateway route")
+
+
 class McpToolGrant(BaseModel):
     """Pinned tool-level authority for one MCP server release."""
 
@@ -466,6 +531,10 @@ class RegistrationReference(BaseModel):
     mcp_grants: list[McpToolGrant] = Field(
         default_factory=list,
         description="Pinned MCP server tools authorized for this role and run project",
+    )
+    gateway: AgentGatewayResolution | None = Field(
+        default=None,
+        description="Pinned LiteLLM route and budget selected for this role",
     )
 
 

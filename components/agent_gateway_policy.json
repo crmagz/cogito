@@ -1,0 +1,59 @@
+{
+  "policy_revision": "agent_gateway_initial",
+  "bindings": [
+    {
+      "role": "planner",
+      "registration_id": "planner",
+      "registration_version": "1.0.0",
+      "project_ids": ["default"],
+      "model_alias": "balanced",
+      "max_budget_usd": 5,
+      "toolset": "planning-readonly"
+    },
+    {
+      "role": "developer",
+      "registration_id": "developer",
+      "registration_version": "1.0.0",
+      "project_ids": ["default"],
+      "model_alias": "complex",
+      "max_budget_usd": 25,
+      "toolset": "development-restricted"
+    },
+    {
+      "role": "reviewer",
+      "registration_id": "reviewer",
+      "registration_version": "1.0.0",
+      "project_ids": ["default"],
+      "model_alias": "complex",
+      "max_budget_usd": 10,
+      "toolset": "review-readonly"
+    },
+    {
+      "role": "validator",
+      "registration_id": "validator",
+      "registration_version": "1.0.0",
+      "project_ids": ["default"],
+      "model_alias": "balanced",
+      "max_budget_usd": 5,
+      "toolset": "validation-readonly"
+    },
+    {
+      "role": "ephemeral_environment_tester",
+      "registration_id": "ephemeral_environment_tester",
+      "registration_version": "1.0.0",
+      "project_ids": ["default"],
+      "model_alias": "discovery",
+      "max_budget_usd": 5,
+      "toolset": "environment-restricted"
+    },
+    {
+      "role": "pull_request_publisher",
+      "registration_id": "pull_request_publisher",
+      "registration_version": "1.0.0",
+      "project_ids": ["default"],
+      "model_alias": "discovery",
+      "max_budget_usd": 5,
+      "toolset": "publish-restricted"
+    }
+  ]
+}
