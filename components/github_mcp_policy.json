@@ -1,0 +1,19 @@
+{
+  "policy_revision": "governed_mcp_github_initial",
+  "bindings": [
+    {
+      "role": "developer",
+      "server_id": "cogito_readonly_mcp",
+      "server_version": "1.0.1",
+      "tools": ["catalog_read"],
+      "project_ids": ["default"]
+    },
+    {
+      "role": "developer",
+      "server_id": "github_readonly_mcp",
+      "server_version": "1.0.0",
+      "tools": ["repository_get", "file_get", "issue_get", "pull_request_get"],
+      "project_ids": ["default"]
+    }
+  ]
+}

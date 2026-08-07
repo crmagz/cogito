@@ -2,6 +2,16 @@
 {{- $mcp := default (dict) .Values.mcp }}
 {{- $mcpService := default (dict) $mcp.service }}
 {{- $mcpPort := default 8000 $mcpService.port }}
+{{- $github := default (dict) $mcp.github }}
+{{- $githubService := default (dict) $github.service }}
+{{- $githubPort := default 8001 $githubService.port }}
+{{- $githubApp := default (dict) $github.app }}
+{{- $githubRepositoryScope := "" }}
+{{- $githubRoute := "" }}
+{{- if $github.enabled }}
+{{- $githubRepositoryScope = index $githubApp.allowedRepositories 0 | lower }}
+{{- $githubRoute = printf "github_readonly_%s" ($githubRepositoryScope | sha256sum | trunc 12) }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -40,6 +50,19 @@ data:
         auth_type: none
         allowed_tools:
           - catalog_read
+        allow_all_keys: false
+        available_on_public_internet: false
+    {{- end }}
+    {{- if $github.enabled }}
+      {{ $githubRoute }}:
+        url: {{ printf "http://%s-github-readonly-mcp.%s.svc:%v/mcp" .Release.Name .Release.Namespace ($githubPort | int) | quote }}
+        transport: http
+        auth_type: none
+        allowed_tools:
+          - repository_get
+          - file_get
+          - issue_get
+          - pull_request_get
         allow_all_keys: false
         available_on_public_internet: false
     {{- end }}

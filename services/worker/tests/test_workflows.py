@@ -991,6 +991,7 @@ async def test_workflow_rejects_an_expanding_mcp_selection_update() -> None:
             granted.server_manifest_sha256,
             granted.tool_name,
             granted.input_schema_sha256,
+            "",
         )
     }
 

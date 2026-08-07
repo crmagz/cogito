@@ -62,7 +62,7 @@ class DeveloperRunWorkflow:
         self._implementation_decision: dict[str, str] | None = None
         self._processed_plan_decision_ids: set[str] = set()
         self._processed_implementation_decision_ids: set[str] = set()
-        self._pinned_mcp_selection_keys: set[tuple[str, str, str, str, str, str]] = set()
+        self._pinned_mcp_selection_keys: set[tuple[str, str, str, str, str, str, str]] = set()
 
     @workflow.update
     async def submit_plan_approval(self, decision: dict[str, Any]) -> bool:
@@ -552,6 +552,7 @@ def _implementation_evidence(envelope: RunEnvelope, workspace, phase_results: li
                         "server_manifest_sha256": grant.server_manifest_sha256,
                         "tool_name": grant.tool_name,
                         "input_schema_sha256": grant.input_schema_sha256,
+                        "repository_scope": grant.repository_scope,
                     }
                     for grant in resolution.mcp_grants
                 ],
@@ -579,7 +580,7 @@ def _implementation_evidence(envelope: RunEnvelope, workspace, phase_results: li
     }
 
 
-def _mcp_selection_key(role: str, grant: McpToolGrant) -> tuple[str, str, str, str, str, str]:
+def _mcp_selection_key(role: str, grant: McpToolGrant) -> tuple[str, str, str, str, str, str, str]:
     """Return an exact run-pinned MCP identity, including release and schema digests."""
 
     return (
@@ -589,29 +590,34 @@ def _mcp_selection_key(role: str, grant: McpToolGrant) -> tuple[str, str, str, s
         grant.server_manifest_sha256,
         grant.tool_name,
         grant.input_schema_sha256,
+        grant.repository_scope or "",
     )
 
 
-def _selection_key_from_value(value: object) -> tuple[str, str, str, str, str, str] | None:
+def _selection_key_from_value(value: object) -> tuple[str, str, str, str, str, str, str] | None:
     """Parse only the exact non-secret identity allowed in an approval update."""
 
-    if not isinstance(value, dict) or set(value) != {
+    base_fields = {
         "role",
         "server_id",
         "server_version",
         "server_manifest_sha256",
         "tool_name",
         "input_schema_sha256",
-    }:
+    }
+    if not isinstance(value, dict) or set(value) not in (base_fields, base_fields | {"repository_scope"}):
         return None
     fields = ("role", "server_id", "server_version", "server_manifest_sha256", "tool_name", "input_schema_sha256")
     if not all(isinstance(value[field], str) for field in fields):
         return None
-    return tuple(value[field] for field in fields)  # type: ignore[return-value]
+    repository_scope = value.get("repository_scope")
+    if repository_scope is not None and not isinstance(repository_scope, str):
+        return None
+    return (*tuple(value[field] for field in fields), repository_scope or "")  # type: ignore[return-value]
 
 
 def _is_pinned_mcp_selection(
-    selection: object, pinned: set[tuple[str, str, str, str, str, str]]
+    selection: object, pinned: set[tuple[str, str, str, str, str, str, str]]
 ) -> bool:
     """Accept only a duplicate-free subset of the immutable envelope grant pins."""
 

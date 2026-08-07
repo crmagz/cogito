@@ -1,0 +1,120 @@
+{{- $mcp := default (dict) .Values.mcp }}
+{{- $github := default (dict) $mcp.github }}
+{{- if $github.enabled }}
+{{- if not $mcp.enabled }}{{ fail "mcp.github.enabled requires mcp.enabled" }}{{- end }}
+{{- $image := merge (deepCopy (default (dict) $github.image)) .Values.worker.image }}
+{{- $service := default (dict) $github.service }}
+{{- $port := default 8001 $service.port }}
+{{- $app := default (dict) $github.app }}
+{{- $proxy := default (dict) $github.egressProxy }}
+{{- if not $app.existingSecret }}{{ fail "mcp.github.app.existingSecret is required when the GitHub connector is enabled" }}{{- end }}
+{{- if ne (len $app.allowedRepositories) 1 }}{{ fail "mcp.github.app.allowedRepositories must contain exactly one repository when the GitHub connector is enabled" }}{{- end }}
+{{- if not $proxy.url }}{{ fail "mcp.github.egressProxy.url is required when the GitHub connector is enabled" }}{{- end }}
+{{- if not $proxy.networkPolicyPeers }}{{ fail "mcp.github.egressProxy.networkPolicyPeers is required when the GitHub connector is enabled" }}{{- end }}
+{{- $proxyPort := default 3128 $proxy.port | int }}
+{{- if not (regexMatch (printf "^https?://[^/?#]+:%d/?$" $proxyPort) $proxy.url) }}{{ fail "mcp.github.egressProxy.url must be an HTTP(S) URL with the explicit configured egressProxy.port" }}{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-github-readonly-mcp
+  labels:
+    app.kubernetes.io/name: github-readonly-mcp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: github-readonly-mcp
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: github-readonly-mcp
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: github-readonly-mcp
+          image: {{ include "cogito.image" (dict "root" . "image" $image) | quote }}
+          imagePullPolicy: {{ $image.pullPolicy }}
+          command: ["python", "-m", "cogito_worker.github_readonly_mcp"]
+          env:
+            - name: COGITO_GITHUB_MCP_PORT
+              value: {{ $port | quote }}
+            - name: COGITO_GITHUB_MCP_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $app.existingSecret }}
+                  key: {{ default "app-id" $app.appIdKey }}
+            - name: COGITO_GITHUB_MCP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $app.existingSecret }}
+                  key: {{ default "installation-id" $app.installationIdKey }}
+            - name: COGITO_GITHUB_MCP_PRIVATE_KEY_FILE
+              value: /var/run/secrets/cogito/github-app/private-key
+            - name: COGITO_GITHUB_MCP_API_URL
+              value: {{ default "https://api.github.com" $app.apiUrl | quote }}
+            - name: COGITO_GITHUB_MCP_API_VERSION
+              value: {{ default "2026-03-10" $app.apiVersion | quote }}
+            - name: COGITO_GITHUB_MCP_ALLOWED_REPOSITORIES
+              value: {{ toJson $app.allowedRepositories | quote }}
+            - name: COGITO_GITHUB_MCP_TIMEOUT_SECONDS
+              value: {{ default 10 $app.timeoutSeconds | quote }}
+            - name: HTTPS_PROXY
+              value: {{ $proxy.url | quote }}
+            - name: HTTP_PROXY
+              value: {{ $proxy.url | quote }}
+            - name: NO_PROXY
+              value: "localhost,127.0.0.1,.svc,.cluster.local"
+          ports:
+            - name: http
+              containerPort: {{ $port | int }}
+          volumeMounts:
+            - name: github-app
+              mountPath: /var/run/secrets/cogito/github-app
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: github-app
+          secret:
+            secretName: {{ $app.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ default "private-key" $app.privateKeyKey }}
+                path: private-key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-github-readonly-mcp
+  labels:
+    app.kubernetes.io/name: github-readonly-mcp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: github-readonly-mcp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ $port | int }}
+      targetPort: http
+{{- end }}

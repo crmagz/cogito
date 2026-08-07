@@ -15,6 +15,7 @@ class McpGatewayServer:
     route: str
     server_manifest_sha256: str
     tool_names: tuple[str, ...]
+    repository_scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -205,14 +206,16 @@ def _mcp_gateway_servers(name: str, default: str) -> dict[str, McpGatewayServer]
             r"[a-z][a-z0-9_-]{0,127}@[0-9]+(?:\.[0-9]+){0,2}", release
         ):
             raise ValueError(f"{name} keys must be registration_id@version values")
-        if not isinstance(server, dict) or set(server) != {
-            "gateway_server_id", "route", "server_manifest_sha256", "tool_names"
-        }:
+        if not isinstance(server, dict) or set(server) not in (
+            {"gateway_server_id", "route", "server_manifest_sha256", "tool_names"},
+            {"gateway_server_id", "route", "server_manifest_sha256", "tool_names", "repository_scope"},
+        ):
             raise ValueError(f"{name}.{release} must define the complete immutable gateway mapping")
         gateway_server_id = server["gateway_server_id"]
         route = server["route"]
         manifest_sha256 = server["server_manifest_sha256"]
         tool_names = server["tool_names"]
+        repository_scope = server.get("repository_scope")
         if not isinstance(gateway_server_id, str) or not re.fullmatch(r"[a-f0-9]{32}", gateway_server_id):
             raise ValueError(f"{name}.{release}.gateway_server_id must be a 32-character lowercase digest")
         if not isinstance(route, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,127}", route):
@@ -226,10 +229,16 @@ def _mcp_gateway_servers(name: str, default: str) -> dict[str, McpGatewayServer]
             or len(set(tool_names)) != len(tool_names)
         ):
             raise ValueError(f"{name}.{release}.tool_names must be unique explicit tool names")
+        if repository_scope is not None and (
+            not isinstance(repository_scope, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository_scope)
+        ):
+            raise ValueError(f"{name}.{release}.repository_scope must be an owner/repository value")
         servers[release] = McpGatewayServer(
             gateway_server_id=gateway_server_id,
             route=route,
             server_manifest_sha256=manifest_sha256,
             tool_names=tuple(tool_names),
+            repository_scope=repository_scope.casefold() if repository_scope is not None else None,
         )
     return servers

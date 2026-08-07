@@ -373,16 +373,43 @@ litellm:
       existingSecret: cogito-reviewer-secondary-key
       apiKeyKey: api-key
 
-## @section Governed MCP validation
-## The deterministic read-only server is disabled by default. Enabling it
-## activates the governed MCP policy and configures execution run keys with
-## the exact immutable server release; no endpoint or credential is exposed
-## to execution jobs. A NetworkPolicy admits only LiteLLM ingress.
+## @section Governed MCP connectors
+## The deterministic validation server and every external connector are
+## disabled by default. An external connector has its own deployment,
+## credentials, policy revision, and network boundary; no connector credential
+## reaches LiteLLM, the worker, or execution jobs.
 mcp:
   enabled: false
   image: {}
   service:
     port: 8000
+  github:
+    enabled: false
+    image: {}
+    service:
+      port: 8001
+    app:
+      # Existing Secret with app-id, installation-id, and private-key. The
+      # private key is mounted read-only only in the GitHub connector pod.
+      existingSecret: ""
+      appIdKey: app-id
+      installationIdKey: installation-id
+      privateKeyKey: private-key
+      apiUrl: https://api.github.com
+      apiVersion: "2026-03-10"
+      # One read-only repository per connector deployment. This prevents a
+      # run granted this connector from reading another repository merely
+      # because it shares the same GitHub App installation.
+      allowedRepositories: []
+      timeoutSeconds: 10
+    # Every GitHub API request must go through this environment-owned proxy.
+    # networkPolicyPeers is a Kubernetes NetworkPolicy `to` list for that
+    # proxy, such as an ipBlock or a namespace/pod selector pair. `port` must
+    # match the explicit port in `url`.
+    egressProxy:
+      url: ""
+      port: 3128
+      networkPolicyPeers: []
 
 ## @section API
 ## Plan submission API: schema/DAG/constraint validation and plan storage in the object store.

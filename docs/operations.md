@@ -32,6 +32,16 @@ inspection, repair, and failure counters. These metrics intentionally have no
 run, workflow, artifact, or error-text labels. Use the structured API log's
 `run_id` only for an individual incident investigation.
 
+## GitHub read-only MCP connector
+
+`cogito-platform` owns the GitHub connector and its incident response. It is
+disabled by default. If it cannot reach GitHub, first verify the connector's
+readiness, its GitHub App installation access to the configured allow-list, and
+the environment-owned egress proxy. Do not copy the App private key, GitHub App
+JWT, or installation token into a shell, an execution Job, or a LiteLLM Secret.
+Connector failures are bounded gateway outcomes; inspect the provider and proxy
+logs under their existing secret-redaction controls.
+
 If `/readyz` remains non-ready, first inspect API startup and reconciliation
 logs, then verify Temporal reachability. If a run projection is stale, compare
 the active workflow ID in the Workbench with Temporal before any manual action.

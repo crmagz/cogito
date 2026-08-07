@@ -35,6 +35,7 @@ from cogito_api.supervisor import (
     WorkbenchApprovalRecord,
     WorkbenchFeedbackRecord,
     RegistryConflictError,
+    _binding_targets_a_run_repository,
 )
 
 
@@ -254,6 +255,8 @@ class InMemorySupervisorStore:
         role: str,
         project_id: str,
         policy_revision: str,
+        target_repositories: list[str] | None = None,
+        target_repository_scopes: dict[str, str] | None = None,
     ) -> list[McpToolGrant]:
         key = (run_id, role)
         existing = self.run_mcp_tool_resolutions.get(key)
@@ -265,6 +268,13 @@ class InMemorySupervisorStore:
         expected: list[McpToolGrant] = []
         for binding in policy.bindings:
             if binding.role != role or project_id not in binding.project_ids:
+                continue
+            if not _binding_targets_a_run_repository(
+                binding.server_id,
+                binding.server_version,
+                target_repositories or [],
+                target_repository_scopes or {},
+            ):
                 continue
             server = self.registrations.get((binding.server_id, binding.server_version))
             if server is None or server.lifecycle.value != "active":
@@ -281,6 +291,12 @@ class InMemorySupervisorStore:
                         server_manifest_sha256=manifest_sha256(server),
                         tool_name=tool_name,
                         input_schema_sha256=input_schema_sha256,
+                        repository_scope=(
+                            (target_repository_scopes or {})
+                            .get(f"{binding.server_id}@{binding.server_version}", "")
+                            .casefold()
+                            or None
+                        ),
                     )
                 )
         self.run_mcp_tool_resolutions[key] = expected
@@ -401,7 +417,15 @@ class InMemorySupervisorStore:
             raise ApprovalConflictError("plan approval artifact digest is stale")
         if mcp_selection is not None:
             available = {
-                (role, grant.server_id, grant.server_version, grant.server_manifest_sha256, grant.tool_name, grant.input_schema_sha256)
+                (
+                    role,
+                    grant.server_id,
+                    grant.server_version,
+                    grant.server_manifest_sha256,
+                    grant.tool_name,
+                    grant.input_schema_sha256,
+                    grant.repository_scope or "",
+                )
                 for (resolved_run_id, role), grants in self.run_mcp_tool_resolutions.items()
                 if resolved_run_id == run_id and role == "developer"
                 for grant in grants
@@ -717,6 +741,7 @@ class InMemorySupervisorStore:
                     server_manifest_sha256=grant.server_manifest_sha256,
                     tool_name=grant.tool_name,
                     input_schema_sha256=grant.input_schema_sha256,
+                    repository_scope=grant.repository_scope,
                 )
                 for (resolved_run_id, role), grants in self.run_mcp_tool_resolutions.items()
                 if resolved_run_id == run_id and role == "developer"

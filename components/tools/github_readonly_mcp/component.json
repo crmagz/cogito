@@ -1,0 +1,23 @@
+{
+  "registration_id": "github_readonly_mcp",
+  "version": "1.0.0",
+  "kind": "mcp_server",
+  "component_id": "github_readonly_mcp",
+  "component_version": "1.0.0",
+  "lifecycle": "active",
+  "maturity": "incubating",
+  "execution_class": "worker_service",
+  "owner": "cogito-platform",
+  "input_schema": {"schema_id": "mcp_request", "version": "1"},
+  "output_schema": {"schema_id": "mcp_response", "version": "1"},
+  "capabilities": ["read_github_repository", "read_github_file", "read_github_issue", "read_github_pull_request"],
+  "quality_gates": ["github_app", "read_only", "target_repository_bound", "repository_allowlist", "proxy_egress", "internal_only"],
+  "mcp_transport": "http",
+  "mcp_endpoint_template": "http://litellm-gateway/github_readonly_{scope_sha256_12}/mcp",
+  "mcp_tools": [
+    {"name": "repository_get", "input_schema_sha256": "c1c5fc9c248210272b3821c6482812ee03cd4e43f682f5f18151e2c4f7c6d2ac"},
+    {"name": "file_get", "input_schema_sha256": "559cac41f5c7aeb13c44abf06f8eb70af6b853cc6f6912cc48e5623756c03955"},
+    {"name": "issue_get", "input_schema_sha256": "0c7488649922343951873a9b89a7dbbb3703ed4bc416dc2893791221a4bc0f4a"},
+    {"name": "pull_request_get", "input_schema_sha256": "68aa953856b9b13d251db19743d75de02d16f1caeaa3570ce8e7ee271ccd15a8"}
+  ]
+}

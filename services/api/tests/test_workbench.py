@@ -183,6 +183,38 @@ def test_workbench_approver_can_view_pinned_mcp_capabilities_and_submit_selectio
     assert supervisor_store.planning_runs[run_id].status is PlanningRunStatus.IMPLEMENTING
 
 
+def test_workbench_exposes_the_repository_scope_of_a_github_mcp_grant(valid_plan: dict) -> None:
+    store = InMemoryPlanStore()
+    starter = FakeRunStarter()
+    supervisor_store = InMemorySupervisorStore()
+    client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(
+                mcp_enabled=True,
+                mcp_github_enabled=True,
+                mcp_target_repository_scopes={"github_readonly_mcp@1.0.0": "Acme/API-Gateway"},
+            ),
+            starter=starter,
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+    run_id, _ = _awaiting_plan(client, valid_plan)
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    github_pins = [
+        grant
+        for grant in response.json()["mcp_capabilities"]["pinned_grants"]
+        if grant["server_id"] == "github_readonly_mcp"
+    ]
+    assert len(github_pins) == 4
+    assert {grant["repository_scope"] for grant in github_pins} == {"acme/api-gateway"}
+
+
 def test_workbench_viewer_cannot_see_or_configure_mcp_capabilities(valid_plan) -> None:
     writer, starter, supervisor_store, store = _mcp_workbench(valid_plan)
     run_id, digest = _awaiting_plan(writer, valid_plan)

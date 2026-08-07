@@ -385,6 +385,10 @@ class McpToolGrant(BaseModel):
         pattern=r"^[a-f0-9]{64}$",
         description="Pinned digest of the tool input-schema contract",
     )
+    repository_scope: str | None = Field(
+        default=None,
+        description="Immutable repository identity required by this grant, when the connector is repository-scoped",
+    )
 
 
 class McpToolSelection(BaseModel):
@@ -398,8 +402,13 @@ class McpToolSelection(BaseModel):
     server_manifest_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
     tool_name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
     input_schema_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    repository_scope: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Immutable repository identity for a repository-scoped connector grant",
+    )
 
-    def key(self) -> tuple[str, str, str, str, str, str]:
+    def key(self) -> tuple[str, str, str, str, str, str, str]:
         """Return the canonical identity used for equality and ordering."""
 
         return (
@@ -409,6 +418,7 @@ class McpToolSelection(BaseModel):
             self.server_manifest_sha256,
             self.tool_name,
             self.input_schema_sha256,
+            self.repository_scope or "",
         )
 
 
@@ -475,6 +485,11 @@ class RegistrationManifest(BaseModel):
         max_length=2048,
         description="Non-secret logical internal MCP endpoint for an MCP server release only",
     )
+    mcp_endpoint_template: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="Deployment-scoped internal MCP endpoint template using {scope_sha256_12} for a scoped release",
+    )
     mcp_tools: list[McpToolDefinition] = Field(
         default_factory=list,
         max_length=128,
@@ -498,15 +513,24 @@ class RegistrationManifest(BaseModel):
         if len(set(grant_keys)) != len(grant_keys):
             raise ValueError("registration grants must be unique")
         if self.kind is RegistrationKind.MCP_SERVER:
-            if self.mcp_transport is None or not self.mcp_endpoint or not self.mcp_tools:
+            if self.mcp_transport is None or not (self.mcp_endpoint or self.mcp_endpoint_template) or not self.mcp_tools:
                 raise ValueError("MCP server registrations require transport, endpoint, and tools")
-            parsed = urlparse(self.mcp_endpoint)
+            if self.mcp_endpoint is not None and self.mcp_endpoint_template is not None:
+                raise ValueError("MCP server registrations may define an endpoint or endpoint template, not both")
+            endpoint = self.mcp_endpoint or self.mcp_endpoint_template
+            assert endpoint is not None
+            if self.mcp_endpoint_template is not None:
+                placeholder = "{scope_sha256_12}"
+                if endpoint.count(placeholder) != 1:
+                    raise ValueError("MCP endpoint templates require exactly one {scope_sha256_12} placeholder")
+                endpoint = endpoint.replace(placeholder, "scope")
+            parsed = urlparse(endpoint)
             if parsed.scheme != "http" or not parsed.hostname or parsed.username or parsed.password or parsed.query:
                 raise ValueError("MCP server endpoint must be an internal HTTP URL without credentials or query")
             tool_names = [tool.name for tool in self.mcp_tools]
             if len(set(tool_names)) != len(tool_names):
                 raise ValueError("MCP server tool names must be unique")
-        elif self.mcp_transport is not None or self.mcp_endpoint is not None or self.mcp_tools:
+        elif self.mcp_transport is not None or self.mcp_endpoint is not None or self.mcp_endpoint_template is not None or self.mcp_tools:
             raise ValueError("only MCP server registrations may define MCP transport, endpoint, or tools")
         return self
 

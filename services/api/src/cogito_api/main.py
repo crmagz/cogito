@@ -194,8 +194,18 @@ def create_app(
     supervisor_store = supervisor_store or PostgresSupervisorStore(settings.supervisor_database_url)
     planner = planner or LiteLLMPlanner(settings)
     catalog = load_component_catalog(Path(settings.registry_catalog_path))
+    if settings.mcp_github_enabled and not settings.mcp_enabled:
+        raise ValueError("COGITO_MCP_GITHUB_ENABLED requires COGITO_MCP_ENABLED")
+    if settings.mcp_github_enabled and "github_readonly_mcp@1.0.0" not in settings.mcp_target_repository_scopes:
+        raise ValueError("GitHub MCP requires a configured target repository scope")
     mcp_policy = (
-        load_mcp_binding_policy(Path(settings.registry_catalog_path), catalog) if settings.mcp_enabled else None
+        load_mcp_binding_policy(
+            Path(settings.registry_catalog_path),
+            catalog,
+            "github_mcp_policy.json" if settings.mcp_github_enabled else "mcp_policy.json",
+        )
+        if settings.mcp_enabled
+        else None
     )
     agent_gateway_policy = load_agent_gateway_policy(Path(settings.registry_catalog_path), catalog)
     agents = {item.registration_id: item for item in catalog.components if item.kind.value == "agent"}
@@ -232,7 +242,7 @@ def create_app(
                 catalog.components, mcp_policy.policy_revision, assignments, mcp_policy
             )
 
-    async def resolve_roles(run_id: str, roles: list[str], project_id: str):
+    async def resolve_roles(run_id: str, roles: list[str], project_id: str, target_repositories: list[str] | None = None):
         await bootstrap_registry()
         try:
             resolutions = []
@@ -248,7 +258,12 @@ def create_app(
                     )
                 mcp_grants = (
                     await supervisor_store.resolve_run_mcp_tools(
-                        run_id, role, project_id, mcp_policy.policy_revision
+                        run_id,
+                        role,
+                        project_id,
+                        mcp_policy.policy_revision,
+                        target_repositories,
+                        settings.mcp_target_repository_scopes,
                     )
                     if mcp_policy is not None
                     else []
@@ -345,6 +360,7 @@ def create_app(
                 run_id,
                 ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
                 settings.workbench_default_project_id,
+                plan.target_repos,
             )
         except RegistryConflictError as error:
             raise HTTPException(status_code=503, detail="registry is temporarily unavailable") from error
@@ -542,6 +558,7 @@ def create_app(
                 updated.run_id,
                 ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
                 updated.project_id or settings.workbench_default_project_id,
+                updated.target_repos,
             )
             await starter.start_run(
                 RunEnvelope(

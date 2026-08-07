@@ -30,6 +30,27 @@ def test_load_settings_parses_an_exact_mcp_release_mapping(monkeypatch: pytest.M
     assert server.tool_names == ("catalog_read",)
 
 
+def test_load_settings_normalizes_a_repository_scoped_mcp_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "COGITO_EXECUTION_MCP_GATEWAY_SERVERS",
+        json.dumps(
+            {
+                "github_readonly_mcp@1.0.0": {
+                    "gateway_server_id": "a" * 32,
+                    "route": "github_readonly_abcd1234",
+                    "server_manifest_sha256": "b" * 64,
+                    "tool_names": ["repository_get"],
+                    "repository_scope": "Acme/Widget",
+                }
+            }
+        ),
+    )
+
+    settings = load_settings()
+
+    assert settings.execution_mcp_gateway_servers["github_readonly_mcp@1.0.0"].repository_scope == "acme/widget"
+
+
 def test_load_settings_rejects_incomplete_mcp_release_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "COGITO_EXECUTION_MCP_GATEWAY_SERVERS",

@@ -32,7 +32,7 @@ from .storage import RunStore, now_iso
 def _mcp_grant_evidence(grant: McpToolGrant, role: str = "developer") -> dict[str, str]:
     """Serialize only non-secret pinned grant identity for immutable audit evidence."""
 
-    return {
+    evidence = {
         "role": role,
         "server_id": grant.server_id,
         "server_version": grant.server_version,
@@ -40,6 +40,9 @@ def _mcp_grant_evidence(grant: McpToolGrant, role: str = "developer") -> dict[st
         "tool_name": grant.tool_name,
         "input_schema_sha256": grant.input_schema_sha256,
     }
+    if grant.repository_scope is not None:
+        evidence["repository_scope"] = grant.repository_scope
+    return evidence
 
 
 class WorkerActivities:

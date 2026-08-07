@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from dataclasses import replace
 
+import pytest
 from cogito_api.models import AgentRunStatus
 from cogito_api.main import create_app
 from cogito_api.storage import PlanStoreUnavailableError
@@ -218,6 +219,125 @@ def test_enabled_configuration_uses_independent_mcp_policy(
         ("cogito_readonly_mcp", "1.0.1", "catalog_read")
     ]
     assert set(supervisor_store.registry_policies) == {"phase12_initial", "governed_mcp_initial"}
+
+
+def test_github_connector_uses_a_separate_policy_and_exact_pinned_tools(
+    valid_plan: dict, store: InMemoryPlanStore, starter: FakeRunStarter
+) -> None:
+    supervisor_store = InMemorySupervisorStore()
+    client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(
+                mcp_enabled=True,
+                mcp_github_enabled=True,
+                mcp_target_repository_scopes={"github_readonly_mcp@1.0.0": "Acme/API-Gateway"},
+            ),
+            starter=starter,
+            supervisor_store=supervisor_store,
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    response = client.post("/api/v1/runs", json={"plan": valid_plan})
+
+    assert response.status_code == 202
+    developer = next(
+        resolution for resolution in starter.started_runs[0].registry_resolutions if resolution.role == "developer"
+    )
+    assert {(grant.server_id, grant.tool_name) for grant in developer.mcp_grants} == {
+        ("cogito_readonly_mcp", "catalog_read"),
+        ("github_readonly_mcp", "repository_get"),
+        ("github_readonly_mcp", "file_get"),
+        ("github_readonly_mcp", "issue_get"),
+        ("github_readonly_mcp", "pull_request_get"),
+    }
+    assert {
+        grant.repository_scope for grant in developer.mcp_grants if grant.server_id == "github_readonly_mcp"
+    } == {"acme/api-gateway"}
+    assert set(supervisor_store.registry_policies) == {"phase12_initial", "governed_mcp_github_initial"}
+
+
+def test_github_connector_grants_are_absent_when_the_run_does_not_target_its_repository(
+    valid_plan: dict, store: InMemoryPlanStore, starter: FakeRunStarter
+) -> None:
+    valid_plan["target_repos"] = ["https://github.com/acme/unrelated.git#" + "a" * 40]
+    client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(
+                mcp_enabled=True,
+                mcp_github_enabled=True,
+                mcp_target_repository_scopes={"github_readonly_mcp@1.0.0": "acme/api-gateway"},
+            ),
+            starter=starter,
+            supervisor_store=InMemorySupervisorStore(),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    response = client.post("/api/v1/runs", json={"plan": valid_plan})
+
+    assert response.status_code == 202
+    developer = next(
+        resolution for resolution in starter.started_runs[0].registry_resolutions if resolution.role == "developer"
+    )
+    assert [(grant.server_id, grant.tool_name) for grant in developer.mcp_grants] == [
+        ("cogito_readonly_mcp", "catalog_read")
+    ]
+
+
+def test_github_connector_accepts_a_pinned_target_url_without_a_dot_git_suffix(
+    valid_plan: dict, store: InMemoryPlanStore, starter: FakeRunStarter
+) -> None:
+    valid_plan["target_repos"] = ["https://github.com/acme/api-gateway#" + "a" * 40]
+    client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(
+                mcp_enabled=True,
+                mcp_github_enabled=True,
+                mcp_target_repository_scopes={"github_readonly_mcp@1.0.0": "acme/api-gateway"},
+            ),
+            starter=starter,
+            supervisor_store=InMemorySupervisorStore(),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    response = client.post("/api/v1/runs", json={"plan": valid_plan})
+
+    assert response.status_code == 202
+    developer = next(
+        resolution for resolution in starter.started_runs[0].registry_resolutions if resolution.role == "developer"
+    )
+    github_grants = [grant for grant in developer.mcp_grants if grant.server_id == "github_readonly_mcp"]
+    assert len(github_grants) == 4
+    assert {grant.repository_scope for grant in github_grants} == {"acme/api-gateway"}
+
+
+def test_github_connector_requires_governed_mcp(
+    store: InMemoryPlanStore, starter: FakeRunStarter, supervisor_store: InMemorySupervisorStore
+) -> None:
+    with pytest.raises(ValueError, match="requires COGITO_MCP_ENABLED"):
+        create_app(
+            store=store,
+            settings=make_settings(mcp_enabled=False, mcp_github_enabled=True),
+            starter=starter,
+            supervisor_store=supervisor_store,
+        )
+
+
+def test_github_connector_requires_a_target_repository_scope(
+    store: InMemoryPlanStore, starter: FakeRunStarter, supervisor_store: InMemorySupervisorStore
+) -> None:
+    with pytest.raises(ValueError, match="target repository scope"):
+        create_app(
+            store=store,
+            settings=make_settings(mcp_enabled=True, mcp_github_enabled=True),
+            starter=starter,
+            supervisor_store=supervisor_store,
+        )
 
 
 def test_dry_run_does_not_start_workflow(
