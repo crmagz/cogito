@@ -86,6 +86,7 @@ def test_matching_approval_is_audited_and_delivered_to_temporal(
     body = response.json()
     assert body["actor_id"] == "test-operator"
     assert body["delivered"] is True
+    assert "mcp_selection" not in body
     assert starter.plan_approvals == [
         (
                 starter.started_runs[0].workflow_id,
