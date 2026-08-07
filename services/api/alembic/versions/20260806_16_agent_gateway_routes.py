@@ -1,7 +1,7 @@
 """Persist immutable agent gateway policy and per-run route resolutions.
 
-Revision ID: 20260806_15
-Revises: 20260804_14
+Revision ID: 20260806_16
+Revises: 20260806_15
 Create Date: 2026-08-06
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "20260806_15"
-down_revision = "20260804_14"
+revision = "20260806_16"
+down_revision = "20260806_15"
 branch_labels = None
 depends_on = None
 
