@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from math import isfinite
 import secrets
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -287,7 +288,7 @@ def _secret_token(secret: object, key: str = "api-key") -> str | None:
 
 
 def _validate_budget(budget: RunBudget) -> None:
-    if budget.max_cost_usd <= 0 or budget.expires_in_seconds < 1 or not budget.model:
+    if not isfinite(budget.max_cost_usd) or budget.max_cost_usd <= 0 or budget.expires_in_seconds < 1 or not budget.model:
         raise ValueError("run budget must have a positive cost, expiry, and model")
     if not isinstance(budget.mcp_tool_permissions, Mapping):
         raise ValueError("MCP tool permissions must be a mapping")
@@ -375,6 +376,14 @@ def _unavailable_invocation_evidence(reason: str) -> dict[str, object]:
 def _run_key_payload(token: str, budget: RunBudget) -> dict[str, object]:
     """Build the non-persisted LiteLLM virtual-key request for one run."""
 
+    metadata: dict[str, object] = {"cogito_run_hash": _run_hash(budget.run_id)}
+    if budget.agent_registration_id:
+        metadata.update(
+            {
+                "cogito_agent_registration": budget.agent_registration_id,
+                "cogito_agent_manifest_sha256": budget.agent_manifest_sha256,
+            }
+        )
     payload: dict[str, object] = {
         "key": token,
         "key_alias": run_audit_user_id(budget.run_id),
@@ -383,14 +392,8 @@ def _run_key_payload(token: str, budget: RunBudget) -> dict[str, object]:
         "max_budget": budget.max_cost_usd,
         "budget_duration": f"{budget.expires_in_seconds}s",
         "key_type": "llm_api",
-        "metadata": {"cogito_run_hash": _run_hash(budget.run_id)},
+        "metadata": metadata,
     }
-    if budget.agent_registration_id:
-        payload["metadata"] = {
-            "cogito_run_hash": _run_hash(budget.run_id),
-            "cogito_agent_registration": budget.agent_registration_id,
-            "cogito_agent_manifest_sha256": budget.agent_manifest_sha256,
-        }
     if budget.mcp_tool_permissions:
         payload["object_permission"] = {
             "mcp_servers": sorted(budget.mcp_tool_permissions),
