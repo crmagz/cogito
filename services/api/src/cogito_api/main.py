@@ -54,6 +54,8 @@ from .models import (
     WorkbenchFeedbackRequest,
     WorkbenchFeedbackListResponse,
     WorkbenchFeedbackResponse,
+    WorkbenchMcpCapabilities,
+    WorkbenchMcpCapabilityState,
     WorkbenchProjectListResponse,
     WorkbenchProjectResponse,
     WorkbenchRunListResponse,
@@ -585,6 +587,7 @@ def create_app(
                 comment=request_body.comment,
                 idempotency_key=idempotency_key,
                 request_sha256=request_sha256,
+                mcp_selection=request_body.mcp_selection,
             )
         except ApprovalConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -600,6 +603,7 @@ def create_app(
             actor_id=recorded.actor_id,
             delivered=delivered,
             created_at=recorded.created_at,
+            mcp_selection=recorded.mcp_selection,
         )
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
 
@@ -1062,6 +1066,23 @@ def create_app(
 
         base = workbench_response(record, principal)
         approvals = await supervisor_store.list_workbench_approvals(record.run_id) if base.approval_history_available else []
+        mcp_capabilities = None
+        if base.approval_history_available:
+            pins, selected, has_approved_decision = await supervisor_store.get_run_mcp_capabilities(
+                record.run_id, record.plan_revision
+            )
+            mcp_capabilities = WorkbenchMcpCapabilities(
+                state=(
+                    WorkbenchMcpCapabilityState.NOT_APPLICABLE
+                    if not pins
+                    else WorkbenchMcpCapabilityState.APPROVED
+                    if has_approved_decision
+                    else WorkbenchMcpCapabilityState.AWAITING_PLAN_APPROVAL
+                ),
+                pinned_grants=pins,
+                selected_grants=selected,
+                invocation_evidence_available=record.implementation_artifact is not None,
+            )
         execution, actual_cost_usd, turns_used = workbench_execution(record)
         return base.model_copy(
             update={
@@ -1074,10 +1095,12 @@ def create_app(
                         actor_id=item.actor_id,
                         created_at=item.created_at,
                         delivered=item.delivered,
+                        mcp_selection=item.mcp_selection,
                     )
                     for item in approvals
                 ],
                 "execution": execution,
+                "mcp_capabilities": mcp_capabilities,
                 "budget": base.budget.model_copy(update={"actual_cost_usd": actual_cost_usd, "turns_used": turns_used}),
             }
         )
@@ -1249,6 +1272,11 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
+        if kind is WorkbenchArtifactKind.IMPLEMENTATION:
+            # Implementation evidence can include the exact selected MCP
+            # grants. Keep that approver-only just like the Workbench
+            # capability panel, rather than relying on a client to redact it.
+            authenticator.require_approver(principal)
         artifact = {
             WorkbenchArtifactKind.SOURCE: record.source_artifact,
             WorkbenchArtifactKind.PLAN: record.plan_artifact,
@@ -1435,11 +1463,14 @@ def create_app(
                     comment=request_body.comment,
                     idempotency_key=idempotency_key,
                     request_sha256=request_sha256,
+                    mcp_selection=request_body.mcp_selection,
                 )
                 delivered = recorded.delivered or recorded.decision_id in await dispatcher.deliver_once(
                     decision_id=recorded.decision_id, limit=1
                 )
             else:
+                if request_body.mcp_selection is not None:
+                    raise HTTPException(status_code=422, detail="MCP selection is allowed only for plan approval")
                 recorded = await supervisor_store.record_implementation_approval(
                     run_id=run_id,
                     artifact_sha256=request_body.artifact_sha256,
@@ -1465,6 +1496,11 @@ def create_app(
                 "actor_id": recorded.actor_id,
                 "delivered": delivered,
                 "created_at": recorded.created_at,
+                "mcp_selection": (
+                    [item.model_dump(mode="json") for item in recorded.mcp_selection]
+                    if gate is CoordinationGate.PLAN and recorded.mcp_selection is not None
+                    else None
+                ),
             },
         )
 

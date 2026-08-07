@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from datetime import timedelta
+from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -15,6 +16,7 @@ with workflow.unsafe.imports_passed_through():
         BackupExecutionRequest,
         ExecutionRequest,
         ImplementationArtifact,
+        McpToolGrant,
         PhaseExecutionRequest,
         PhaseResult,
         PlanPhase,
@@ -54,16 +56,32 @@ class DeveloperRunWorkflow:
     def __init__(self) -> None:
         self._awaiting_plan_approval = False
         self._plan_sha256 = ""
-        self._plan_decision: dict[str, str] | None = None
+        self._plan_decision: dict[str, Any] | None = None
         self._awaiting_implementation_approval = False
         self._implementation_sha256 = ""
         self._implementation_decision: dict[str, str] | None = None
         self._processed_plan_decision_ids: set[str] = set()
         self._processed_implementation_decision_ids: set[str] = set()
+        self._pinned_mcp_selection_keys: set[tuple[str, str, str, str, str, str]] = set()
 
     @workflow.update
-    async def submit_plan_approval(self, decision: dict[str, str]) -> bool:
-        """Accept one idempotent decision only while the workflow waits for this plan."""
+    async def submit_plan_approval(self, decision: dict[str, Any]) -> bool:
+        """Accept legacy plan decisions that do not alter the pinned MCP grant set."""
+
+        if decision.get("mcp_selection") is not None:
+            return False
+        return self._accept_plan_approval(decision)
+
+    @workflow.update
+    async def submit_plan_approval_with_mcp_selection(self, decision: dict[str, Any]) -> bool:
+        """Accept a narrowing decision only on workers that explicitly support it."""
+
+        if decision.get("mcp_selection") is None:
+            return False
+        return self._accept_plan_approval(decision)
+
+    def _accept_plan_approval(self, decision: dict[str, Any]) -> bool:
+        """Validate and record one idempotent decision while this workflow waits."""
 
         decision_id = decision.get("decision_id", "")
         if not decision_id:
@@ -78,6 +96,10 @@ class DeveloperRunWorkflow:
         if decision.get("artifact_sha256") != self._plan_sha256:
             return False
         if decision.get("decision") not in {"approve", "reject", "request_revision"}:
+            return False
+        if decision.get("decision") != "approve" and decision.get("mcp_selection") is not None:
+            return False
+        if not _is_pinned_mcp_selection(decision.get("mcp_selection"), self._pinned_mcp_selection_keys):
             return False
         self._processed_plan_decision_ids.add(decision_id)
         self._plan_decision = decision
@@ -127,6 +149,12 @@ class DeveloperRunWorkflow:
                 max_review_rounds,
                 review_profile,
             ) = _execution_plan(plan)
+            self._pinned_mcp_selection_keys = {
+                _mcp_selection_key(resolution.role, grant)
+                for resolution in envelope.registry_resolutions
+                if resolution.role == "developer"
+                for grant in resolution.mcp_grants
+            }
             if envelope.requires_plan_approval:
                 self._plan_sha256 = envelope.plan_sha256
                 self._awaiting_plan_approval = True
@@ -161,6 +189,12 @@ class DeveloperRunWorkflow:
             developer_registration = require_role(envelope, "developer")
             require_tool(developer_registration, "execution_workspace", "run_scoped_workspace")
             require_tool(developer_registration, "developer_harness", "approved_phase")
+            approved_selection = self._plan_decision.get("mcp_selection") if self._plan_decision is not None else None
+            developer_mcp_grants = _narrow_mcp_grants(
+                developer_registration.mcp_grants if developer_registration is not None else [],
+                "developer",
+                approved_selection,
+            )
             workspace = await workflow.execute_activity(
                 WorkerActivities.provision_execution_workspace,
                 args=[
@@ -173,7 +207,8 @@ class DeveloperRunWorkflow:
                             + int(_BACKUP_ACTIVITY_TIMEOUT.total_seconds())
                         ),
                         max_cost_usd=max_cost_usd,
-                        mcp_grants=developer_registration.mcp_grants if developer_registration is not None else [],
+                        mcp_grants=developer_mcp_grants,
+                        mcp_selection_explicit=approved_selection is not None,
                     )
                 ],
                 start_to_close_timeout=_PROVISION_ACTIVITY_TIMEOUT,
@@ -525,6 +560,61 @@ def _implementation_evidence(envelope: RunEnvelope, workspace, phase_results: li
         "turns_used": turns_used,
         "cost_usd": round(cost_usd, 6),
     }
+
+
+def _mcp_selection_key(role: str, grant: McpToolGrant) -> tuple[str, str, str, str, str, str]:
+    """Return an exact run-pinned MCP identity, including release and schema digests."""
+
+    return (
+        role,
+        grant.server_id,
+        grant.server_version,
+        grant.server_manifest_sha256,
+        grant.tool_name,
+        grant.input_schema_sha256,
+    )
+
+
+def _selection_key_from_value(value: object) -> tuple[str, str, str, str, str, str] | None:
+    """Parse only the exact non-secret identity allowed in an approval update."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "role",
+        "server_id",
+        "server_version",
+        "server_manifest_sha256",
+        "tool_name",
+        "input_schema_sha256",
+    }:
+        return None
+    fields = ("role", "server_id", "server_version", "server_manifest_sha256", "tool_name", "input_schema_sha256")
+    if not all(isinstance(value[field], str) for field in fields):
+        return None
+    return tuple(value[field] for field in fields)  # type: ignore[return-value]
+
+
+def _is_pinned_mcp_selection(
+    selection: object, pinned: set[tuple[str, str, str, str, str, str]]
+) -> bool:
+    """Accept only a duplicate-free subset of the immutable envelope grant pins."""
+
+    if selection is None:
+        return True
+    if not isinstance(selection, list):
+        return False
+    keys = [_selection_key_from_value(value) for value in selection]
+    return all(key is not None and key in pinned for key in keys) and len(keys) == len(set(keys))
+
+
+def _narrow_mcp_grants(
+    grants: list[McpToolGrant], role: str, selection: object
+) -> list[McpToolGrant]:
+    """Return only the approved subset; omitted selection preserves legacy full pins."""
+
+    if selection is None:
+        return list(grants)
+    selected = {_selection_key_from_value(value) for value in selection}
+    return [grant for grant in grants if _mcp_selection_key(role, grant) in selected]
 
 
 def _safe_review_evidence(review: dict) -> dict:

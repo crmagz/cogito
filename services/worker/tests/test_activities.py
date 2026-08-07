@@ -133,7 +133,41 @@ async def test_freeze_implementation_artifact_adds_only_bounded_mcp_evidence(
 
     assert store.implementation_artifacts[artifact.sha256] == {
         "review": {},
-        "mcp_invocations": {"version": 1, "status": "observed", "events": []},
+        "mcp_invocations": {
+            "version": 1,
+            "status": "observed",
+            "events": [],
+            "selected_grants": [
+                {
+                    "role": "developer",
+                    "server_id": "cogito_readonly_mcp",
+                    "server_version": "1.0.1",
+                    "server_manifest_sha256": "b" * 64,
+                    "tool_name": "catalog_read",
+                    "input_schema_sha256": "c" * 64,
+                }
+            ],
+        },
+    }
+
+
+async def test_freeze_implementation_artifact_records_an_explicit_empty_mcp_selection(
+    env: ActivityEnvironment, activities: WorkerActivities, store: InMemoryRunStore
+) -> None:
+    workspace = ExecutionWorkspace(
+        run_id="run-1",
+        job_name="cogito-execution-example",
+        workspace_root="/workspace",
+        mcp_selection_explicit=True,
+    )
+
+    artifact = await env.run(activities.freeze_implementation_artifact, "run-1", {"review": {}}, workspace)
+
+    assert store.implementation_artifacts[artifact.sha256]["mcp_invocations"] == {
+        "version": 1,
+        "status": "not_applicable",
+        "events": [],
+        "selected_grants": [],
     }
 
 

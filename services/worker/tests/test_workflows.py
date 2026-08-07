@@ -9,6 +9,7 @@ import pytest
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.models import (
     ExecutionWorkspace,
+    McpToolGrant,
     PhaseResult,
     RegistrationReference,
     ReviewFinding,
@@ -16,6 +17,7 @@ from cogito_worker.models import (
     RunEnvelope,
     RunResult,
     ToolGrant,
+    VerificationResult,
 )
 from cogito_worker.workflows import (
     DeveloperRunWorkflow,
@@ -67,6 +69,61 @@ def _single_phase_plan(spec_ref: str, target_repos: list[str]) -> dict:
             "max_wall_clock_minutes": 1,
             "max_cost_usd": 1.0,
         },
+    }
+
+
+def _mcp_grant(tool_name: str, marker: str) -> McpToolGrant:
+    return McpToolGrant(
+        server_id="catalog_mcp",
+        server_version="1.0.0",
+        server_manifest_sha256=marker * 64,
+        tool_name=tool_name,
+        input_schema_sha256=("c" if marker == "b" else "d") * 64,
+    )
+
+
+def _mcp_registry_resolutions(grants: list[McpToolGrant]) -> list[RegistrationReference]:
+    def reference(role: str, tool_grants: list[ToolGrant], mcp_grants: list[McpToolGrant] | None = None) -> RegistrationReference:
+        return RegistrationReference(
+            role=role,
+            registration_id=role,
+            version="1.0.0",
+            manifest_sha256="a" * 64,
+            component_id=role,
+            component_version="1.0.0",
+            grants=tool_grants,
+            mcp_grants=mcp_grants or [],
+        )
+
+    return [
+        reference("planner", [ToolGrant("planning_model", "1.0.0", "plan_generation")]),
+        reference(
+            "developer",
+            [
+                ToolGrant("execution_workspace", "1.0.0", "run_scoped_workspace"),
+                ToolGrant("developer_harness", "1.0.0", "approved_phase"),
+            ],
+            grants,
+        ),
+        reference(
+            "reviewer",
+            [
+                ToolGrant("execution_workspace", "1.0.0", "read_only_workspace"),
+                ToolGrant("review_model", "1.0.0", "read_only_review"),
+            ],
+        ),
+        reference("validator", [ToolGrant("validation_runner", "1.0.0", "approved_verification")]),
+    ]
+
+
+def _selection(role: str, grant: McpToolGrant) -> dict[str, str]:
+    return {
+        "role": role,
+        "server_id": grant.server_id,
+        "server_version": grant.server_version,
+        "server_manifest_sha256": grant.server_manifest_sha256,
+        "tool_name": grant.tool_name,
+        "input_schema_sha256": grant.input_schema_sha256,
     }
 
 
@@ -843,6 +900,111 @@ async def test_workflow_waits_for_matching_plan_approval_before_provisioning(
     assert accepted is True
     assert result == RunResult(run_id="run-approval", status="completed")
     assert workspaces.provisioned == ["run-approval"]
+
+
+async def test_workflow_provisions_only_the_approved_mcp_subset(env: WorkflowEnvironment) -> None:
+    store = InMemoryRunStore()
+    plan_ref = "s3://plans/plans/run-mcp-selection/plan.json"
+    spec_ref = "typescript-backend@v2.1#sha256=" + "a" * 64
+    store.plans[plan_ref] = _single_phase_plan(spec_ref, [])
+    plan_sha256 = hashlib.sha256(json.dumps(store.plans[plan_ref], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    workspaces = InMemoryExecutionWorkspaces()
+    activities = WorkerActivities(
+        store,
+        workspaces,
+        InMemoryHarness(
+            result=PhaseResult(
+                phase_id="phase-1",
+                branch_name="adp/run-mcp-selection",
+                succeeded=True,
+                turns_used=1,
+                cost_usd=0.01,
+                changed_files=[],
+                commits={},
+                verification=[VerificationResult(command="true", passed=True, output="")],
+                summary="completed",
+            )
+        ),
+    )
+    task_queue = f"test-queue-{uuid.uuid4()}"
+    granted = [_mcp_grant("catalog_read", "b"), _mcp_grant("catalog_list", "e")]
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[DeveloperRunWorkflow],
+        activities=[
+            activities.load_plan,
+            activities.report_status,
+            activities.freeze_implementation_artifact,
+            activities.validate_implementation,
+            activities.provision_execution_workspace,
+            activities.cleanup_execution_workspace,
+            activities.run_phase,
+            activities.backup_phase,
+            activities.review,
+            activities.verify_review_findings,
+            activities.address_review_findings,
+        ],
+    ):
+        handle = await env.client.start_workflow(
+            DeveloperRunWorkflow.run,
+            RunEnvelope(
+                run_id="run-mcp-selection",
+                plan_ref=plan_ref,
+                plan_sha256=plan_sha256,
+                spec_ref=spec_ref,
+                requires_plan_approval=True,
+                registry_resolutions=_mcp_registry_resolutions(granted),
+            ),
+            id=f"test-workflow-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+        await _wait_for_status(store, "run-mcp-selection", "awaiting_plan_approval")
+        accepted = await handle.execute_update(
+            "submit_plan_approval_with_mcp_selection",
+            {
+                "decision_id": "decision-mcp-selection",
+                "artifact_sha256": plan_sha256,
+                "decision": "approve",
+                "mcp_selection": [_selection("developer", granted[0])],
+            },
+        )
+        result = await handle.result()
+
+    assert accepted is True
+    assert result == RunResult(run_id="run-mcp-selection", status="completed")
+    assert workspaces.requests[0].mcp_grants == [granted[0]]
+    assert workspaces.requests[0].mcp_selection_explicit is True
+
+
+async def test_workflow_rejects_an_expanding_mcp_selection_update() -> None:
+    workflow_instance = DeveloperRunWorkflow()
+    granted = _mcp_grant("catalog_read", "b")
+    workflow_instance._awaiting_plan_approval = True
+    workflow_instance._plan_sha256 = "a" * 64
+    workflow_instance._pinned_mcp_selection_keys = {
+        (
+            "developer",
+            granted.server_id,
+            granted.server_version,
+            granted.server_manifest_sha256,
+            granted.tool_name,
+            granted.input_schema_sha256,
+        )
+    }
+
+    accepted = await workflow_instance.submit_plan_approval_with_mcp_selection(
+        {
+            "decision_id": "decision-expansion",
+            "artifact_sha256": "a" * 64,
+            "decision": "approve",
+            "mcp_selection": [_selection("developer", _mcp_grant("catalog_delete", "f"))],
+        }
+    )
+
+    assert accepted is False
+    assert workflow_instance._plan_decision is None
 
 
 async def test_workflow_rejects_stale_plan_approval(env: WorkflowEnvironment):

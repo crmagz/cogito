@@ -19,6 +19,36 @@ def _headers(key: str = "workbench-action") -> dict[str, str]:
     return {"Authorization": "Bearer operator-test-token", "Idempotency-Key": key}
 
 
+def _selection_from_started_run(starter: FakeRunStarter) -> dict[str, str]:
+    developer = next(item for item in starter.started_runs[0].registry_resolutions if item.role == "developer")
+    grant = developer.mcp_grants[0]
+    return {
+        "role": "developer",
+        "server_id": grant.server_id,
+        "server_version": grant.server_version,
+        "server_manifest_sha256": grant.server_manifest_sha256,
+        "tool_name": grant.tool_name,
+        "input_schema_sha256": grant.input_schema_sha256,
+    }
+
+
+def _mcp_workbench(valid_plan: dict) -> tuple[TestClient, FakeRunStarter, InMemorySupervisorStore, InMemoryPlanStore]:
+    store = InMemoryPlanStore()
+    starter = FakeRunStarter()
+    supervisor_store = InMemorySupervisorStore()
+    client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(mcp_enabled=True),
+            starter=starter,
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+    return client, starter, supervisor_store, store
+
+
 def test_workbench_queue_filters_to_authorized_project(client, valid_plan, supervisor_store) -> None:
     allowed_run, _ = _awaiting_plan(client, valid_plan)
     foreign_run, _ = _awaiting_plan(client, valid_plan)
@@ -118,6 +148,67 @@ def test_workbench_detail_and_evidence_are_scope_and_digest_bound(client, valid_
     assert evidence.json()["sha256"] == digest
     assert '"title"' in evidence.json()["content"]
     assert forged.status_code == 404
+
+
+def test_workbench_approver_can_view_pinned_mcp_capabilities_and_submit_selection(valid_plan: dict) -> None:
+    client, starter, supervisor_store, _ = _mcp_workbench(valid_plan)
+    run_id, digest = _awaiting_plan(client, valid_plan)
+    selection = _selection_from_started_run(starter)
+
+    before = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    approved = client.post(
+        f"/api/v1/coordination/runs/{run_id}/actions/plan",
+        json={"decision": "approve", "artifact_sha256": digest, "mcp_selection": [selection]},
+        headers=_headers("mcp-workbench"),
+    )
+    after = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert before.status_code == 200
+    assert before.json()["mcp_capabilities"] == {
+        "state": "awaiting_plan_approval",
+        "pinned_grants": [selection],
+        "selected_grants": None,
+        "invocation_evidence_available": False,
+    }
+    assert approved.status_code == 202
+    assert approved.json()["mcp_selection"] == [selection]
+    assert after.status_code == 200
+    assert after.json()["mcp_capabilities"] == {
+        "state": "approved",
+        "pinned_grants": [selection],
+        "selected_grants": [selection],
+        "invocation_evidence_available": False,
+    }
+    assert after.headers["etag"] != before.headers["etag"]
+    assert supervisor_store.planning_runs[run_id].status is PlanningRunStatus.IMPLEMENTING
+
+
+def test_workbench_viewer_cannot_see_or_configure_mcp_capabilities(valid_plan) -> None:
+    writer, starter, supervisor_store, store = _mcp_workbench(valid_plan)
+    run_id, digest = _awaiting_plan(writer, valid_plan)
+    selection = _selection_from_started_run(starter)
+    viewer = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(mcp_enabled=True, auth_static_roles=("cogito-viewer",)),
+            starter=starter,
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    detail = viewer.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    action = viewer.post(
+        f"/api/v1/coordination/runs/{run_id}/actions/plan",
+        json={"decision": "approve", "artifact_sha256": digest, "mcp_selection": [selection]},
+        headers=_headers("viewer-mcp"),
+    )
+
+    assert detail.status_code == 200
+    assert detail.json()["mcp_capabilities"] is None
+    assert "catalog_read" not in detail.text
+    assert action.status_code == 403
 
 
 def test_workbench_feedback_is_digest_bound_idempotent_and_non_executable(client, valid_plan, supervisor_store) -> None:
@@ -577,6 +668,48 @@ def test_workbench_detail_does_not_leak_approval_history_to_viewers(valid_plan) 
     assert response.json()["approval_history_available"] is False
     assert response.json()["approval_history"] == []
     assert "test-operator" not in response.text
+
+
+def test_workbench_viewer_cannot_read_implementation_mcp_selection_evidence(valid_plan) -> None:
+    store = InMemoryPlanStore()
+    supervisor_store = InMemorySupervisorStore()
+    writer = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(mcp_enabled=True),
+            starter=FakeRunStarter(),
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+    run_id, _ = _awaiting_plan(writer, valid_plan)
+    artifact = store.put_artifact(
+        f"s3://plans/runs/{run_id}/implementation.json",
+        json.dumps({"mcp_invocations": {"selected_grants": [{"tool_name": "catalog_read"}]}}).encode(),
+    )
+    supervisor_store.planning_runs[run_id] = replace(
+        supervisor_store.planning_runs[run_id], implementation_artifact=artifact
+    )
+    viewer = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(mcp_enabled=True, auth_static_roles=("cogito-viewer",)),
+            starter=FakeRunStarter(),
+            supervisor_store=supervisor_store,
+            planner=FakePlanner(AiPlan.model_validate(valid_plan)),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    response = viewer.get(
+        f"/api/v1/workbench/runs/{run_id}/evidence/implementation",
+        params={"artifact_sha256": artifact.sha256},
+        headers=_headers(),
+    )
+
+    assert response.status_code == 403
+    assert "catalog_read" not in response.text
 
 
 def test_workbench_queue_returns_bodyless_not_modified_response(client, valid_plan) -> None:

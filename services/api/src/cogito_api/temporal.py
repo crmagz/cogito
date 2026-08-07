@@ -13,7 +13,7 @@ from .models import RunEnvelope
 class RunStarter(Protocol):
     async def start_run(self, envelope: RunEnvelope) -> None: ...
 
-    async def submit_plan_approval(self, workflow_id: str, decision: dict[str, str]) -> bool: ...
+    async def submit_plan_approval(self, workflow_id: str, decision: dict[str, Any]) -> bool: ...
 
     async def submit_implementation_approval(self, workflow_id: str, decision: dict[str, str]) -> bool: ...
 
@@ -46,7 +46,7 @@ class TemporalRunStarter:
             # The immutable workflow ID makes that retry safe and idempotent.
             return
 
-    async def submit_plan_approval(self, workflow_id: str, decision: dict[str, str]) -> bool:
+    async def submit_plan_approval(self, workflow_id: str, decision: dict[str, Any]) -> bool:
         """Deliver an idempotent, digest-bound decision through a Temporal Update."""
 
         decision_id = decision.get("decision_id")
@@ -57,7 +57,12 @@ class TemporalRunStarter:
         # Temporal persists an Update ID. Reusing the durable approval ID lets
         # an outbox retry recover the original accepted result even if its
         # database acknowledgement failed after Temporal accepted the update.
-        return await handle.execute_update("submit_plan_approval", decision, id=decision_id)
+        update_name = (
+            "submit_plan_approval_with_mcp_selection"
+            if decision.get("mcp_selection") is not None
+            else "submit_plan_approval"
+        )
+        return await handle.execute_update(update_name, decision, id=decision_id)
 
     async def submit_implementation_approval(self, workflow_id: str, decision: dict[str, str]) -> bool:
         """Deliver an idempotent decision for the frozen implementation artifact."""
