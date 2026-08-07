@@ -15,9 +15,17 @@ from cogito_worker.execution import (
     execution_job_name,
     _sanitize_diagnostics,
 )
-from cogito_worker.budgets import RunBudget, _run_key_payload, _validate_budget
+import cogito_worker.budgets as budgets
+from cogito_worker.budgets import (
+    KubernetesLiteLLMRunKeyManager,
+    RunBudget,
+    _expected_mcp_tools,
+    _mcp_invocation_evidence,
+    _run_key_payload,
+    _validate_budget,
+)
 from cogito_worker.config import McpGatewayServer
-from cogito_worker.models import ExecutionRequest, McpToolGrant
+from cogito_worker.models import ExecutionRequest, ExecutionWorkspace, McpServerConfiguration, McpToolGrant
 
 from .fakes import InMemoryExecutionJobClient
 
@@ -168,6 +176,102 @@ def test_run_key_payload_scopes_mcp_access_to_explicit_gateway_tools() -> None:
         )
 
 
+def test_mcp_invocation_evidence_retains_only_pinned_grant_counts() -> None:
+    grant = McpToolGrant(
+        server_id="cogito_readonly_mcp",
+        server_version="1.0.1",
+        server_manifest_sha256="b" * 64,
+        tool_name="catalog_read",
+        input_schema_sha256="c" * 64,
+    )
+    expected = _expected_mcp_tools([grant], {("cogito_readonly_mcp", "1.0.1"): "cogito_readonly"})
+
+    evidence = _mcp_invocation_evidence(
+        [
+            {"mcp_namespaced_tool_name": [], "status": "success"},
+            {
+                "mcp_namespaced_tool_name": "cogito_readonly/catalog_read",
+                "status": "success",
+                "messages": "raw prompt",
+                "response": "raw tool output",
+                "api_key": "raw-key",
+            },
+            {"mcp_namespaced_tool_name": "cogito_readonly/catalog_read", "status": "success"},
+            {"mcp_namespaced_tool_name": "unapproved/delete", "status": "success"},
+        ],
+        expected,
+    )
+
+    assert evidence == {
+        "version": 1,
+        "status": "observed",
+        "events": [
+            {
+                "server_id": "cogito_readonly_mcp",
+                "server_version": "1.0.1",
+                "server_manifest_sha256": "b" * 64,
+                "tool_name": "catalog_read",
+                "input_schema_sha256": "c" * 64,
+                "outcome": "success",
+                "invocation_count": 2,
+            }
+        ],
+    }
+
+
+def test_mcp_invocation_evidence_rejects_malformed_gateway_responses() -> None:
+    with pytest.raises(ValueError, match="response must be a list"):
+        _mcp_invocation_evidence({}, {})
+
+
+def test_mcp_invocation_evidence_bounds_untrusted_outcome_variants() -> None:
+    grant = McpToolGrant(
+        server_id="cogito_readonly_mcp",
+        server_version="1.0.1",
+        server_manifest_sha256="b" * 64,
+        tool_name="catalog_read",
+        input_schema_sha256="c" * 64,
+    )
+    expected = _expected_mcp_tools([grant], {("cogito_readonly_mcp", "1.0.1"): "cogito_readonly"})
+
+    evidence = _mcp_invocation_evidence(
+        [{"mcp_namespaced_tool_name": "cogito_readonly/catalog_read", "status": "success"}]
+        + [
+            {"mcp_namespaced_tool_name": "cogito_readonly/catalog_read", "status": f"untrusted-{index}"}
+            for index in range(200)
+        ],
+        expected,
+    )
+
+    assert [(event["outcome"], event["invocation_count"]) for event in evidence["events"]] == [
+        ("failure", 200),
+        ("success", 1),
+    ]
+
+
+def test_mcp_invocation_evidence_rejects_oversized_gateway_responses(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        status = 200
+        headers = {"Content-Length": str(budgets._MCP_INVOCATION_EVIDENCE_MAX_RESPONSE_BYTES + 1)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            raise AssertionError("oversized responses must not be read")
+
+    monkeypatch.setattr(budgets, "urlopen", lambda *args, **kwargs: Response())
+    manager = object.__new__(KubernetesLiteLLMRunKeyManager)
+    manager._endpoint = "http://cogito-litellm:4000"
+    manager._management_key = "test-management-key"
+
+    with pytest.raises(ValueError, match="maximum size"):
+        manager._get_json("/spend/logs?user_id=cogito-run")
+
+
 @pytest.mark.parametrize(
     ("permissions", "message"),
     [
@@ -305,6 +409,88 @@ async def test_provisioned_run_key_maps_only_pinned_mcp_grants_to_gateway_identi
     await service.cleanup(workspace)
 
     assert run_keys.budgets[0].mcp_tool_permissions == {gateway_server_id: ("catalog_read",)}
+
+
+async def test_mcp_invocation_collection_is_bounded_to_workspace_grants() -> None:
+    class RecordingRunKeys:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, list[McpToolGrant], dict[tuple[str, str], str]]] = []
+
+        async def collect_mcp_invocations(
+            self,
+            run_id: str,
+            secret_name: str,
+            grants: list[McpToolGrant],
+            routes: dict[tuple[str, str], str],
+        ) -> dict[str, object]:
+            self.calls.append((run_id, secret_name, grants, routes))
+            return {"version": 1, "status": "observed", "events": []}
+
+    grant = McpToolGrant(
+        server_id="cogito_readonly_mcp",
+        server_version="1.0.1",
+        server_manifest_sha256="b" * 64,
+        tool_name="catalog_read",
+        input_schema_sha256="c" * 64,
+    )
+    run_keys = RecordingRunKeys()
+    service = ExecutionWorkspaceService(execution_settings(), InMemoryExecutionJobClient(), run_keys)
+    workspace = ExecutionWorkspace(
+        run_id="run-1",
+        job_name="cogito-execution-example",
+        workspace_root="/workspace",
+        run_key_secret="cogito-run-key-example",
+        mcp_grants=[grant],
+        mcp_servers=[
+            McpServerConfiguration(
+                registration_id="cogito_readonly_mcp",
+                server_version="1.0.1",
+                name="cogito_readonly",
+                url="http://cogito-litellm:4000/cogito_readonly/mcp",
+            )
+        ],
+    )
+
+    evidence = await service.collect_mcp_invocations(workspace)
+
+    assert evidence == {"version": 1, "status": "observed", "events": []}
+    assert run_keys.calls == [
+        (
+            "run-1",
+            "cogito-run-key-example",
+            [grant],
+            {("cogito_readonly_mcp", "1.0.1"): "cogito_readonly"},
+        )
+    ]
+
+
+async def test_mcp_invocation_collection_never_interrupts_an_execution_run() -> None:
+    class FailingRunKeys:
+        async def collect_mcp_invocations(self, *args: object) -> dict[str, object]:
+            raise RuntimeError("gateway audit unavailable")
+
+    service = ExecutionWorkspaceService(execution_settings(), InMemoryExecutionJobClient(), FailingRunKeys())
+    workspace = ExecutionWorkspace(
+        run_id="run-1",
+        job_name="cogito-execution-example",
+        workspace_root="/workspace",
+        mcp_grants=[
+            McpToolGrant(
+                server_id="cogito_readonly_mcp",
+                server_version="1.0.1",
+                server_manifest_sha256="b" * 64,
+                tool_name="catalog_read",
+                input_schema_sha256="c" * 64,
+            )
+        ],
+    )
+
+    assert await service.collect_mcp_invocations(workspace) == {
+        "version": 1,
+        "status": "unavailable",
+        "reason": "collector_configuration_invalid",
+        "events": [],
+    }
 
 
 async def test_provision_rejects_an_mcp_grant_that_does_not_match_the_configured_release() -> None:

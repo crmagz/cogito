@@ -100,6 +100,7 @@ class ExecutionWorkspace:
     run_key_secret: str = ""
     run_git_secret: str = ""
     mcp_servers: list["McpServerConfiguration"] = field(default_factory=list)
+    mcp_grants: list[McpToolGrant] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,7 @@ class McpServerConfiguration:
     """Non-secret gateway route configured for an approved execution workspace."""
 
     registration_id: str
+    server_version: str
     name: str
     url: str
 

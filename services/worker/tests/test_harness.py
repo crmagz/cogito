@@ -137,6 +137,7 @@ async def test_harness_configures_only_the_workspace_mcp_routes_before_claude_ru
             mcp_servers=[
                 McpServerConfiguration(
                     registration_id="cogito_readonly_mcp",
+                    server_version="1.0.1",
                     name="cogito_readonly",
                     url="http://cogito-litellm:4000/cogito_readonly/mcp",
                 )
@@ -168,6 +169,7 @@ async def test_review_revision_configures_workspace_mcp_routes_before_claude_run
         mcp_servers=[
             McpServerConfiguration(
                 registration_id="cogito_readonly_mcp",
+                server_version="1.0.1",
                 name="cogito_readonly",
                 url="http://cogito-litellm:4000/cogito_readonly/mcp",
             )

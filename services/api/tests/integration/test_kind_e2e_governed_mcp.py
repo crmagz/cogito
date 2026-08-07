@@ -43,6 +43,9 @@ def test_governed_mcp_registration_and_gateway_authorization_e2e() -> None:
     )
     assert gateway == {
         "allowed_call_is_readonly": True,
+        "allowed_invocation_evidence_is_pinned": True,
+        "allowed_invocation_evidence_reason": None,
+        "allowed_invocation_evidence_status": "observed",
         "allowed_initialize_status": 200,
         "allowed_list_status": 200,
         "allowed_tools": ["cogito_readonly-catalog_read"],
@@ -154,6 +157,7 @@ from urllib.request import Request, urlopen
 
 from cogito_worker.budgets import KubernetesLiteLLMRunKeyManager, RunBudget, _secret_token
 from cogito_worker.config import load_settings
+from cogito_worker.models import McpToolGrant
 
 
 def decode_response(payload: str) -> dict:
@@ -177,10 +181,10 @@ def mcp_request(endpoint: str, token: str, body: dict, session_id: str | None = 
         return response.status, response.headers.get("Mcp-Session-Id"), decode_response(response.read().decode())
 
 
-async def tools_for_permission(manager, settings, server_id: str, tool_name: str) -> tuple[int, int, list[str], bool, bool]:
+async def tools_for_permission(manager, settings, server_id: str, tool_name: str) -> tuple[int, int, list[str], bool, bool, dict]:
     run_id = f"governed-mcp-kind-e2e-{uuid.uuid4()}"
     secret_name = ""
-    result: tuple[int, int, list[str], bool] | None = None
+    result: tuple[int, int, list[str], bool, dict] | None = None
     cleaned = False
     try:
         secret_name = await manager.provision(
@@ -222,7 +226,21 @@ async def tools_for_permission(manager, settings, server_id: str, tool_name: str
             )
             assert call_status == 200
             readonly = called["result"]["structuredContent"]["read_only"] is True
-        result = (initialize_status, list_status, tools, readonly)
+        evidence = await manager.collect_mcp_invocations(
+            run_id,
+            secret_name,
+            [
+                McpToolGrant(
+                    server_id="cogito_readonly_mcp",
+                    server_version="1.0.1",
+                    server_manifest_sha256="46d5827e9f5f248a8b7060fca33a4e02278eddfd55e900e3464ab13778ccf626",
+                    tool_name=tool_name,
+                    input_schema_sha256="ef3cb95cfd8ed305ddfb437e195878a4a9c9196cdaf3a38cbe2e2bdb99df5622",
+                )
+            ],
+            {("cogito_readonly_mcp", "1.0.1"): "cogito_readonly"},
+        )
+        result = (initialize_status, list_status, tools, readonly, evidence)
     finally:
         if secret_name:
             await manager.cleanup(run_id, secret_name)
@@ -241,14 +259,31 @@ async def main() -> None:
         settings.execution_litellm_endpoint,
         settings.execution_litellm_management_key,
     )
-    allowed_initialize, allowed_list, allowed_tools, allowed_readonly, allowed_cleaned = await tools_for_permission(
+    allowed_initialize, allowed_list, allowed_tools, allowed_readonly, allowed_evidence, allowed_cleaned = await tools_for_permission(
         manager, settings, server_id, "catalog_read"
     )
-    denied_initialize, denied_list, denied_tools, _, denied_cleaned = await tools_for_permission(
+    denied_initialize, denied_list, denied_tools, _, _, denied_cleaned = await tools_for_permission(
         manager, settings, server_id, "not_allowed"
     )
     print(json.dumps({
         "allowed_call_is_readonly": allowed_readonly,
+        "allowed_invocation_evidence_is_pinned": allowed_evidence == {
+            "version": 1,
+            "status": "observed",
+            "events": [
+                {
+                    "server_id": "cogito_readonly_mcp",
+                    "server_version": "1.0.1",
+                    "server_manifest_sha256": "46d5827e9f5f248a8b7060fca33a4e02278eddfd55e900e3464ab13778ccf626",
+                    "tool_name": "catalog_read",
+                    "input_schema_sha256": "ef3cb95cfd8ed305ddfb437e195878a4a9c9196cdaf3a38cbe2e2bdb99df5622",
+                    "outcome": "success",
+                    "invocation_count": 1,
+                }
+            ],
+        },
+        "allowed_invocation_evidence_reason": allowed_evidence.get("reason"),
+        "allowed_invocation_evidence_status": allowed_evidence.get("status"),
         "allowed_initialize_status": allowed_initialize,
         "allowed_list_status": allowed_list,
         "allowed_tools": allowed_tools,

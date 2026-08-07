@@ -54,7 +54,13 @@ class InMemoryExecutionWorkspaces:
             job_name=f"cogito-execution-{request.run_id}",
             workspace_root="/workspace",
             repositories=["/workspace/repos/example"] if request.target_repos else [],
+            mcp_grants=list(request.mcp_grants),
         )
+
+    async def collect_mcp_invocations(self, workspace: ExecutionWorkspace) -> dict[str, object] | None:
+        if not workspace.mcp_grants:
+            return None
+        return {"version": 1, "status": "observed", "events": []}
 
     async def cleanup(self, workspace: ExecutionWorkspace) -> None:
         self.cleaned.append(workspace)

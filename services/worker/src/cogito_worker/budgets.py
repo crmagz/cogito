@@ -7,10 +7,19 @@ import base64
 import hashlib
 import json
 import secrets
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+from .models import McpToolGrant
+
+_MCP_INVOCATION_EVIDENCE_POLL_ATTEMPTS = 12
+_MCP_INVOCATION_EVIDENCE_REQUEST_TIMEOUT_SECONDS = 1
+_MCP_INVOCATION_EVIDENCE_MAX_GRANTS = 64
+_MCP_INVOCATION_EVIDENCE_MAX_RESPONSE_BYTES = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -105,6 +114,39 @@ class KubernetesLiteLLMRunKeyManager:
             await self._delete_gateway_key(token)
         await self._delete_secret(secret_name)
 
+    async def collect_mcp_invocations(
+        self,
+        run_id: str,
+        secret_name: str,
+        grants: Sequence[McpToolGrant],
+        server_routes: Mapping[tuple[str, str], str],
+    ) -> dict[str, object]:
+        """Return a bounded gateway observation for the current run key only."""
+
+        if secret_name != run_key_secret_name(run_id):
+            raise ValueError("run key Secret does not match the execution run")
+        expected = _expected_mcp_tools(grants, server_routes)
+        if not expected:
+            return {"status": "not_applicable", "events": []}
+        try:
+            secret = await self._read_secret(secret_name)
+            token = _secret_token(secret) if secret is not None else None
+            if not token:
+                return _unavailable_invocation_evidence("run_key_unavailable")
+            # Never filter audit records with the run key: LiteLLM access logs
+            # retain request URLs. The user ID is a derived, non-secret value.
+            path = f"/spend/logs?{urlencode({'user_id': run_audit_user_id(run_id)})}"
+            latest: dict[str, object] | None = None
+            for _ in range(_MCP_INVOCATION_EVIDENCE_POLL_ATTEMPTS):
+                records = await asyncio.to_thread(self._get_json, path)
+                latest = _mcp_invocation_evidence(records, expected)
+                await asyncio.sleep(0.75)
+        except Exception:  # Gateway response details can contain protected request data.
+            return _unavailable_invocation_evidence("gateway_audit_unavailable")
+        if latest is not None:
+            return latest
+        return _unavailable_invocation_evidence("gateway_audit_not_visible")
+
     async def _read_secret(self, name: str):
         try:
             return await asyncio.to_thread(self._core_api.read_namespaced_secret, name, self._namespace)
@@ -133,6 +175,23 @@ class KubernetesLiteLLMRunKeyManager:
         with urlopen(request, timeout=30) as response:  # nosec B310: endpoint is operator controlled
             if response.status < 200 or response.status >= 300:
                 raise RuntimeError("LiteLLM run-key management request was rejected")
+
+    def _get_json(self, path: str) -> object:
+        request = Request(
+            f"{self._endpoint}{path}",
+            headers={"Authorization": f"Bearer {self._management_key}"},
+            method="GET",
+        )
+        with urlopen(request, timeout=_MCP_INVOCATION_EVIDENCE_REQUEST_TIMEOUT_SECONDS) as response:  # nosec B310: endpoint is operator controlled
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError("LiteLLM invocation evidence request was rejected")
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None and int(content_length) > _MCP_INVOCATION_EVIDENCE_MAX_RESPONSE_BYTES:
+                raise ValueError("LiteLLM invocation evidence response exceeds the maximum size")
+            payload = response.read(_MCP_INVOCATION_EVIDENCE_MAX_RESPONSE_BYTES + 1)
+            if len(payload) > _MCP_INVOCATION_EVIDENCE_MAX_RESPONSE_BYTES:
+                raise ValueError("LiteLLM invocation evidence response exceeds the maximum size")
+            return json.loads(payload)
 
 
 class KubernetesRunGitCredentialManager:
@@ -208,6 +267,12 @@ def _run_hash(run_id: str) -> str:
     return hashlib.sha256(run_id.encode()).hexdigest()[:20]
 
 
+def run_audit_user_id(run_id: str) -> str:
+    """Return the non-secret gateway audit correlator for one run."""
+
+    return f"cogito-{_run_hash(run_id)}"
+
+
 def _secret_token(secret: object, key: str = "api-key") -> str | None:
     data = getattr(secret, "data", None) or {}
     encoded = data.get(key)
@@ -241,12 +306,70 @@ def _validate_budget(budget: RunBudget) -> None:
             raise ValueError("MCP tool permissions must be explicit unique tool names")
 
 
+def _expected_mcp_tools(
+    grants: Sequence[McpToolGrant], server_routes: Mapping[tuple[str, str], str]
+) -> dict[str, McpToolGrant]:
+    """Map one pinned grant to its only permitted gateway tool identity."""
+
+    expected: dict[str, McpToolGrant] = {}
+    for grant in grants:
+        route = server_routes.get((grant.server_id, grant.server_version))
+        if not isinstance(route, str) or not route:
+            raise ValueError("MCP invocation evidence is missing a trusted gateway route")
+        tool = f"{route}/{grant.tool_name}"
+        if tool in expected:
+            raise ValueError("MCP invocation evidence contains duplicate gateway tool identities")
+        expected[tool] = grant
+    if len(expected) > _MCP_INVOCATION_EVIDENCE_MAX_GRANTS:
+        raise ValueError("MCP invocation evidence exceeds the maximum pinned tool grants")
+    return expected
+
+
+def _mcp_invocation_evidence(records: object, expected: Mapping[str, McpToolGrant]) -> dict[str, object]:
+    """Reduce untrusted gateway records to immutable grant-bound invocation counts."""
+
+    if not isinstance(records, list):
+        raise ValueError("LiteLLM invocation evidence response must be a list")
+    observed: Counter[tuple[str, str]] = Counter()
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        tool = record.get("mcp_namespaced_tool_name")
+        status = record.get("status")
+        if not isinstance(tool, str) or tool not in expected or not isinstance(status, str) or not status:
+            continue
+        outcome = "success" if status == "success" else "failure"
+        observed[(tool, outcome)] += 1
+    events: list[dict[str, object]] = []
+    for (tool, outcome), count in sorted(observed.items()):
+        grant = expected[tool]
+        events.append(
+            {
+                "server_id": grant.server_id,
+                "server_version": grant.server_version,
+                "server_manifest_sha256": grant.server_manifest_sha256,
+                "tool_name": grant.tool_name,
+                "input_schema_sha256": grant.input_schema_sha256,
+                "outcome": outcome,
+                "invocation_count": count,
+            }
+        )
+    return {"version": 1, "status": "observed", "events": events}
+
+
+def _unavailable_invocation_evidence(reason: str) -> dict[str, object]:
+    """Return a versioned, non-assertive evidence state for audit failures."""
+
+    return {"version": 1, "status": "unavailable", "reason": reason, "events": []}
+
+
 def _run_key_payload(token: str, budget: RunBudget) -> dict[str, object]:
     """Build the non-persisted LiteLLM virtual-key request for one run."""
 
     payload: dict[str, object] = {
         "key": token,
-        "key_alias": f"cogito-{_run_hash(budget.run_id)}",
+        "key_alias": run_audit_user_id(budget.run_id),
+        "user_id": run_audit_user_id(budget.run_id),
         "models": [budget.model],
         "max_budget": budget.max_cost_usd,
         "budget_duration": f"{budget.expires_in_seconds}s",
