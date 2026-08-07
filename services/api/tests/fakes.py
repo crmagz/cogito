@@ -811,9 +811,11 @@ class FakePlanner:
     def __init__(self, plan: AiPlan) -> None:
         self.plan = plan
         self.contexts: list[PlanningContext] = []
+        self.gateways: list[AgentGatewayResolution] = []
 
-    async def generate(self, context: PlanningContext) -> AiPlan:
+    async def generate(self, context: PlanningContext, gateway: AgentGatewayResolution) -> AiPlan:
         self.contexts.append(context)
+        self.gateways.append(gateway)
         return self.plan
 
 

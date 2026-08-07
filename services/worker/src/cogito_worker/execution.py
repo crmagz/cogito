@@ -537,7 +537,15 @@ class ExecutionWorkspaceService:
         agent_registration_id = ""
         agent_manifest_sha256 = ""
         if request.gateway is not None:
-            if request.gateway.role != "developer" or request.gateway.registration_id != "developer":
+            registration = request.registration
+            if (
+                registration is None
+                or request.gateway.role != registration.role
+                or request.gateway.registration_id != registration.registration_id
+                or request.gateway.registration_version != registration.version
+                or request.gateway.manifest_sha256 != registration.manifest_sha256
+                or registration.role != "developer"
+            ):
                 raise ValueError("execution workspace requires the pinned developer gateway route")
             run_model = request.gateway.model_alias
             run_budget = min(run_budget, request.gateway.max_budget_usd)

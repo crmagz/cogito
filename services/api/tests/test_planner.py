@@ -5,10 +5,26 @@ import json
 import httpx
 import pytest
 
-from cogito_api.models import AiPlan
+from cogito_api.models import AgentGatewayResolution, AiPlan
 from cogito_api.planner import LiteLLMPlanner, PlannerError, PlanningContext
 
 from .conftest import make_settings
+
+
+def planner_gateway(**overrides: object) -> AgentGatewayResolution:
+    values = {
+        "policy_revision": "agent_gateway_initial",
+        "project_id": "default",
+        "role": "planner",
+        "registration_id": "planner",
+        "registration_version": "1.0.0",
+        "manifest_sha256": "a" * 64,
+        "model_alias": "balanced",
+        "max_budget_usd": 5.0,
+        "toolset": "planning-readonly",
+    }
+    values.update(overrides)
+    return AgentGatewayResolution(**values)
 
 
 async def test_litellm_planner_requests_json_with_dedicated_bearer_key(valid_plan: dict) -> None:
@@ -29,7 +45,8 @@ async def test_litellm_planner_requests_json_with_dedicated_bearer_key(valid_pla
             target_repos=valid_plan["target_repos"],
             spec_set=valid_plan["spec_set"],
             constraints=AiPlan.model_validate(valid_plan).constraints,
-        )
+        ),
+        planner_gateway(),
     )
 
     assert plan == AiPlan.model_validate(valid_plan)
@@ -54,7 +71,8 @@ async def test_litellm_planner_rejects_model_output_that_changes_target_reposito
                 target_repos=valid_plan["target_repos"],
                 spec_set=valid_plan["spec_set"],
                 constraints=AiPlan.model_validate(valid_plan).constraints,
-            )
+            ),
+            planner_gateway(),
         )
 
 
@@ -69,10 +87,26 @@ async def test_litellm_planner_accepts_a_single_fenced_json_object(valid_plan: d
             target_repos=valid_plan["target_repos"],
             spec_set=valid_plan["spec_set"],
             constraints=AiPlan.model_validate(valid_plan).constraints,
-        )
+        ),
+        planner_gateway(),
     )
 
     assert plan.title == valid_plan["title"]
+
+
+async def test_litellm_planner_rejects_a_route_that_exceeds_its_configured_role_key(valid_plan: dict) -> None:
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(lambda _: httpx.Response(500)))
+
+    with pytest.raises(PlannerError, match="gateway route"):
+        await planner.generate(
+            PlanningContext(
+                initial_specification="Add a rate limiter.",
+                target_repos=valid_plan["target_repos"],
+                spec_set=valid_plan["spec_set"],
+                constraints=AiPlan.model_validate(valid_plan).constraints,
+            ),
+            planner_gateway(model_alias="complex"),
+        )
 
 
 def test_ai_plan_rejects_undeclared_output_fields(valid_plan: dict) -> None:

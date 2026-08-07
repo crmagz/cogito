@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from math import isfinite
 from typing import Protocol
 
 import httpx
@@ -11,7 +12,7 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .dag import validate_constraints, validate_phase_dag, validate_spec_reference, validate_target_repositories
-from .models import AiPlan, PlanConstraints, Violation
+from .models import AgentGatewayResolution, AiPlan, PlanConstraints, Violation
 
 
 class PlannerError(Exception):
@@ -31,7 +32,7 @@ class PlanningContext:
 class Planner(Protocol):
     """Produces a normalized plan without repository-write or tool authority."""
 
-    async def generate(self, context: PlanningContext) -> AiPlan: ...
+    async def generate(self, context: PlanningContext, gateway: AgentGatewayResolution) -> AiPlan: ...
 
 
 class LiteLLMPlanner:
@@ -45,13 +46,21 @@ class LiteLLMPlanner:
         self._settings = settings
         self._transport = transport
 
-    async def generate(self, context: PlanningContext) -> AiPlan:
-        """Request and validate one JSON-only plan from the configured LiteLLM model alias."""
+    async def generate(self, context: PlanningContext, gateway: AgentGatewayResolution) -> AiPlan:
+        """Request and validate one JSON-only plan through its pinned gateway route."""
 
         if not self._api_key:
             raise PlannerError("planner virtual key is not configured")
+        if (
+            gateway.role != "planner"
+            or gateway.registration_id != "planner"
+            or gateway.model_alias != self._model
+            or not isfinite(gateway.max_budget_usd)
+            or gateway.max_budget_usd != self._settings.litellm_planner_max_budget_usd
+        ):
+            raise PlannerError("planner gateway route does not match the configured LiteLLM role key")
         payload = {
-            "model": self._model,
+            "model": gateway.model_alias,
             "response_format": {"type": "json_object"},
             "messages": [
                 {

@@ -32,6 +32,8 @@ from cogito_worker.models import (
     ExecutionWorkspace,
     McpServerConfiguration,
     McpToolGrant,
+    RegistrationReference,
+    ToolGrant,
 )
 
 from .fakes import InMemoryExecutionJobClient
@@ -238,6 +240,15 @@ async def test_execution_workspace_uses_the_pinned_gateway_model_and_bounded_bud
             target_repos=[],
             execution_timeout_seconds=120,
             max_cost_usd=2.5,
+            registration=RegistrationReference(
+                role="developer",
+                registration_id="developer",
+                version="1.0.0",
+                manifest_sha256="a" * 64,
+                component_id="developer",
+                component_version="1.0.0",
+                grants=[ToolGrant("developer_harness", "1.0.0", "approved_phase")],
+            ),
             gateway=gateway,
         )
     )
@@ -254,6 +265,39 @@ async def test_execution_workspace_uses_the_pinned_gateway_model_and_bounded_bud
     ]
     container = jobs.created[0][1]["spec"]["template"]["spec"]["containers"][0]
     assert next(env["value"] for env in container["env"] if env["name"] == "ANTHROPIC_MODEL") == "balanced"
+
+
+async def test_execution_workspace_rejects_a_gateway_not_matching_the_pinned_registration() -> None:
+    service = ExecutionWorkspaceService(execution_settings(), InMemoryExecutionJobClient())
+    gateway = AgentGatewayResolution(
+        policy_revision="agent_gateway_initial",
+        project_id="default",
+        role="developer",
+        registration_id="developer",
+        registration_version="99.0.0",
+        manifest_sha256="b" * 64,
+        model_alias="unapproved-model",
+        max_budget_usd=100.0,
+        toolset="development-restricted",
+    )
+
+    with pytest.raises(ValueError, match="pinned developer gateway route"):
+        await service.provision(
+            ExecutionRequest(
+                run_id="run-1",
+                spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+                target_repos=[],
+                registration=RegistrationReference(
+                    role="developer",
+                    registration_id="developer",
+                    version="1.0.0",
+                    manifest_sha256="a" * 64,
+                    component_id="developer",
+                    component_version="1.0.0",
+                ),
+                gateway=gateway,
+            )
+        )
 
 
 def test_mcp_invocation_evidence_retains_only_pinned_grant_counts() -> None:
