@@ -44,17 +44,20 @@ class InMemoryRunStore:
 class InMemoryExecutionWorkspaces:
     def __init__(self, cleanup_error: Exception | None = None) -> None:
         self.provisioned: list[str] = []
+        self.requests: list[ExecutionRequest] = []
         self.cleaned: list[ExecutionWorkspace] = []
         self.cleanup_error = cleanup_error
 
     async def provision(self, request: ExecutionRequest) -> ExecutionWorkspace:
         self.provisioned.append(request.run_id)
+        self.requests.append(request)
         return ExecutionWorkspace(
             run_id=request.run_id,
             job_name=f"cogito-execution-{request.run_id}",
             workspace_root="/workspace",
             repositories=["/workspace/repos/example"] if request.target_repos else [],
             mcp_grants=list(request.mcp_grants),
+            mcp_selection_explicit=request.mcp_selection_explicit,
         )
 
     async def collect_mcp_invocations(self, workspace: ExecutionWorkspace) -> dict[str, object] | None:

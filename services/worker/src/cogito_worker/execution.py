@@ -597,6 +597,7 @@ class ExecutionWorkspaceService:
                 for server in mcp_servers
             ],
             mcp_grants=list(request.mcp_grants),
+            mcp_selection_explicit=request.mcp_selection_explicit,
         )
         try:
             base_commits: dict[str, str] = {}

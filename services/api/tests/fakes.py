@@ -12,6 +12,7 @@ from cogito_api.models import (
     PlanningRunStatus,
     McpBindingPolicy,
     McpToolGrant,
+    McpToolSelection,
     RegistrationManifest,
     RegistrationReference,
     RunEnvelope,
@@ -317,7 +318,12 @@ class InMemorySupervisorStore:
         comment: str | None,
         idempotency_key: str,
         request_sha256: str,
+        mcp_selection: list[McpToolSelection] | None = None,
     ) -> ApprovalRecord:
+        if mcp_selection is not None:
+            if len({item.key() for item in mcp_selection}) != len(mcp_selection):
+                raise ApprovalConflictError("MCP selection grants must be unique")
+            mcp_selection = sorted(mcp_selection, key=McpToolSelection.key)
         run = self.planning_runs.get(run_id)
         revision = run.plan_revision if run is not None else 0
         approval_key = (run_id, revision, idempotency_key)
@@ -328,8 +334,19 @@ class InMemorySupervisorStore:
             return existing
         if run is None or run.status is not PlanningRunStatus.AWAITING_PLAN_APPROVAL:
             raise ApprovalConflictError("planning run is not awaiting plan approval")
+        if any(item.run_id == run_id and item.plan_revision == revision for item in self.approvals.values()):
+            raise ApprovalConflictError("a plan approval decision is already recorded for this revision")
         if run.plan_artifact is None or run.plan_artifact.sha256 != artifact_sha256:
             raise ApprovalConflictError("plan approval artifact digest is stale")
+        if mcp_selection is not None:
+            available = {
+                (role, grant.server_id, grant.server_version, grant.server_manifest_sha256, grant.tool_name, grant.input_schema_sha256)
+                for (resolved_run_id, role), grants in self.run_mcp_tool_resolutions.items()
+                if resolved_run_id == run_id and role == "developer"
+                for grant in grants
+            }
+            if any(item.key() not in available for item in mcp_selection):
+                raise ApprovalConflictError("MCP selection is not a subset of the run's pinned policy grants")
         record = ApprovalRecord(
             decision_id=f"decision-{len(self.approvals) + 1}",
             run_id=run_id,
@@ -339,6 +356,7 @@ class InMemorySupervisorStore:
             created_at=datetime.now(timezone.utc).isoformat(),
             delivered=False,
             plan_revision=run.plan_revision,
+            mcp_selection=mcp_selection,
         )
         self.approvals[approval_key] = record
         self.approval_request_hashes[approval_key] = request_sha256
@@ -350,7 +368,12 @@ class InMemorySupervisorStore:
                 "decision_id": record.decision_id,
                 "artifact_sha256": record.artifact_sha256,
                 "decision": record.decision.value,
-            },
+            }
+            | (
+                {"mcp_selection": [item.model_dump(mode="json") for item in mcp_selection]}
+                if mcp_selection is not None
+                else {}
+            ),
             attempt_count=0,
         )
         self._append_coordination_event(
@@ -374,6 +397,7 @@ class InMemorySupervisorStore:
                     created_at=record.created_at,
                     delivered=True,
                     plan_revision=record.plan_revision,
+                    mcp_selection=record.mcp_selection,
                 )
                 run = self.planning_runs[record.run_id]
                 if run.plan_revision != record.plan_revision:
@@ -600,6 +624,7 @@ class InMemorySupervisorStore:
                 actor_id=item.actor_id,
                 created_at=item.created_at,
                 delivered=item.delivered,
+                mcp_selection=item.mcp_selection,
             )
             for item in self.approvals.values()
             if item.run_id == run_id
@@ -618,6 +643,35 @@ class InMemorySupervisorStore:
             if item.run_id == run_id
         ]
         return sorted(records, key=lambda item: (item.created_at, item.decision_id), reverse=True)[:max(1, min(limit, 100))]
+
+    async def get_run_mcp_capabilities(
+        self, run_id: str, plan_revision: int
+    ) -> tuple[list[McpToolSelection], list[McpToolSelection] | None, bool]:
+        pins = sorted(
+            [
+                McpToolSelection(
+                    role=role,
+                    server_id=grant.server_id,
+                    server_version=grant.server_version,
+                    server_manifest_sha256=grant.server_manifest_sha256,
+                    tool_name=grant.tool_name,
+                    input_schema_sha256=grant.input_schema_sha256,
+                )
+                for (resolved_run_id, role), grants in self.run_mcp_tool_resolutions.items()
+                if resolved_run_id == run_id and role == "developer"
+                for grant in grants
+            ],
+            key=McpToolSelection.key,
+        )
+        decisions = [
+            item for item in self.approvals.values() if item.run_id == run_id and item.plan_revision == plan_revision
+        ]
+        decisions.sort(key=lambda item: (item.created_at, item.decision_id), reverse=True)
+        return (
+            pins,
+            decisions[0].mcp_selection if decisions else None,
+            bool(decisions) and decisions[0].decision is PlanApprovalDecision.APPROVE,
+        )
 
     async def list_coordination_runs(self, *, limit: int = 50) -> list[PlanningRunRecord]:
         return sorted(self.planning_runs.values(), key=lambda item: item.submitted_at, reverse=True)[:limit]
@@ -705,7 +759,7 @@ class FakePlanner:
 class FakeRunStarter:
     def __init__(self) -> None:
         self.started_runs: list[RunEnvelope] = []
-        self.plan_approvals: list[tuple[str, dict[str, str]]] = []
+        self.plan_approvals: list[tuple[str, dict[str, object]]] = []
         self.implementation_approvals: list[tuple[str, dict[str, str]]] = []
         self.approval_error: Exception | None = None
         self.approval_result = True
@@ -718,7 +772,7 @@ class FakeRunStarter:
             return
         self.started_runs.append(envelope)
 
-    async def submit_plan_approval(self, workflow_id: str, decision: dict[str, str]) -> bool:
+    async def submit_plan_approval(self, workflow_id: str, decision: dict[str, object]) -> bool:
         self.plan_approvals.append((workflow_id, decision))
         if self.approval_error is not None:
             raise self.approval_error

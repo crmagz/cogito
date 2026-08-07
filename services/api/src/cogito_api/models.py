@@ -319,6 +319,41 @@ class McpToolGrant(BaseModel):
     )
 
 
+class McpToolSelection(BaseModel):
+    """One exact run-pinned MCP grant selected by an approver."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    server_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    server_version: str = Field(min_length=1, max_length=32, pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$")
+    server_manifest_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    tool_name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    input_schema_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+
+    def key(self) -> tuple[str, str, str, str, str, str]:
+        """Return the canonical identity used for equality and ordering."""
+
+        return (
+            self.role,
+            self.server_id,
+            self.server_version,
+            self.server_manifest_sha256,
+            self.tool_name,
+            self.input_schema_sha256,
+        )
+
+
+def _canonical_mcp_selection(selection: list[McpToolSelection] | None) -> list[McpToolSelection] | None:
+    """Sort a selection and reject duplicate exact grants before request hashing."""
+
+    if selection is None:
+        return None
+    if len({item.key() for item in selection}) != len(selection):
+        raise ValueError("MCP selection grants must be unique")
+    return sorted(selection, key=McpToolSelection.key)
+
+
 class RegistrationManifest(BaseModel):
     """Declarative, non-secret definition of an immutable component release."""
 
@@ -481,6 +516,14 @@ class PlanApprovalRequest(BaseModel):
         max_length=10_000,
         description="Required rationale for rejection or revision requests",
     )
+    mcp_selection: list[McpToolSelection] | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Optional exact subset of the run-pinned MCP grants. Null preserves the run's pinned grants; "
+            "an empty list explicitly selects no MCP grants."
+        ),
+    )
 
     @model_validator(mode="after")
     def require_comment_for_non_approval(self) -> "PlanApprovalRequest":
@@ -488,6 +531,9 @@ class PlanApprovalRequest(BaseModel):
 
         if self.decision is not PlanApprovalDecision.APPROVE and not (self.comment and self.comment.strip()):
             raise ValueError("comment is required when rejecting or requesting revision")
+        if self.decision is not PlanApprovalDecision.APPROVE and self.mcp_selection is not None:
+            raise ValueError("MCP selection is allowed only when approving a plan")
+        self.mcp_selection = _canonical_mcp_selection(self.mcp_selection)
         return self
 
 
@@ -501,6 +547,11 @@ class PlanApprovalResponse(BaseModel):
     actor_id: str = Field(description="Authenticated reviewer subject")
     delivered: bool = Field(description="Whether Temporal accepted the decision update")
     created_at: str = Field(description="ISO 8601 decision timestamp")
+    mcp_selection: list[McpToolSelection] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Immutable canonical MCP selection recorded with this decision",
+    )
 
 
 class ImplementationApprovalRequest(BaseModel):
@@ -649,6 +700,24 @@ class WorkbenchApprovalSummary(BaseModel):
     actor_id: str
     created_at: str
     delivered: bool
+    mcp_selection: list[McpToolSelection] | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class WorkbenchMcpCapabilityState(StrEnum):
+    """Server-owned capability selection state for an approver's Workbench view."""
+
+    AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
+    APPROVED = "approved"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class WorkbenchMcpCapabilities(BaseModel):
+    """Approver-only exact pins and immutable selection for one planning run."""
+
+    state: WorkbenchMcpCapabilityState
+    pinned_grants: list[McpToolSelection] = Field(default_factory=list)
+    selected_grants: list[McpToolSelection] | None = None
+    invocation_evidence_available: bool = False
 
 
 class WorkbenchBudgetSummary(BaseModel):
@@ -729,6 +798,7 @@ class WorkbenchRunResponse(BaseModel):
     budget: WorkbenchBudgetSummary
     approval_history_available: bool = False
     approval_history: list[WorkbenchApprovalSummary] = Field(default_factory=list)
+    mcp_capabilities: WorkbenchMcpCapabilities | None = None
     execution: WorkbenchExecutionSummary | None = None
     external_links: list[WorkbenchExternalLink] = Field(default_factory=list)
 
@@ -820,6 +890,11 @@ class CoordinationApprovalActionRequest(BaseModel):
         max_length=10_000,
         description="Required durable rationale for rejection or revision requests",
     )
+    mcp_selection: list[McpToolSelection] | None = Field(
+        default=None,
+        max_length=128,
+        description="Optional exact MCP subset for a plan-approval action",
+    )
 
     @model_validator(mode="after")
     def require_comment_for_non_approval(self) -> "CoordinationApprovalActionRequest":
@@ -827,6 +902,9 @@ class CoordinationApprovalActionRequest(BaseModel):
 
         if self.decision is not PlanApprovalDecision.APPROVE and not (self.comment and self.comment.strip()):
             raise ValueError("comment is required when rejecting or requesting revision")
+        if self.decision is not PlanApprovalDecision.APPROVE and self.mcp_selection is not None:
+            raise ValueError("MCP selection is allowed only when approving a plan")
+        self.mcp_selection = _canonical_mcp_selection(self.mcp_selection)
         return self
 
 

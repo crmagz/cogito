@@ -31,11 +31,15 @@ def test_governed_mcp_registration_and_gateway_authorization_e2e() -> None:
         harness.exec_python(f"deployment/{harness.release}-api", _POLICY_RESOLUTION_PROBE)
     )
     assert resolution == {
+        "allowed_narrowing_is_persisted": True,
+        "attempted_expansion_is_denied": True,
         "grant_count": 1,
         "grant_is_catalog_read": True,
         "grant_is_current_release": True,
+        "retry_preserves_selected_grants": True,
         "retry_preserves_pinned_grant": True,
         "role_policy_is_compatible": True,
+        "selection_is_delivered_in_outbox": True,
     }
 
     gateway = json.loads(
@@ -66,9 +70,21 @@ from pathlib import Path
 from sqlalchemy import text
 
 from cogito_api.config import load_settings
-from cogito_api.models import AgentRunStatus
+from cogito_api.models import (
+    AgentRunStatus,
+    ArtifactReference,
+    McpToolSelection,
+    PlanApprovalDecision,
+    PlanConstraints,
+    PlanningRunStatus,
+)
 from cogito_api.registry import load_component_catalog, load_mcp_binding_policy
-from cogito_api.supervisor import AgentRunRecord, PostgresSupervisorStore
+from cogito_api.supervisor import (
+    AgentRunRecord,
+    ApprovalConflictError,
+    PlanningRunRecord,
+    PostgresSupervisorStore,
+)
 
 
 async def main() -> None:
@@ -101,6 +117,71 @@ async def main() -> None:
         developer = next(item for item in catalog.components if item.registration_id == "developer")
         await store.resolve_run_registration(run_id, "developer", "phase12_initial", developer)
         grants = await store.resolve_run_mcp_tools(run_id, "developer", "default", policy.policy_revision)
+        plan_artifact = ArtifactReference(ref=f"s3://kind-e2e/{run_id}/plan.json", sha256="a" * 64)
+        await store.create_planning_run(
+            PlanningRunRecord(
+                run_id=run_id,
+                status=PlanningRunStatus.PLANNING,
+                source_artifact=ArtifactReference(ref=f"s3://kind-e2e/{run_id}/source.md", sha256="b" * 64),
+                target_repos=["https://example.invalid/cogito#" + "c" * 40],
+                spec_set="kind-e2e#sha256=" + "d" * 64,
+                constraints=PlanConstraints(),
+                priority="normal",
+                submitted_at=timestamp,
+                submitted_by="kind-e2e",
+            )
+        )
+        await store.attach_generated_plan(run_id, plan_artifact, "kind-e2e", f"kind-e2e-{run_id}", 0)
+        attempted_expansion_is_denied = False
+        grant = grants[0]
+        try:
+            await store.record_plan_approval(
+                run_id,
+                plan_artifact.sha256,
+                PlanApprovalDecision.APPROVE,
+                "kind-e2e",
+                None,
+                "mcp-expansion",
+                "f" * 64,
+                [
+                    McpToolSelection(
+                        role="developer",
+                        server_id=grant.server_id,
+                        server_version=grant.server_version,
+                        server_manifest_sha256=grant.server_manifest_sha256,
+                        tool_name="catalog_write",
+                        input_schema_sha256=grant.input_schema_sha256,
+                    )
+                ],
+            )
+        except ApprovalConflictError:
+            attempted_expansion_is_denied = True
+        approved_narrowing = await store.record_plan_approval(
+            run_id,
+            plan_artifact.sha256,
+            PlanApprovalDecision.APPROVE,
+            "kind-e2e",
+            None,
+            "mcp-narrowing",
+            "e" * 64,
+            [],
+        )
+        replayed_narrowing = await store.record_plan_approval(
+            run_id,
+            plan_artifact.sha256,
+            PlanApprovalDecision.APPROVE,
+            "kind-e2e",
+            None,
+            "mcp-narrowing",
+            "e" * 64,
+            [],
+        )
+        async with store._engine.connect() as connection:
+            outbox = await connection.execute(
+                text("SELECT payload FROM temporal_outbox WHERE decision_id = :decision_id"),
+                {"decision_id": approved_narrowing.decision_id},
+            )
+            outbox_payload = outbox.mappings().one()["payload"]
         async with store._engine.begin() as connection:
             await connection.execute(
                 text(
@@ -123,19 +204,32 @@ async def main() -> None:
                     )
                 )
         print(json.dumps({
+            "allowed_narrowing_is_persisted": approved_narrowing.mcp_selection == [],
+            "attempted_expansion_is_denied": attempted_expansion_is_denied,
             "grant_count": len(grants),
             "grant_is_catalog_read": [(grant.server_id, grant.tool_name) for grant in grants]
             == [("cogito_readonly_mcp", "catalog_read")],
             "grant_is_current_release": [(grant.server_version, grant.server_manifest_sha256) for grant in grants]
             == [("1.0.1", "46d5827e9f5f248a8b7060fca33a4e02278eddfd55e900e3464ab13778ccf626")],
+            "retry_preserves_selected_grants": (
+                replayed_narrowing.decision_id == approved_narrowing.decision_id
+                and replayed_narrowing.mcp_selection == []
+            ),
             "retry_preserves_pinned_grant": retried == grants,
             "role_policy_is_compatible": (await store.resolve_run_registration(
                 run_id, "developer", "phase12_initial", developer
             )).registration_id == "developer",
+            "selection_is_delivered_in_outbox": outbox_payload.get("mcp_selection") == [],
         }, sort_keys=True))
     finally:
         async with store._engine.begin() as connection:
             for statement in (
+                "DELETE FROM notification_outbox WHERE event_id IN (SELECT event_id FROM coordination_events WHERE run_id = :run_id)",
+                "DELETE FROM temporal_outbox WHERE run_id = :run_id",
+                "DELETE FROM plan_approval_decisions WHERE run_id = :run_id",
+                "DELETE FROM coordination_events WHERE run_id = :run_id",
+                "DELETE FROM supervisor_artifacts WHERE run_id = :run_id",
+                "DELETE FROM supervisor_runs WHERE run_id = :run_id",
                 "DELETE FROM run_mcp_tool_resolutions WHERE run_id = :run_id",
                 "DELETE FROM run_registration_resolutions WHERE run_id = :run_id",
                 "DELETE FROM agent_run_events WHERE run_id = :run_id",

@@ -12,6 +12,7 @@ from .models import (
     ExecutionRequest,
     ExecutionWorkspace,
     ImplementationArtifact,
+    McpToolGrant,
     PhaseExecutionRequest,
     PhaseResult,
     ReviewFinding,
@@ -26,6 +27,19 @@ from .observability import WorkerTelemetry
 from .review import LiteLLMReviewHarness
 from .run_state import NullRunStateReporter, RunStateReporter
 from .storage import RunStore, now_iso
+
+
+def _mcp_grant_evidence(grant: McpToolGrant, role: str = "developer") -> dict[str, str]:
+    """Serialize only non-secret pinned grant identity for immutable audit evidence."""
+
+    return {
+        "role": role,
+        "server_id": grant.server_id,
+        "server_version": grant.server_version,
+        "server_manifest_sha256": grant.server_manifest_sha256,
+        "tool_name": grant.tool_name,
+        "input_schema_sha256": grant.input_schema_sha256,
+    }
 
 
 class WorkerActivities:
@@ -79,10 +93,16 @@ class WorkerActivities:
 
         activity.logger.info("freezing implementation artifact", extra={"run_id": run_id})
         frozen_evidence = dict(evidence)
-        if workspace is not None and workspace.mcp_grants:
+        if workspace is not None and (workspace.mcp_grants or workspace.mcp_selection_explicit):
             invocation_evidence = await self._execution_workspaces.collect_mcp_invocations(workspace)
-            if invocation_evidence is not None:
-                frozen_evidence["mcp_invocations"] = invocation_evidence
+            frozen_evidence["mcp_invocations"] = {
+                **(
+                    invocation_evidence
+                    if invocation_evidence is not None
+                    else {"version": 1, "status": "not_applicable", "events": []}
+                ),
+                "selected_grants": [_mcp_grant_evidence(grant) for grant in workspace.mcp_grants],
+            }
         return self._store.put_implementation_artifact(run_id, frozen_evidence)
 
     @activity.defn

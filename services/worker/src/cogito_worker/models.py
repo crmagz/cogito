@@ -101,6 +101,7 @@ class ExecutionWorkspace:
     run_git_secret: str = ""
     mcp_servers: list["McpServerConfiguration"] = field(default_factory=list)
     mcp_grants: list[McpToolGrant] = field(default_factory=list)
+    mcp_selection_explicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,6 +222,7 @@ class ExecutionRequest:
     execution_timeout_seconds: int = 0
     max_cost_usd: float = 0.0
     mcp_grants: list[McpToolGrant] = field(default_factory=list)
+    mcp_selection_explicit: bool = False
     run_key_secret: str = ""
     run_git_secret: str = ""
 

@@ -18,6 +18,7 @@ from .models import (
     ImplementationApprovalDecision,
     McpBindingPolicy,
     McpToolGrant,
+    McpToolSelection,
     PlanApprovalDecision,
     PlanConstraints,
     PlanningRunStatus,
@@ -69,6 +70,7 @@ class ApprovalRecord:
     created_at: str
     delivered: bool
     plan_revision: int
+    mcp_selection: list[McpToolSelection] | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,7 @@ class WorkbenchApprovalRecord:
     actor_id: str
     created_at: str
     delivered: bool
+    mcp_selection: list[McpToolSelection] | None = None
 
 
 @dataclass(frozen=True)
@@ -120,7 +123,7 @@ class OutboxDelivery:
     decision_id: str
     run_id: str
     workflow_id: str
-    payload: dict[str, str]
+    payload: dict[str, object]
     attempt_count: int
 
 
@@ -257,7 +260,12 @@ class SupervisorStore(Protocol):
         comment: str | None,
         idempotency_key: str,
         request_sha256: str,
+        mcp_selection: list[McpToolSelection] | None = None,
     ) -> ApprovalRecord: ...
+
+    async def get_run_mcp_capabilities(
+        self, run_id: str, plan_revision: int
+    ) -> tuple[list[McpToolSelection], list[McpToolSelection] | None, bool]: ...
 
     async def mark_plan_approval_delivered(self, decision_id: str) -> None: ...
 
@@ -794,6 +802,44 @@ class PostgresSupervisorStore:
                 )
             return expected
 
+    async def get_run_mcp_capabilities(
+        self, run_id: str, plan_revision: int
+    ) -> tuple[list[McpToolSelection], list[McpToolSelection] | None, bool]:
+        """Return durable pins and the current revision's immutable selection without re-resolving policy."""
+
+        async with self._engine.connect() as connection:
+            pins = await connection.execute(
+                text(
+                    """
+                    SELECT role, server_registration_id, server_version, server_manifest_sha256,
+                           tool_name, input_schema_sha256
+                    FROM run_mcp_tool_resolutions
+                    WHERE run_id = :run_id AND role = 'developer'
+                    ORDER BY role, server_registration_id, server_version, server_manifest_sha256,
+                             tool_name, input_schema_sha256
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            decision = await connection.execute(
+                text(
+                    """
+                    SELECT decision, mcp_selection
+                    FROM plan_approval_decisions
+                    WHERE run_id = :run_id AND plan_revision = :plan_revision
+                    ORDER BY created_at DESC, decision_id DESC
+                    LIMIT 1
+                    """
+                ),
+                {"run_id": run_id, "plan_revision": plan_revision},
+            )
+            selection_row = decision.mappings().one_or_none()
+        return (
+            [_mcp_tool_selection(row) for row in pins.mappings().all()],
+            _mcp_selection_from_json(selection_row["mcp_selection"]) if selection_row is not None else None,
+            selection_row is not None and selection_row["decision"] == PlanApprovalDecision.APPROVE.value,
+        )
+
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         async with self._engine.connect() as connection:
             result = await connection.execute(
@@ -881,7 +927,9 @@ class PostgresSupervisorStore:
         comment: str | None,
         idempotency_key: str,
         request_sha256: str,
+        mcp_selection: list[McpToolSelection] | None = None,
     ) -> ApprovalRecord:
+        mcp_selection = _canonical_mcp_selection(mcp_selection)
         async with self._engine.begin() as connection:
             run = await connection.execute(
                 text(
@@ -901,7 +949,7 @@ class PostgresSupervisorStore:
                 text(
                     """
                     SELECT decision_id, run_id, decision, artifact_sha256, actor_id, created_at, delivered_at,
-                           request_sha256, plan_revision
+                           request_sha256, plan_revision, mcp_selection
                     FROM plan_approval_decisions
                     WHERE run_id = :run_id
                       AND plan_revision = :plan_revision
@@ -919,24 +967,46 @@ class PostgresSupervisorStore:
                 if existing_row["request_sha256"] != request_sha256:
                     raise ApprovalConflictError("idempotency key was reused with a different decision")
                 return _approval_record(existing_row)
+            existing_decision = await connection.execute(
+                text(
+                    """
+                    SELECT decision_id
+                    FROM plan_approval_decisions
+                    WHERE run_id = :run_id AND plan_revision = :plan_revision
+                    LIMIT 1
+                    """
+                ),
+                {"run_id": run_id, "plan_revision": run_row["plan_revision"]},
+            )
+            if existing_decision.mappings().one_or_none() is not None:
+                raise ApprovalConflictError("a plan approval decision is already recorded for this revision")
             if run_row["status"] != PlanningRunStatus.AWAITING_PLAN_APPROVAL.value:
                 raise ApprovalConflictError("planning run is not awaiting plan approval")
             if run_row["plan_artifact_sha256"] != artifact_sha256:
                 raise ApprovalConflictError("plan approval artifact digest is stale")
             if not run_row["active_workflow_id"]:
                 raise ApprovalConflictError("planning workflow is not available for approval")
+            await _require_mcp_selection_subset(connection, run_id, mcp_selection)
 
             decision_id = str(uuid.uuid4())
             created_at = datetime.now().astimezone()
+            selection_json = _mcp_selection_json(mcp_selection)
+            outbox_payload: dict[str, object] = {
+                "decision_id": decision_id,
+                "artifact_sha256": artifact_sha256,
+                "decision": decision.value,
+            }
+            if selection_json is not None:
+                outbox_payload["mcp_selection"] = selection_json
             await connection.execute(
                 text(
                     """
                     INSERT INTO plan_approval_decisions (
                         decision_id, run_id, decision, artifact_sha256, actor_id, comment,
-                        idempotency_key, request_sha256, created_at, plan_revision
+                        idempotency_key, request_sha256, created_at, plan_revision, mcp_selection
                     ) VALUES (
                         :decision_id, :run_id, :decision, :artifact_sha256, :actor_id, :comment,
-                        :idempotency_key, :request_sha256, :created_at, :plan_revision
+                        :idempotency_key, :request_sha256, :created_at, :plan_revision, CAST(:mcp_selection AS jsonb)
                     )
                     """
                 ),
@@ -951,6 +1021,7 @@ class PostgresSupervisorStore:
                     "request_sha256": request_sha256,
                     "created_at": created_at,
                     "plan_revision": run_row["plan_revision"],
+                    "mcp_selection": json.dumps(selection_json) if selection_json is not None else None,
                 },
             )
             await connection.execute(
@@ -964,13 +1035,7 @@ class PostgresSupervisorStore:
                     "decision_id": decision_id,
                     "run_id": run_id,
                     "workflow_id": run_row["active_workflow_id"],
-                    "payload": json.dumps(
-                        {
-                            "decision_id": decision_id,
-                            "artifact_sha256": artifact_sha256,
-                            "decision": decision.value,
-                        }
-                    ),
+                    "payload": json.dumps(outbox_payload),
                     "created_at": created_at,
                 },
             )
@@ -993,6 +1058,7 @@ class PostgresSupervisorStore:
             created_at=created_at.isoformat(),
             delivered=False,
             plan_revision=run_row["plan_revision"],
+            mcp_selection=mcp_selection,
         )
 
     async def mark_plan_approval_delivered(self, decision_id: str) -> None:
@@ -1531,12 +1597,12 @@ class PostgresSupervisorStore:
                 text(
                     """
                     SELECT decision_id, run_id, 'plan' AS gate, decision, artifact_sha256, actor_id, created_at,
-                           delivered_at
+                           delivered_at, mcp_selection
                     FROM plan_approval_decisions
                     WHERE run_id = :run_id
                     UNION ALL
                     SELECT decision_id, run_id, 'implementation' AS gate, decision, artifact_sha256, actor_id,
-                           created_at, delivered_at
+                           created_at, delivered_at, NULL::jsonb AS mcp_selection
                     FROM implementation_approval_decisions
                     WHERE run_id = :run_id
                     ORDER BY created_at DESC, decision_id DESC
@@ -1556,6 +1622,7 @@ class PostgresSupervisorStore:
                 actor_id=row["actor_id"],
                 created_at=row["created_at"].isoformat(),
                 delivered=row["delivered_at"] is not None,
+                mcp_selection=_mcp_selection_from_json(row["mcp_selection"]),
             )
             for row in rows
         ]
@@ -1908,7 +1975,70 @@ def _approval_record(row: object) -> ApprovalRecord:
         created_at=values["created_at"].isoformat(),  # type: ignore[index]
         delivered=values["delivered_at"] is not None,  # type: ignore[index]
         plan_revision=values["plan_revision"],  # type: ignore[index]
+        mcp_selection=_mcp_selection_from_json(values["mcp_selection"]),  # type: ignore[index]
     )
+
+
+def _mcp_tool_selection(row: Mapping[str, Any]) -> McpToolSelection:
+    """Materialize one exact selection identity from durable resolution columns."""
+
+    return McpToolSelection(
+        role=row["role"],
+        server_id=row["server_registration_id"],
+        server_version=row["server_version"],
+        server_manifest_sha256=row["server_manifest_sha256"],
+        tool_name=row["tool_name"],
+        input_schema_sha256=row["input_schema_sha256"],
+    )
+
+
+def _mcp_selection_json(selection: list[McpToolSelection] | None) -> list[dict[str, str]] | None:
+    """Serialize a canonical selection as non-secret durable JSON."""
+
+    return [item.model_dump(mode="json") for item in selection] if selection is not None else None
+
+
+def _mcp_selection_from_json(value: object) -> list[McpToolSelection] | None:
+    """Validate persisted selection JSON before exposing it to approval or Workbench callers."""
+
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ApprovalConflictError("persisted MCP selection is invalid")
+    return _canonical_mcp_selection([McpToolSelection.model_validate(item) for item in value])
+
+
+def _canonical_mcp_selection(selection: list[McpToolSelection] | None) -> list[McpToolSelection] | None:
+    """Canonicalize store inputs so retries always carry one exact selection."""
+
+    if selection is None:
+        return None
+    if len({item.key() for item in selection}) != len(selection):
+        raise ApprovalConflictError("MCP selection grants must be unique")
+    return sorted(selection, key=McpToolSelection.key)
+
+
+async def _require_mcp_selection_subset(
+    connection, run_id: str, selection: list[McpToolSelection] | None
+) -> None:  # type: ignore[no-untyped-def]
+    """Reject an approval selection that would expand a run's already-pinned policy grants."""
+
+    if selection is None:
+        return
+    result = await connection.execute(
+        text(
+            """
+            SELECT role, server_registration_id, server_version, server_manifest_sha256,
+                   tool_name, input_schema_sha256
+            FROM run_mcp_tool_resolutions
+            WHERE run_id = :run_id AND role = 'developer'
+            """
+        ),
+        {"run_id": run_id},
+    )
+    available = {_mcp_tool_selection(row).key() for row in result.mappings().all()}
+    if any(item.key() not in available for item in selection):
+        raise ApprovalConflictError("MCP selection is not a subset of the run's pinned policy grants")
 
 
 def _implementation_approval_record(row: object) -> ImplementationApprovalRecord:
