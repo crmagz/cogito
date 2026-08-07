@@ -23,6 +23,7 @@ from cogito_worker.budgets import (
     _mcp_invocation_evidence,
     _run_key_payload,
     _validate_budget,
+    run_key_secret_name,
 )
 from cogito_worker.config import McpGatewayServer
 from cogito_worker.models import ExecutionRequest, ExecutionWorkspace, McpServerConfiguration, McpToolGrant
@@ -272,6 +273,14 @@ def test_mcp_invocation_evidence_rejects_oversized_gateway_responses(monkeypatch
         manager._get_json("/spend/logs?user_id=cogito-run")
 
 
+async def test_mcp_invocation_evidence_uses_a_versioned_not_applicable_schema() -> None:
+    manager = object.__new__(KubernetesLiteLLMRunKeyManager)
+
+    evidence = await manager.collect_mcp_invocations("run-1", run_key_secret_name("run-1"), [], {})
+
+    assert evidence == {"version": 1, "status": "not_applicable", "events": []}
+
+
 @pytest.mark.parametrize(
     ("permissions", "message"),
     [
@@ -491,6 +500,40 @@ async def test_mcp_invocation_collection_never_interrupts_an_execution_run() -> 
         "reason": "collector_configuration_invalid",
         "events": [],
     }
+
+
+async def test_mcp_invocation_collection_excludes_unversioned_historic_routes() -> None:
+    class RecordingRunKeys:
+        async def collect_mcp_invocations(
+            self, run_id: str, secret_name: str, grants: list[McpToolGrant], routes: dict[tuple[str, str], str]
+        ) -> dict[str, object]:
+            assert routes == {}
+            return {"version": 1, "status": "observed", "events": []}
+
+    service = ExecutionWorkspaceService(execution_settings(), InMemoryExecutionJobClient(), RecordingRunKeys())
+    workspace = ExecutionWorkspace(
+        run_id="run-1",
+        job_name="cogito-execution-example",
+        workspace_root="/workspace",
+        mcp_grants=[
+            McpToolGrant(
+                server_id="cogito_readonly_mcp",
+                server_version="1.0.1",
+                server_manifest_sha256="b" * 64,
+                tool_name="catalog_read",
+                input_schema_sha256="c" * 64,
+            )
+        ],
+        mcp_servers=[
+            McpServerConfiguration(
+                registration_id="cogito_readonly_mcp",
+                name="cogito_readonly",
+                url="http://cogito-litellm:4000/cogito_readonly/mcp",
+            )
+        ],
+    )
+
+    assert await service.collect_mcp_invocations(workspace) == {"version": 1, "status": "observed", "events": []}
 
 
 async def test_provision_rejects_an_mcp_grant_that_does_not_match_the_configured_release() -> None:

@@ -127,7 +127,7 @@ class KubernetesLiteLLMRunKeyManager:
             raise ValueError("run key Secret does not match the execution run")
         expected = _expected_mcp_tools(grants, server_routes)
         if not expected:
-            return {"status": "not_applicable", "events": []}
+            return {"version": 1, "status": "not_applicable", "events": []}
         try:
             secret = await self._read_secret(secret_name)
             token = _secret_token(secret) if secret is not None else None

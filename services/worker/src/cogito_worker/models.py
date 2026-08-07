@@ -108,9 +108,9 @@ class McpServerConfiguration:
     """Non-secret gateway route configured for an approved execution workspace."""
 
     registration_id: str
-    server_version: str
     name: str
     url: str
+    server_version: str = ""
 
 
 @dataclass(frozen=True)
