@@ -36,7 +36,15 @@ class GitHubAppClient:
         """Return bounded repository metadata for an allow-listed repository."""
 
         value = self._get(repository, "")
-        return {"repository": repository, "description": _bounded_text(value.get("description")), "default_branch": _string(value.get("default_branch")), "visibility": _string(value.get("visibility")), "archived": value.get("archived") is True, "updated_at": _string(value.get("updated_at")), "html_url": _string(value.get("html_url"))}
+        return {
+            "repository": repository,
+            "description": _bounded_text(value.get("description")),
+            "default_branch": _string(value.get("default_branch")),
+            "visibility": _string(value.get("visibility")),
+            "archived": value.get("archived") is True,
+            "updated_at": _string(value.get("updated_at")),
+            "html_url": _string(value.get("html_url")),
+        }
 
     def get_file(self, repository: str, path: str, ref: str | None = None) -> dict[str, object]:
         """Return UTF-8 file content bounded to a safe MCP response size."""
@@ -53,7 +61,10 @@ class GitHubAppClient:
             raise GitHubConnectorError("GitHub file exceeds the connector response limit")
         normalized = encoded.replace("\n", "")
         padding_bytes = 2 if normalized.endswith("==") else 1 if normalized.endswith("=") else 0
-        if len(encoded) - encoded.count("\n") > _MAX_FILE_BASE64_BYTES or (len(normalized) // 4) * 3 - padding_bytes > _MAX_FILE_BYTES:
+        if (
+            len(encoded) - encoded.count("\n") > _MAX_FILE_BASE64_BYTES
+            or (len(normalized) // 4) * 3 - padding_bytes > _MAX_FILE_BYTES
+        ):
             raise GitHubConnectorError("GitHub file exceeds the connector response limit")
         try:
             decoded = base64.b64decode(normalized, validate=True)
@@ -62,7 +73,14 @@ class GitHubAppClient:
             raise GitHubConnectorError("GitHub file is not valid UTF-8 text") from error
         if len(decoded) > _MAX_FILE_BYTES:
             raise GitHubConnectorError("GitHub file exceeds the connector response limit")
-        return {"repository": repository, "path": path, "ref": ref, "sha": _string(value.get("sha")), "size": value.get("size") if isinstance(value.get("size"), int) else len(decoded), "content": content}
+        return {
+            "repository": repository,
+            "path": path,
+            "ref": ref,
+            "sha": _string(value.get("sha")),
+            "size": value.get("size") if isinstance(value.get("size"), int) else len(decoded),
+            "content": content,
+        }
 
     def get_issue(self, repository: str, number: int) -> dict[str, object]:
         return _issue_result(repository, number, self._get(repository, f"issues/{_issue_number(number)}"))
@@ -71,17 +89,36 @@ class GitHubAppClient:
         value = self._get(repository, f"pulls/{_issue_number(number)}")
         head = value.get("head") if isinstance(value.get("head"), dict) else {}
         base = value.get("base") if isinstance(value.get("base"), dict) else {}
-        return {**_issue_result(repository, number, value), "draft": value.get("draft") is True, "merged": value.get("merged") is True, "head": _string(head.get("ref")), "base": _string(base.get("ref"))}
+        return {
+            **_issue_result(repository, number, value),
+            "draft": value.get("draft") is True,
+            "merged": value.get("merged") is True,
+            "head": _string(head.get("ref")),
+            "base": _string(base.get("ref")),
+        }
 
     def _get(self, repository: str, suffix: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         self._authorize_repository(repository)
         owner, name = repository.split("/", 1)
-        response = self._request("GET", f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}" + (f"/{suffix}" if suffix else ""), params=params)
+        response = self._request(
+            "GET",
+            f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}" + (f"/{suffix}" if suffix else ""),
+            params=params,
+        )
         return _json_object(response)
 
     def _request(self, method: str, path: str, *, params: dict[str, str] | None = None) -> httpx.Response:
         try:
-            response = self._http.request(method, f"{self._settings.api_url}{path}", headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self._access_token()}", "X-GitHub-Api-Version": self._settings.api_version}, params=params)
+            response = self._http.request(
+                method,
+                f"{self._settings.api_url}{path}",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {self._access_token()}",
+                    "X-GitHub-Api-Version": self._settings.api_version,
+                },
+                params=params,
+            )
         except httpx.HTTPError as error:
             raise GitHubConnectorError("GitHub API request failed") from error
         if not 200 <= response.status_code < 300:
@@ -91,10 +128,21 @@ class GitHubAppClient:
     def _access_token(self) -> str:
         if self._installation_token is not None and time.monotonic() < self._token_refresh_after:
             return self._installation_token
-        headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {_app_jwt(self._settings.app_id, self._settings.private_key_file)}", "X-GitHub-Api-Version": self._settings.api_version}
-        body: dict[str, object] = {"repositories": [repository.split("/", 1)[1] for repository in self._settings.allowed_repositories], "permissions": {"contents": "read", "issues": "read", "pull_requests": "read"}}
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {_app_jwt(self._settings.app_id, self._settings.private_key_file)}",
+            "X-GitHub-Api-Version": self._settings.api_version,
+        }
+        body: dict[str, object] = {
+            "repositories": [repository.split("/", 1)[1] for repository in self._settings.allowed_repositories],
+            "permissions": {"contents": "read", "issues": "read", "pull_requests": "read"},
+        }
         try:
-            response = self._http.post(f"{self._settings.api_url}/app/installations/{self._settings.installation_id}/access_tokens", headers=headers, json=body)
+            response = self._http.post(
+                f"{self._settings.api_url}/app/installations/{self._settings.installation_id}/access_tokens",
+                headers=headers,
+                json=body,
+            )
         except httpx.HTTPError as error:
             raise GitHubConnectorError("GitHub installation-token request failed") from error
         if response.status_code != 201:
@@ -140,7 +188,13 @@ def _json_object(response: httpx.Response) -> dict[str, Any]:
 
 
 def _validate_file_path(path: str) -> None:
-    if not path or len(path) > 1024 or path.startswith("/") or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/")):
+    if (
+        not path
+        or len(path) > 1024
+        or path.startswith("/")
+        or "\\" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
         raise GitHubConnectorError("GitHub file path is invalid")
 
 
@@ -151,14 +205,25 @@ def _issue_number(number: int) -> str:
 
 
 def _issue_result(repository: str, number: int, value: dict[str, Any]) -> dict[str, object]:
-    return {"repository": repository, "number": number, "title": _bounded_text(value.get("title")), "body": _bounded_text(value.get("body")), "state": _string(value.get("state")), "author": _string(value.get("user", {}).get("login")) if isinstance(value.get("user"), dict) else None, "html_url": _string(value.get("html_url")), "updated_at": _string(value.get("updated_at"))}
+    return {
+        "repository": repository,
+        "number": number,
+        "title": _bounded_text(value.get("title")),
+        "body": _bounded_text(value.get("body")),
+        "state": _string(value.get("state")),
+        "author": _string(value.get("user", {}).get("login")) if isinstance(value.get("user"), dict) else None,
+        "html_url": _string(value.get("html_url")),
+        "updated_at": _string(value.get("updated_at")),
+    }
 
 
 def _bounded_text(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     encoded = value.encode("utf-8")
-    return value if len(encoded) <= _MAX_TEXT_BYTES else encoded[:_MAX_TEXT_BYTES].decode("utf-8", errors="ignore") + "\n[truncated]"
+    if len(encoded) <= _MAX_TEXT_BYTES:
+        return value
+    return encoded[:_MAX_TEXT_BYTES].decode("utf-8", errors="ignore") + "\n[truncated]"
 
 
 def _string(value: object) -> str | None:

@@ -46,7 +46,7 @@ spec:
       containers:
         - name: github-readonly-mcp
           image: {{ include "cogito.image" (dict "root" . "image" $image) | quote }}
-          imagePullPolicy: {{ $image.pullPolicy }}
+          imagePullPolicy: {{ default "IfNotPresent" $image.pullPolicy }}
           command: ["python", "-m", "cogito_github_readonly_mcp"]
           env:
             - name: COGITO_GITHUB_MCP_PORT
