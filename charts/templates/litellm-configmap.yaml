@@ -9,7 +9,7 @@
 {{- $githubRepositoryScope := "" }}
 {{- $githubRoute := "" }}
 {{- if $github.enabled }}
-{{- $githubRepositoryScope = index $githubApp.allowedRepositories 0 | lower }}
+{{- $githubRepositoryScope = required "mcp.github.app.allowedRepositories must contain exactly one repository when the GitHub connector is enabled" (first $githubApp.allowedRepositories) | lower }}
 {{- $githubRoute = printf "github_readonly_%s" ($githubRepositoryScope | sha256sum | trunc 12) }}
 {{- end }}
 apiVersion: v1

@@ -129,15 +129,24 @@ def test_connector_compares_github_repository_names_case_insensitively(tmp_path:
     client._authorize_repository("acme/widget")
 
 
-def test_connector_bounds_file_responses_and_masks_api_failure_bodies(tmp_path: Path) -> None:
+def test_connector_rejects_oversized_file_responses_before_decoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     oversized = base64.b64encode(b"x" * (_MAX_FILE_BYTES + 1)).decode()
     client, _ = _client(
         tmp_path,
         [{"status": 201, "token": "token"}, {"type": "file", "content": oversized}],
     )
+    monkeypatch.setattr(
+        github_readonly_mcp.base64,
+        "b64decode",
+        lambda *_args, **_kwargs: pytest.fail("oversized file must not be decoded"),
+    )
     with pytest.raises(GitHubConnectorError, match="response limit"):
         client.get_file("acme/widget", "large.txt")
 
+
+def test_connector_masks_api_failure_bodies(tmp_path: Path) -> None:
     client, _ = _client(
         tmp_path,
         [{"status": 201, "token": "token"}, {"status": 403, "message": "token=secret"}],

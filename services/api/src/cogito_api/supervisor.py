@@ -2246,7 +2246,9 @@ def _github_repository_id(target: str) -> str | None:
     parts = parsed.path.strip("/").split("/")
     if len(parts) != 2 or not parts[0] or not parts[1]:
         return None
-    repository = parts[1].removesuffix(".git")
+    repository = parts[1]
+    if repository.casefold().endswith(".git"):
+        repository = repository[:-4]
     return f"{parts[0]}/{repository}".casefold() if repository else None
 
 

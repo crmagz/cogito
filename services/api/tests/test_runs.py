@@ -316,6 +316,33 @@ def test_github_connector_accepts_a_pinned_target_url_without_a_dot_git_suffix(
     assert {grant.repository_scope for grant in github_grants} == {"acme/api-gateway"}
 
 
+def test_github_connector_accepts_a_pinned_target_url_with_an_uppercase_dot_git_suffix(
+    valid_plan: dict, store: InMemoryPlanStore, starter: FakeRunStarter
+) -> None:
+    valid_plan["target_repos"] = ["https://github.com/acme/api-gateway.GIT#" + "a" * 40]
+    client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(
+                mcp_enabled=True,
+                mcp_github_enabled=True,
+                mcp_target_repository_scopes={"github_readonly_mcp@1.0.0": "acme/api-gateway"},
+            ),
+            starter=starter,
+            supervisor_store=InMemorySupervisorStore(),
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    response = client.post("/api/v1/runs", json={"plan": valid_plan})
+
+    assert response.status_code == 202
+    developer = next(
+        resolution for resolution in starter.started_runs[0].registry_resolutions if resolution.role == "developer"
+    )
+    assert len([grant for grant in developer.mcp_grants if grant.server_id == "github_readonly_mcp"]) == 4
+
+
 def test_github_connector_requires_governed_mcp(
     store: InMemoryPlanStore, starter: FakeRunStarter, supervisor_store: InMemorySupervisorStore
 ) -> None:

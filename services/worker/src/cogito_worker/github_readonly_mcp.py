@@ -19,6 +19,7 @@ from mcp.server.fastmcp import FastMCP
 
 _MAX_TEXT_BYTES = 16 * 1024
 _MAX_FILE_BYTES = 64 * 1024
+_MAX_FILE_BASE64_BYTES = 4 * ((_MAX_FILE_BYTES + 2) // 3)
 _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 _REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,255}$")
 
@@ -116,8 +117,19 @@ class GitHubAppClient:
         value = self._get(repository, f"contents/{quote(path, safe='/')}", params=query)
         if value.get("type") != "file" or not isinstance(value.get("content"), str):
             raise GitHubConnectorError("GitHub path does not identify a file")
+        encoded = value["content"]
+        declared_size = value.get("size")
+        if isinstance(declared_size, int) and declared_size > _MAX_FILE_BYTES:
+            raise GitHubConnectorError("GitHub file exceeds the connector response limit")
+        encoded_length = len(encoded) - encoded.count("\n")
+        if encoded_length > _MAX_FILE_BASE64_BYTES:
+            raise GitHubConnectorError("GitHub file exceeds the connector response limit")
+        normalized = encoded.replace("\n", "")
+        padding_bytes = 2 if normalized.endswith("==") else 1 if normalized.endswith("=") else 0
+        if (len(normalized) // 4) * 3 - padding_bytes > _MAX_FILE_BYTES:
+            raise GitHubConnectorError("GitHub file exceeds the connector response limit")
         try:
-            decoded = base64.b64decode(value["content"].replace("\n", ""), validate=True)
+            decoded = base64.b64decode(normalized, validate=True)
             content = decoded.decode("utf-8")
         except (UnicodeDecodeError, ValueError) as error:
             raise GitHubConnectorError("GitHub file is not valid UTF-8 text") from error

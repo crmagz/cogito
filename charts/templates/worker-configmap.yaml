@@ -17,7 +17,7 @@
 {{- $_ := set $mcpGatewayServers "cogito_readonly_mcp@1.0.0" $legacyServer }}
 {{- end }}
 {{- if $github.enabled }}
-{{- $githubRepositoryScope := index $githubApp.allowedRepositories 0 | lower }}
+{{- $githubRepositoryScope := required "mcp.github.app.allowedRepositories must contain exactly one repository when the GitHub connector is enabled" (first $githubApp.allowedRepositories) | lower }}
 {{- /* A route is scoped to the configured repository, so a Helm change cannot redirect an in-flight run to another repository. */ -}}
 {{- $githubRoute := printf "github_readonly_%s" ($githubRepositoryScope | sha256sum | trunc 12) }}
 {{- $githubGatewayServerID := printf "%s|http://%s-github-readonly-mcp.%s.svc:%v/mcp|http|none|" $githubRoute .Release.Name .Release.Namespace ($githubPort | int) | sha256sum | trunc 32 }}
