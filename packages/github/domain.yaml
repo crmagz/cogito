@@ -1,0 +1,26 @@
+# Schema version keeps domain metadata contracts independently evolvable.
+schemaVersion: "1"
+domain: github
+owner: cogito-platform
+services:
+  - id: readonly-mcp
+    package: packages/github/readonly-mcp
+    version: "0.1.0"
+    registration:
+      id: github_readonly_mcp
+      version: "1.0.0"
+# The chart references these existing Secret keys; no credential values belong here.
+credentials:
+  model: GitHub App installation token
+  secretKeys:
+    - app-id
+    - installation-id
+    - private-key
+# The connector accepts gateway traffic only and reaches GitHub via an environment proxy.
+network:
+  ingress: LiteLLM gateway only
+  egress: Environment-owned HTTPS egress proxy only
+evaluation:
+  fixturePolicy: Mocked GitHub API unit tests and disposable Kind validation with environment-owned credentials
+operations:
+  runbook: docs/operations.md#github-read-only-mcp-connector

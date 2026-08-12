@@ -177,3 +177,13 @@ worker:
     # Repository-scoped token with pull-request write permission only.
     existingSecret: cogito-github-pull-request
     tokenKey: token
+
+# GitHub read-only MCP package. Keep it disabled unless an environment owner
+# supplies the GitHub App Secret, one repository, proxy policy peers, and the
+# immutable connector image digest through their private values file.
+mcp:
+  github:
+    image:
+      repository: ghcr.io/crmagz/cogito-github-readonly-mcp
+      tag: "v0.1.0"
+      digest: ""

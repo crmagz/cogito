@@ -274,7 +274,6 @@ name = "cogito-worker"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "cryptography" },
     { name = "httpx" },
     { name = "kubernetes" },
     { name = "mcp" },
@@ -296,7 +295,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cryptography", specifier = "==50.0.0" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "kubernetes", specifier = "==36.0.3" },
     { name = "mcp", specifier = "==1.26.0" },

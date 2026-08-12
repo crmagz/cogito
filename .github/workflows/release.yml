@@ -146,6 +146,79 @@ jobs:
             .python-version
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  github-readonly-mcp-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      previous-tag: ${{ steps.version.outputs.previous-tag }}
+      release-required: ${{ steps.version.outputs.release-required }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+      - id: version
+        uses: crmagz/forge/.github/actions/semantic-version@releases/v1
+        with:
+          tag-prefix: github-readonly-mcp/
+          pathspecs: |
+            packages/github/readonly-mcp
+            components/tools/github_readonly_mcp
+            .python-version
+
+  github-readonly-mcp-publish:
+    needs: github-readonly-mcp-version
+    if: needs.github-readonly-mcp-version.outputs.release-required == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - name: Verify package release metadata
+        env:
+          VERSION: ${{ needs.github-readonly-mcp-version.outputs.version }}
+        working-directory: packages/github/readonly-mcp
+        run: uv run --extra dev python scripts/verify_release_metadata.py "$VERSION"
+      - name: Build and publish GitHub read-only MCP image
+        run: |
+          docker buildx build packages/github/readonly-mcp \
+            --file packages/github/readonly-mcp/Dockerfile \
+            --platform linux/amd64,linux/arm64 \
+            --tag ghcr.io/${{ github.repository_owner }}/cogito-github-readonly-mcp:v${{ needs.github-readonly-mcp-version.outputs.version }} \
+            --tag ghcr.io/${{ github.repository_owner }}/cogito-github-readonly-mcp:latest \
+            --build-arg VERSION=${{ needs.github-readonly-mcp-version.outputs.version }} \
+            --build-arg REVISION=${{ github.sha }} \
+            --build-arg SOURCE=https://github.com/${{ github.repository }} \
+            --cache-from type=registry,ref=ghcr.io/${{ github.repository_owner }}/cogito-github-readonly-mcp:buildcache \
+            --cache-to type=registry,ref=ghcr.io/${{ github.repository_owner }}/cogito-github-readonly-mcp:buildcache,mode=max \
+            --provenance mode=max \
+            --sbom=true \
+            --push
+
+  github-readonly-mcp-release:
+    needs: [github-readonly-mcp-version, github-readonly-mcp-publish]
+    if: needs.github-readonly-mcp-version.outputs.release-required == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+      - uses: crmagz/forge/.github/actions/release@releases/v1
+        with:
+          version: ${{ needs.github-readonly-mcp-version.outputs.version }}
+          tag-prefix: github-readonly-mcp/
+          previous-tag: ${{ needs.github-readonly-mcp-version.outputs.previous-tag }}
+          pathspecs: |
+            packages/github/readonly-mcp
+            components/tools/github_readonly_mcp
+            .python-version
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   chart-version:
     runs-on: ubuntu-24.04
     outputs:

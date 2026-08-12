@@ -25,6 +25,38 @@ jobs:
         working-directory: services/${{ matrix.service }}
         run: uv run pytest
 
+  github-readonly-mcp:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+      - name: Install locked connector dependencies
+        working-directory: packages/github/readonly-mcp
+        run: uv sync --frozen --all-extras
+      - name: Run connector tests
+        working-directory: packages/github/readonly-mcp
+        run: uv run pytest
+
+  github-readonly-mcp-release-metadata:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+      - id: version
+        uses: crmagz/forge/.github/actions/semantic-version@releases/v1
+        with:
+          tag-prefix: github-readonly-mcp/
+          pathspecs: |
+            packages/github/readonly-mcp
+            components/tools/github_readonly_mcp
+            .python-version
+      - name: Verify computed release metadata
+        if: steps.version.outputs.release-required == 'true'
+        working-directory: packages/github/readonly-mcp
+        run: uv run --extra dev python scripts/verify_release_metadata.py "${{ steps.version.outputs.version }}"
+
   chart:
     runs-on: ubuntu-24.04
     steps:
@@ -63,6 +95,8 @@ jobs:
           helm template github-mcp charts --namespace connector-system \
             --set mcp.enabled=true \
             --set mcp.github.enabled=true \
+            --set mcp.github.image.repository=separate-github-mcp \
+            --set mcp.github.image.tag=v1 \
             --set mcp.github.app.existingSecret=cogito-github-readonly-app \
             --set 'mcp.github.app.allowedRepositories[0]=acme/widget' \
             --set mcp.github.egressProxy.url=http://egress-proxy.connector-system.svc:3128 \
@@ -76,6 +110,8 @@ jobs:
           grep -Fq 'name: github-mcp-github-readonly-mcp-boundary' "$rendered"
           grep -Fq 'name: COGITO_GITHUB_MCP_PRIVATE_KEY_FILE' "$rendered"
           grep -Fq 'secretName: cogito-github-readonly-app' "$rendered"
+          grep -Fq 'image: "separate-github-mcp:v1"' "$rendered"
+          grep -Fq 'command: ["python", "-m", "cogito_github_readonly_mcp"]' "$rendered"
           if helm template invalid-github-mcp charts \
             --set mcp.enabled=true \
             --set mcp.github.enabled=true \
@@ -98,6 +134,19 @@ jobs:
             exit 1
           fi
           grep -Fq 'mcp.github.app.allowedRepositories must contain exactly one repository when the GitHub connector is enabled' missing-github-repository.log
+          if helm template missing-github-image charts \
+            --set mcp.enabled=true \
+            --set mcp.github.enabled=true \
+            --set mcp.github.image.repository= \
+            --set mcp.github.app.existingSecret=cogito-github-readonly-app \
+            --set 'mcp.github.app.allowedRepositories[0]=acme/widget' \
+            --set mcp.github.egressProxy.url=http://egress-proxy.connector-system.svc:3128 \
+            --set 'mcp.github.egressProxy.networkPolicyPeers[0].ipBlock.cidr=10.0.0.0/8' \
+            > /dev/null 2> missing-github-image.log; then
+            echo "GitHub connector accepted a missing package image repository"
+            exit 1
+          fi
+          grep -Fq 'mcp.github.image.repository is required when the GitHub connector is enabled' missing-github-image.log
       - name: Render production values
         run: |
           helm template cogito charts -f charts/values-production.yaml \
@@ -105,6 +154,21 @@ jobs:
             --set worker.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
             --set litellm.image.digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
             > /dev/null
+      - name: Render production GitHub connector image pin
+        run: |
+          rendered="$(mktemp)"
+          helm template github-mcp-production charts -f charts/values-production.yaml \
+            --set api.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set worker.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            --set litellm.image.digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+            --set mcp.enabled=true \
+            --set mcp.github.enabled=true \
+            --set mcp.github.image.digest=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+            --set mcp.github.app.existingSecret=cogito-github-readonly-app \
+            --set 'mcp.github.app.allowedRepositories[0]=acme/widget' \
+            --set mcp.github.egressProxy.url=http://egress-proxy.connector-system.svc:3128 \
+            --set 'mcp.github.egressProxy.networkPolicyPeers[0].ipBlock.cidr=10.0.0.0/8' > "$rendered"
+          grep -Fq 'image: "ghcr.io/crmagz/cogito-github-readonly-mcp@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"' "$rendered"
       - name: Render external LiteLLM service account
         run: |
           helm template cogito charts \

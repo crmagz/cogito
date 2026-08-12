@@ -9,13 +9,13 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from cogito_worker import github_readonly_mcp
-from cogito_worker.github_readonly_mcp import (
+from cogito_github_readonly_mcp import client as github_client, server
+from cogito_github_readonly_mcp.client import (
     GitHubAppClient,
     GitHubConnectorError,
-    GitHubConnectorSettings,
     _MAX_FILE_BYTES,
 )
+from cogito_github_readonly_mcp.config import GitHubConnectorSettings
 
 
 def _settings(tmp_path: Path) -> GitHubConnectorSettings:
@@ -138,7 +138,7 @@ def test_connector_rejects_oversized_file_responses_before_decoding(
         [{"status": 201, "token": "token"}, {"type": "file", "content": oversized}],
     )
     monkeypatch.setattr(
-        github_readonly_mcp.base64,
+        github_client.base64,
         "b64decode",
         lambda *_args, **_kwargs: pytest.fail("oversized file must not be decoded"),
     )
@@ -173,9 +173,9 @@ def test_environment_configuration_requires_one_repository_and_an_absolute_key_p
 def test_main_starts_the_streamable_http_server(monkeypatch: pytest.MonkeyPatch) -> None:
     started: list[str] = []
 
-    monkeypatch.setattr(github_readonly_mcp, "_connector", lambda: object())
-    monkeypatch.setattr(github_readonly_mcp._SERVER, "run", lambda *, transport: started.append(transport))
+    monkeypatch.setattr(server, "_connector", lambda: object())
+    monkeypatch.setattr(server._SERVER, "run", lambda *, transport: started.append(transport))
 
-    github_readonly_mcp.main()
+    server.main()
 
     assert started == ["streamable-http"]

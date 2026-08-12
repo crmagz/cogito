@@ -385,7 +385,13 @@ mcp:
     port: 8000
   github:
     enabled: false
-    image: {}
+    image:
+      # This image is released independently from the Temporal worker. Production
+      # deployments must set digest to the published package image digest.
+      repository: cogito-github-readonly-mcp
+      tag: local
+      digest: ""
+      pullPolicy: IfNotPresent
     service:
       port: 8001
     app:
