@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1",
+  "environment": "example",
+  "services": [
+    {
+      "package": "packages/github/readonly-mcp",
+      "packageVersion": "0.1.0",
+      "registration": "github_readonly_mcp@1.0.0",
+      "manifestSha256": "33aab86822040fa5880ce0f9d89eebd000d24fc3c9986e020bd7b89ac0e2a298",
+      "image": {
+        "repository": "ghcr.io/crmagz/cogito-github-readonly-mcp",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ]
+}

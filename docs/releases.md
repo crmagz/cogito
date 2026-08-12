@@ -1,12 +1,13 @@
 # Releases and artifact promotion
 
-Cogito has three independently versioned deliverables. Their Git tags are
+Cogito has four independently versioned deliverables. Their Git tags are
 namespaced so a release is unambiguous in both Git history and GitHub Releases.
 
 | Deliverable | Git tag | Published artifact |
 |---|---|---|
 | API | `api/vX.Y.Z` | `ghcr.io/crmagz/cogito-api:vX.Y.Z` |
 | Worker | `worker/vX.Y.Z` | `ghcr.io/crmagz/cogito-worker:vX.Y.Z` |
+| GitHub read-only MCP | `github-readonly-mcp/vX.Y.Z` | `ghcr.io/crmagz/cogito-github-readonly-mcp:vX.Y.Z` |
 | Helm chart | `chart/vX.Y.Z` | `oci://ghcr.io/crmagz/charts/cogito --version X.Y.Z` |
 
 The API and worker are independently deployable. The chart is the deployable
@@ -23,6 +24,7 @@ its own latest tag and its own source paths:
 |---|---|
 | API | `services/api`, `.python-version` |
 | Worker | `services/worker`, `.python-version` |
+| GitHub read-only MCP | `packages/github/readonly-mcp`, `components/tools/github_readonly_mcp`, `.python-version` |
 | Chart | `charts` |
 
 Conventional Commit subjects determine the bump: `feat` is minor;
@@ -31,6 +33,13 @@ Conventional Commit subjects determine the bump: `feat` is minor;
 `chore` changes do not release an artifact. The first feature release starts
 at `0.1.0`; promote to `1.0.0` only when the corresponding component has a
 stable public contract.
+
+The GitHub read-only MCP package keeps its package, domain metadata, and
+release-bundle example at the exact version that the next semantic release
+will publish. Before merging a release-affecting connector change, update all
+three version fields together; CI calculates the release and rejects metadata
+that does not match. This prevents image tags from drifting from the package
+and domain contracts.
 
 Cogito’s release automation uses Forge’s `releases/v1` compatibility channel
 for semantic versioning and idempotent GitHub Releases. Each job supplies its
@@ -45,8 +54,8 @@ immutable.
 
 1. The `Release` workflow calculates the component version from the commit
    range after its matching tag.
-2. For API and worker releases it builds multi-architecture (`linux/amd64` and
-   `linux/arm64`) images, publishes them to GHCR, reuses a registry-backed
+2. For API, worker, and GitHub read-only MCP releases it builds multi-architecture
+   (`linux/amd64` and `linux/arm64`) images, publishes them to GHCR, reuses a registry-backed
    Buildx cache, and attaches BuildKit provenance and SBOM attestations.
 3. For chart releases it packages the chart with the calculated version and
    publishes the OCI artifact to GHCR.

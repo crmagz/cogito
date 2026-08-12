@@ -2,7 +2,9 @@
 {{- $github := default (dict) $mcp.github }}
 {{- if $github.enabled }}
 {{- if not $mcp.enabled }}{{ fail "mcp.github.enabled requires mcp.enabled" }}{{- end }}
-{{- $image := merge (deepCopy (default (dict) $github.image)) .Values.worker.image }}
+{{- $image := required "mcp.github.image is required when the GitHub connector is enabled" $github.image }}
+{{- if not $image.repository }}{{ fail "mcp.github.image.repository is required when the GitHub connector is enabled" }}{{- end }}
+{{- if and (not $image.tag) (not $image.digest) }}{{ fail "mcp.github.image.tag or mcp.github.image.digest is required when the GitHub connector is enabled" }}{{- end }}
 {{- $service := default (dict) $github.service }}
 {{- $port := default 8001 $service.port }}
 {{- $app := default (dict) $github.app }}
@@ -45,7 +47,7 @@ spec:
         - name: github-readonly-mcp
           image: {{ include "cogito.image" (dict "root" . "image" $image) | quote }}
           imagePullPolicy: {{ $image.pullPolicy }}
-          command: ["python", "-m", "cogito_worker.github_readonly_mcp"]
+          command: ["python", "-m", "cogito_github_readonly_mcp"]
           env:
             - name: COGITO_GITHUB_MCP_PORT
               value: {{ $port | quote }}

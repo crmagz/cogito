@@ -125,6 +125,14 @@ def test_chart_gateway_mapping_tracks_the_current_mcp_manifest() -> None:
     assert 'github_readonly_%s' in template
 
 
+def test_github_mcp_manifest_identity_is_stable_across_package_extraction() -> None:
+    catalog = load_component_catalog(_catalog_root())
+    github_server = next(item for item in catalog.components if item.registration_id == "github_readonly_mcp")
+
+    assert github_server.version == "1.0.0"
+    assert manifest_sha256(github_server) == "33aab86822040fa5880ce0f9d89eebd000d24fc3c9986e020bd7b89ac0e2a298"
+
+
 def test_mcp_policy_rejects_unknown_tool(tmp_path: Path) -> None:
     shutil.copytree(_catalog_root(), tmp_path, dirs_exist_ok=True)
     policy = json.loads((tmp_path / "mcp_policy.json").read_text(encoding="utf-8"))
