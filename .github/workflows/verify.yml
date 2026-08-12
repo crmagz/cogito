@@ -87,6 +87,17 @@ jobs:
             echo "GitHub connector accepted a proxy URL and NetworkPolicy port mismatch"
             exit 1
           fi
+          if helm template missing-github-repository charts \
+            --set mcp.enabled=true \
+            --set mcp.github.enabled=true \
+            --set mcp.github.app.existingSecret=cogito-github-readonly-app \
+            --set mcp.github.egressProxy.url=http://egress-proxy.connector-system.svc:3128 \
+            --set 'mcp.github.egressProxy.networkPolicyPeers[0].ipBlock.cidr=10.0.0.0/8' \
+            > /dev/null 2> missing-github-repository.log; then
+            echo "GitHub connector accepted a missing repository scope"
+            exit 1
+          fi
+          grep -Fq 'mcp.github.app.allowedRepositories must contain exactly one repository when the GitHub connector is enabled' missing-github-repository.log
       - name: Render production values
         run: |
           helm template cogito charts -f charts/values-production.yaml \

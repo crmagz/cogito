@@ -11,6 +11,10 @@
 {{- $mcp := default (dict) .Values.mcp }}
 {{- $githubMcp := default (dict) $mcp.github }}
 {{- $githubApp := default (dict) $githubMcp.app }}
+{{- $githubRepositoryScope := "" }}
+{{- if and $mcp.enabled $githubMcp.enabled }}
+{{- $githubRepositoryScope = required "mcp.github.app.allowedRepositories must contain exactly one repository when the GitHub connector is enabled" (first $githubApp.allowedRepositories) | lower }}
+{{- end }}
 {{- $reconciliationEnabled := true }}
 {{- $reconciliationPollSeconds := 5 }}
 {{- $reconciliationBatchSize := 100 }}
@@ -69,7 +73,7 @@ data:
   COGITO_REGISTRY_CATALOG_PATH: "/app/components"
   COGITO_MCP_ENABLED: {{ .Values.mcp.enabled | quote }}
   COGITO_MCP_GITHUB_ENABLED: {{ and .Values.mcp.enabled .Values.mcp.github.enabled | quote }}
-  COGITO_MCP_TARGET_REPOSITORY_SCOPES: {{ if and $mcp.enabled $githubMcp.enabled }}{{ toJson (dict "github_readonly_mcp@1.0.0" (first $githubApp.allowedRepositories | lower)) | quote }}{{ else }}"{}"{{ end }}
+  COGITO_MCP_TARGET_REPOSITORY_SCOPES: {{ if and $mcp.enabled $githubMcp.enabled }}{{ toJson (dict "github_readonly_mcp@1.0.0" $githubRepositoryScope) | quote }}{{ else }}"{}"{{ end }}
   COGITO_NOTIFICATION_ENABLED: {{ default false $notifications.enabled | quote }}
   COGITO_NOTIFICATION_WEBHOOK_URL: {{ default "" $notifications.webhookUrl | quote }}
   COGITO_NOTIFICATION_TIMEOUT_SECONDS: {{ default 10 $notifications.timeoutSeconds | quote }}
