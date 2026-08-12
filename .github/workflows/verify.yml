@@ -111,6 +111,7 @@ jobs:
           grep -Fq 'name: COGITO_GITHUB_MCP_PRIVATE_KEY_FILE' "$rendered"
           grep -Fq 'secretName: cogito-github-readonly-app' "$rendered"
           grep -Fq 'image: "separate-github-mcp:v1"' "$rendered"
+          grep -Fq 'imagePullPolicy: IfNotPresent' "$rendered"
           grep -Fq 'command: ["python", "-m", "cogito_github_readonly_mcp"]' "$rendered"
           if helm template invalid-github-mcp charts \
             --set mcp.enabled=true \
