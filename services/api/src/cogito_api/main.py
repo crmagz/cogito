@@ -73,7 +73,7 @@ from .models import (
 from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDispatcher, stop_dispatcher
 from .notifications import NotificationOutboxDispatcher, notification_sink, stop_notification_dispatcher
 from .observability import Telemetry, TelemetrySettings
-from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext
+from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext, ProductSpecificationContext
 from .reconciliation import ReconciliationHealth, WorkflowProjectionReconciler, stop_reconciler
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
 from .registry import (
@@ -468,11 +468,83 @@ def create_app(
             run_id=record.run_id,
             status=record.status,
             source_artifact=record.source_artifact,
+            product_specification_artifact=record.product_specification_artifact,
+            product_specification_revision=record.product_specification_revision,
             plan_artifact=record.plan_artifact,
             implementation_artifact=record.implementation_artifact,
             submitted_at=record.submitted_at,
         )
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
+
+    @app.post("/api/v1/planning-runs/{run_id}/generate-product-specification")
+    async def generate_product_specification(
+        run_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Generate and retain one immutable tool-free product-specification draft.
+
+        The generated draft is review context only in this release. It neither
+        changes plan input nor starts Temporal; a later selection gate must
+        explicitly bind one revision before it can authorize implementation planning.
+        """
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        if record.status is PlanningRunStatus.PLANNING and record.product_specification_artifact is None:
+            try:
+                planner_resolution = (
+                    await resolve_roles(run_id, ["planner"], record.project_id or settings.workbench_default_project_id)
+                )[0]
+                require_tool(planner_resolution, "planning_model", "plan_generation")
+                if planner_resolution.gateway is None:
+                    raise RegistryConflictError("planner gateway route is unavailable")
+            except (RegistryAuthorizationError, RegistryConflictError) as error:
+                raise HTTPException(status_code=503, detail="planner registry grant is unavailable") from error
+            try:
+                initial_specification = store.get_source_specification(record.source_artifact.ref)
+                generated = await planner.generate_product_specification(
+                    ProductSpecificationContext(initial_specification=initial_specification), planner_resolution.gateway
+                )
+                artifact = store.put_product_specification(
+                    run_id, record.product_specification_revision + 1, generated
+                )
+            except PlanStoreUnavailableError as error:
+                raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
+            except PlannerError as error:
+                raise HTTPException(status_code=502, detail="planner failed to produce a valid product specification") from error
+            try:
+                updated = await supervisor_store.attach_product_specification_draft(
+                    run_id,
+                    artifact=artifact,
+                    planner_model=planner_resolution.gateway.model_alias,
+                    expected_product_specification_revision=record.product_specification_revision,
+                )
+            except ValueError:
+                latest = await supervisor_store.get_planning_run(run_id)
+                if latest is None or latest.product_specification_artifact is None:
+                    raise HTTPException(
+                        status_code=409, detail="planning run changed while the product specification was generated"
+                    ) from None
+                updated = latest
+        elif record.product_specification_artifact is not None:
+            updated = record
+        else:
+            raise HTTPException(status_code=409, detail="planning run is not eligible for product specification generation")
+        response = PlanningRunResponse(
+            run_id=updated.run_id,
+            status=updated.status,
+            source_artifact=updated.source_artifact,
+            product_specification_artifact=updated.product_specification_artifact,
+            product_specification_revision=updated.product_specification_revision,
+            plan_artifact=updated.plan_artifact,
+            implementation_artifact=updated.implementation_artifact,
+            submitted_at=updated.submitted_at,
+        )
+        return JSONResponse(content=response.model_dump(mode="json"))
 
     @app.post("/api/v1/planning-runs/{run_id}/generate-plan")
     async def generate_plan(
@@ -588,6 +660,8 @@ def create_app(
             run_id=updated.run_id,
             status=updated.status,
             source_artifact=updated.source_artifact,
+            product_specification_artifact=updated.product_specification_artifact,
+            product_specification_revision=updated.product_specification_revision,
             plan_artifact=updated.plan_artifact,
             implementation_artifact=updated.implementation_artifact,
             submitted_at=updated.submitted_at,
@@ -735,6 +809,8 @@ def create_app(
             run_id=record.run_id,
             status=record.status,
             source_artifact=record.source_artifact,
+            product_specification_artifact=record.product_specification_artifact,
+            product_specification_revision=record.product_specification_revision,
             plan_artifact=record.plan_artifact,
             implementation_artifact=record.implementation_artifact,
             submitted_at=record.submitted_at,
