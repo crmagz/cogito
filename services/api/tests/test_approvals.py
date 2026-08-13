@@ -10,12 +10,13 @@ from cogito_api.outbox import PlanApprovalOutboxDispatcher
 
 from .conftest import make_settings
 from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
-from .test_planning_runs import _planning_request
+from .test_planning_runs import _planning_request, _select_product_specification
 
 
 def _awaiting_plan(client: TestClient, valid_plan: dict) -> tuple[str, str]:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
     run_id = submitted.json()["run_id"]
+    _select_product_specification(client, run_id)
     planned = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
     assert planned.status_code == 200
     return run_id, planned.json()["plan_artifact"]["sha256"]

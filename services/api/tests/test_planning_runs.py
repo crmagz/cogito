@@ -20,6 +20,24 @@ def _planning_request(valid_plan: dict) -> dict:
     }
 
 
+def _select_product_specification(client: TestClient, run_id: str) -> dict:
+    """Generate and explicitly select the immutable draft used by plan-generation tests."""
+
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification")
+    assert draft.status_code == 200
+    body = draft.json()
+    selected = client.post(
+        f"/api/v1/planning-runs/{run_id}/select-product-specification",
+        json={
+            "revision": body["product_specification_revision"],
+            "artifact_sha256": body["product_specification_artifact"]["sha256"],
+        },
+        headers={"Idempotency-Key": f"select-{run_id}"},
+    )
+    assert selected.status_code == 200
+    return selected.json()
+
+
 def test_submit_planning_run_persists_immutable_source_artifact_and_run(
     client: TestClient,
     valid_plan: dict,
@@ -132,6 +150,25 @@ def test_generate_product_specification_retries_without_generating_a_second_draf
     assert len(planner.product_specification_contexts) == 1
 
 
+def test_selected_product_specification_is_the_only_plan_input(
+    client: TestClient, valid_plan: dict, planner: FakePlanner
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+
+    blocked = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+    assert blocked.status_code == 409
+    assert planner.contexts == []
+
+    selected = _select_product_specification(client, run_id)
+    planned = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+
+    assert planned.status_code == 200
+    assert selected["selected_product_specification_revision"] == 1
+    assert planner.contexts[0].initial_specification.startswith('{"acceptance_criteria":')
+    assert "Add a rate limiter with bounded, observable behavior." not in planner.contexts[0].initial_specification
+
+
 def test_submit_planning_run_rejects_unpinned_repository_without_writing(
     client: TestClient,
     valid_plan: dict,
@@ -187,6 +224,7 @@ def test_generate_plan_persists_validated_artifact_and_enters_approval_state(
 ) -> None:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
     run_id = submitted.json()["run_id"]
+    _select_product_specification(client, run_id)
 
     response = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
 
@@ -213,7 +251,7 @@ def test_generate_plan_rejects_a_planner_without_the_model_grant(
             resolution = await super().resolve_run_registration(*args, **kwargs)
             if resolution.role == "planner":
                 self.planner_resolutions += 1
-                if self.planner_resolutions > 1:
+                if self.planner_resolutions > 2:
                     return resolution.model_copy(update={"grants": []})
             return resolution
 
@@ -228,6 +266,7 @@ def test_generate_plan_rejects_a_planner_without_the_model_grant(
     )
     client = TestClient(app, headers={"Authorization": "Bearer operator-test-token"})
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    _select_product_specification(client, submitted.json()["run_id"])
 
     response = client.post(f"/api/v1/planning-runs/{submitted.json()['run_id']}/generate-plan")
 
@@ -242,6 +281,7 @@ def test_generate_plan_retries_workflow_start_without_regenerating_artifact(
 ) -> None:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
     run_id = submitted.json()["run_id"]
+    _select_product_specification(client, run_id)
     first = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
 
     response = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
@@ -274,6 +314,7 @@ def test_concurrent_generation_converges_on_the_persisted_plan(
         headers={"Authorization": "Bearer operator-test-token"},
     )
     submitted = racing_client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    _select_product_specification(racing_client, submitted.json()["run_id"])
 
     response = racing_client.post(f"/api/v1/planning-runs/{submitted.json()['run_id']}/generate-plan")
 
@@ -287,6 +328,7 @@ def test_generate_plan_reports_retryable_temporal_start_failure(
 ) -> None:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
     run_id = submitted.json()["run_id"]
+    _select_product_specification(client, run_id)
     starter.start_error = ConnectionError("Temporal unavailable")
 
     failed = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
@@ -302,6 +344,7 @@ def test_revision_reopens_planning_with_a_new_artifact_and_workflow(
 ) -> None:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
     run_id = submitted.json()["run_id"]
+    _select_product_specification(client, run_id)
     first = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
     first_digest = first.json()["plan_artifact"]["sha256"]
     revision = client.post(
@@ -339,6 +382,7 @@ def test_revision_scopes_workflow_and_idempotency_when_plan_content_is_identical
 ) -> None:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
     run_id = submitted.json()["run_id"]
+    _select_product_specification(client, run_id)
     first = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
     digest = first.json()["plan_artifact"]["sha256"]
     headers = {"Authorization": "Bearer operator-test-token", "Idempotency-Key": "same-key"}
