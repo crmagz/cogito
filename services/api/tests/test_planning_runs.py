@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import copy
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -150,6 +152,30 @@ def test_generate_product_specification_retries_without_generating_a_second_draf
     assert len(planner.product_specification_contexts) == 1
 
 
+def test_abandoned_product_specification_generation_claim_is_recovered(
+    client: TestClient, valid_plan: dict, supervisor_store: InMemorySupervisorStore
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    claim = asyncio.run(supervisor_store.claim_product_specification_generation(run_id))
+    assert claim is not None
+    supervisor_store.product_specification_generation_claimed_at[run_id] = datetime.now(timezone.utc) - timedelta(minutes=16)
+
+    recovered = asyncio.run(supervisor_store.claim_product_specification_generation(run_id))
+
+    assert recovered == claim
+
+
+def test_legacy_product_specification_generation_claim_without_a_timestamp_is_recovered(
+    client: TestClient, valid_plan: dict, supervisor_store: InMemorySupervisorStore
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    supervisor_store.product_specification_generation_claims[run_id] = "pre-timestamp-claim"
+
+    recovered = asyncio.run(supervisor_store.claim_product_specification_generation(run_id))
+
+    assert recovered == f"claim-{run_id}"
+
+
 def test_selected_product_specification_is_the_only_plan_input(
     client: TestClient, valid_plan: dict, planner: FakePlanner
 ) -> None:
@@ -167,6 +193,20 @@ def test_selected_product_specification_is_the_only_plan_input(
     assert selected["selected_product_specification_revision"] == 1
     assert planner.contexts[0].initial_specification.startswith('{"acceptance_criteria":')
     assert "Add a rate limiter with bounded, observable behavior." not in planner.contexts[0].initial_specification
+
+
+def test_generated_plan_retains_its_selected_product_specification_binding(
+    client: TestClient, valid_plan: dict, supervisor_store: InMemorySupervisorStore
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    selected = _select_product_specification(client, run_id)
+
+    planned = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+
+    assert planned.status_code == 200
+    revision, artifact = supervisor_store.plan_product_specification_bindings[(run_id, 1)]
+    assert revision == selected["selected_product_specification_revision"]
+    assert artifact.model_dump() == selected["selected_product_specification_artifact"]
 
 
 def test_human_revision_requires_fresh_selection_before_regenerating_a_plan(
@@ -200,6 +240,128 @@ def test_human_revision_requires_fresh_selection_before_regenerating_a_plan(
     )
     assert selected.status_code == 200
     assert client.post(f"/api/v1/planning-runs/{run_id}/generate-plan").status_code == 200
+
+
+def test_human_revision_can_restore_a_prior_immutable_specification(
+    client: TestClient, valid_plan: dict, valid_product_specification: dict
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+    changed = copy.deepcopy(valid_product_specification)
+    changed["title"]["text"] = "Reviewed rate limiting"
+    second = client.post(
+        f"/api/v1/planning-runs/{run_id}/revise-product-specification",
+        json={
+            "expected_product_specification_revision": 1,
+            "parent_artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            "specification": changed,
+        },
+        headers={"Idempotency-Key": "change-specification"},
+    ).json()
+
+    restored = client.post(
+        f"/api/v1/planning-runs/{run_id}/revise-product-specification",
+        json={
+            "expected_product_specification_revision": 2,
+            "parent_artifact_sha256": second["product_specification_artifact"]["sha256"],
+            "specification": valid_product_specification,
+        },
+        headers={"Idempotency-Key": "restore-original-specification"},
+    )
+
+    assert restored.status_code == 200
+    assert restored.json()["product_specification_revision"] == 3
+    assert restored.json()["product_specification_artifact"]["sha256"] == draft["product_specification_artifact"]["sha256"]
+
+
+def test_human_revision_rejects_unknown_source_provenance(
+    client: TestClient, valid_plan: dict, valid_product_specification: dict
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+    revised = copy.deepcopy(valid_product_specification)
+    revised["title"]["source_segment_ids"] = ["invented-segment"]
+
+    response = client.post(
+        f"/api/v1/planning-runs/{run_id}/revise-product-specification",
+        json={
+            "expected_product_specification_revision": 1,
+            "parent_artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            "specification": revised,
+        },
+        headers={"Idempotency-Key": "reject-invented-provenance"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_stale_product_specification_cannot_be_selected_after_a_human_revision(
+    client: TestClient, valid_plan: dict, valid_product_specification: dict
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+    revised = copy.deepcopy(valid_product_specification)
+    revised["title"]["text"] = "Reviewed rate limiting"
+    latest = client.post(
+        f"/api/v1/planning-runs/{run_id}/revise-product-specification",
+        json={
+            "expected_product_specification_revision": 1,
+            "parent_artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            "specification": revised,
+        },
+        headers={"Idempotency-Key": "human-revision-before-stale-selection"},
+    ).json()
+
+    stale = client.post(
+        f"/api/v1/planning-runs/{run_id}/select-product-specification",
+        json={"revision": 1, "artifact_sha256": draft["product_specification_artifact"]["sha256"]},
+        headers={"Idempotency-Key": "stale-selection"},
+    )
+
+    assert latest["product_specification_revision"] == 2
+    assert stale.status_code == 409
+
+
+def test_superseded_selection_cannot_attach_a_generated_plan(
+    client: TestClient,
+    valid_plan: dict,
+    valid_product_specification: dict,
+    supervisor_store: InMemorySupervisorStore,
+    store: InMemoryPlanStore,
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    selected = _select_product_specification(client, run_id)
+    record = supervisor_store.planning_runs[run_id]
+    revised = copy.deepcopy(valid_product_specification)
+    revised["title"]["text"] = "Reviewed rate limiting"
+    response = client.post(
+        f"/api/v1/planning-runs/{run_id}/revise-product-specification",
+        json={
+            "expected_product_specification_revision": 1,
+            "parent_artifact_sha256": selected["selected_product_specification_artifact"]["sha256"],
+            "specification": revised,
+        },
+        headers={"Idempotency-Key": "replace-selected-specification"},
+    )
+    assert response.status_code == 200
+
+    stale_plan = store.put_planning_plan(run_id, 1, AiPlan.model_validate(valid_plan))
+    try:
+        asyncio.run(
+            supervisor_store.attach_generated_plan(
+                run_id,
+                stale_plan,
+                "balanced",
+                "stale-workflow",
+                record.plan_revision,
+                record.selected_product_specification_revision,
+                record.selected_product_specification_artifact.sha256,
+            )
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("superseded selected product specification accepted a stale generated plan")
 
 
 def test_submit_planning_run_rejects_unpinned_repository_without_writing(

@@ -636,6 +636,8 @@ def create_app(
                     planner_model=planner_resolution.gateway.model_alias,
                     workflow_id=workflow_id,
                     expected_plan_revision=record.plan_revision,
+                    expected_product_specification_revision=record.selected_product_specification_revision,
+                    expected_product_specification_sha256=record.selected_product_specification_artifact.sha256,
                 )
             except ValueError:
                 # A concurrent caller may have persisted the active immutable
@@ -920,6 +922,10 @@ def create_app(
         require_workbench_scope(record, principal)
         if record.status is not PlanningRunStatus.PLANNING:
             raise HTTPException(status_code=409, detail="planning run is not eligible for product specification revision")
+        try:
+            request_body.specification.validate_source_segment_ids({"source-1"})
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="product specification source provenance is invalid") from error
         try:
             artifact = store.put_product_specification(
                 run_id, request_body.expected_product_specification_revision + 1, request_body.specification

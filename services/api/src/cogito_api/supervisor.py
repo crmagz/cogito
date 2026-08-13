@@ -325,6 +325,8 @@ class SupervisorStore(Protocol):
         planner_model: str,
         workflow_id: str,
         expected_plan_revision: int,
+        expected_product_specification_revision: int | None = None,
+        expected_product_specification_sha256: str | None = None,
     ) -> PlanningRunRecord: ...
 
     async def record_plan_approval(
@@ -1246,6 +1248,8 @@ class PostgresSupervisorStore:
                       AND revision.artifact_sha256 = :artifact_sha256
                       AND run.status = 'planning'
                       AND run.selected_product_specification_revision IS NULL
+                      AND run.product_specification_revision = :revision
+                      AND run.product_specification_artifact_sha256 = :artifact_sha256
                     RETURNING run.run_id, run.status, run.source_artifact_ref, run.source_artifact_sha256,
                               run.target_repos, run.spec_set, run.constraints, run.priority, run.submitted_at, run.submitted_by,
                               run.plan_artifact_ref, run.plan_artifact_sha256, run.planner_model, run.active_workflow_id, run.plan_revision,
@@ -1328,7 +1332,8 @@ class PostgresSupervisorStore:
                     SET product_specification_artifact_ref = :artifact_ref,
                         product_specification_artifact_sha256 = :artifact_sha256,
                         product_specification_revision = product_specification_revision + 1,
-                        product_specification_generation_claim = NULL
+                        product_specification_generation_claim = NULL,
+                        product_specification_generation_claimed_at = NULL
                     WHERE run_id = :run_id
                       AND status = 'planning'
                       AND product_specification_revision = :expected_product_specification_revision
@@ -1386,10 +1391,15 @@ class PostgresSupervisorStore:
         async with self._engine.begin() as connection:
             result = await connection.execute(
                 text(
-                    """UPDATE supervisor_runs SET product_specification_generation_claim = :claim
+                    """UPDATE supervisor_runs SET product_specification_generation_claim = :claim,
+                                                   product_specification_generation_claimed_at = now()
                        WHERE run_id = :run_id AND status = 'planning'
                          AND product_specification_artifact_ref IS NULL
-                         AND product_specification_generation_claim IS NULL
+                         AND (
+                             product_specification_generation_claim IS NULL
+                             OR product_specification_generation_claimed_at IS NULL
+                             OR product_specification_generation_claimed_at < now() - interval '15 minutes'
+                         )
                        RETURNING product_specification_generation_claim"""
                 ),
                 {"run_id": run_id, "claim": claim},
@@ -1400,7 +1410,8 @@ class PostgresSupervisorStore:
     async def release_product_specification_generation(self, run_id: str, generation_claim: str) -> None:
         async with self._engine.begin() as connection:
             await connection.execute(
-                text("""UPDATE supervisor_runs SET product_specification_generation_claim = NULL
+                text("""UPDATE supervisor_runs SET product_specification_generation_claim = NULL,
+                                                     product_specification_generation_claimed_at = NULL
                         WHERE run_id = :run_id AND product_specification_generation_claim = :claim"""),
                 {"run_id": run_id, "claim": generation_claim},
             )
@@ -1412,6 +1423,8 @@ class PostgresSupervisorStore:
         planner_model: str,
         workflow_id: str,
         expected_plan_revision: int,
+        expected_product_specification_revision: int | None = None,
+        expected_product_specification_sha256: str | None = None,
     ) -> PlanningRunRecord:
         async with self._engine.begin() as connection:
             result = await connection.execute(
@@ -1427,6 +1440,13 @@ class PostgresSupervisorStore:
                     WHERE run_id = :run_id
                       AND status = 'planning'
                       AND plan_revision = :expected_plan_revision
+                      AND (
+                          :expected_product_specification_revision IS NULL
+                          OR (
+                              selected_product_specification_revision = :expected_product_specification_revision
+                              AND selected_product_specification_artifact_sha256 = :expected_product_specification_sha256
+                          )
+                      )
                     RETURNING run_id, status, source_artifact_ref, source_artifact_sha256,
                               target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
                               plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
@@ -1443,6 +1463,8 @@ class PostgresSupervisorStore:
                     "planner_model": planner_model,
                     "workflow_id": workflow_id,
                     "expected_plan_revision": expected_plan_revision,
+                    "expected_product_specification_revision": expected_product_specification_revision,
+                    "expected_product_specification_sha256": expected_product_specification_sha256,
                 },
             )
             row = result.mappings().one_or_none()
@@ -1457,6 +1479,25 @@ class PostgresSupervisorStore:
                 ),
                 {"run_id": run_id, "ref": plan_artifact.ref, "sha256": plan_artifact.sha256},
             )
+            if expected_product_specification_revision is not None:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO plan_product_specification_bindings (
+                            run_id, plan_revision, product_specification_revision, artifact_ref, artifact_sha256, created_at
+                        ) VALUES (
+                            :run_id, :plan_revision, :product_specification_revision, :artifact_ref, :artifact_sha256, now()
+                        )
+                        """
+                    ),
+                    {
+                        "run_id": run_id,
+                        "plan_revision": row["plan_revision"],
+                        "product_specification_revision": expected_product_specification_revision,
+                        "artifact_ref": row["selected_product_specification_artifact_ref"],
+                        "artifact_sha256": expected_product_specification_sha256,
+                    },
+                )
             await self._append_coordination_event(
                 connection,
                 run_id=run_id,
