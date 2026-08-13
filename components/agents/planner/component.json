@@ -1,16 +1,16 @@
 {
   "registration_id": "planner",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "kind": "agent",
   "component_id": "planner",
-  "component_version": "1.0.0",
+  "component_version": "1.1.0",
   "lifecycle": "active",
   "maturity": "incubating",
   "execution_class": "adapter",
   "owner": "cogito-platform",
   "input_schema": {"schema_id": "source_specification", "version": "1"},
-  "output_schema": {"schema_id": "normalized_plan", "version": "1"},
-  "capabilities": ["generate_plan"],
+  "output_schema": {"schema_id": "product_specification", "version": "1"},
+  "capabilities": ["generate_plan", "generate_product_specification"],
   "grants": [{"tool_id": "planning_model", "tool_version": "1.0.0", "scope": "plan_generation"}],
   "quality_gates": ["artifact_contract", "plan_approval", "prompt_redaction"]
 }

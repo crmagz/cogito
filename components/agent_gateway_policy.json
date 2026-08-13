@@ -4,7 +4,7 @@
     {
       "role": "planner",
       "registration_id": "planner",
-      "registration_version": "1.0.0",
+      "registration_version": "1.1.0",
       "project_ids": ["default"],
       "model_alias": "balanced",
       "max_budget_usd": 5,
