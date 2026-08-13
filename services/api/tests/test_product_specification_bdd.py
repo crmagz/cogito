@@ -155,3 +155,34 @@ def retrying_draft_generation_returns_existing_draft(
     assert response.status_code == 200
     assert response.json()["product_specification_artifact"] == refinement_context["artifact"]
     assert len(planner.product_specification_contexts) == 1
+
+
+@when("the authorized operator records a revised product specification")
+def authorized_operator_records_revised_product_specification(
+    refinement_context: dict[str, object], client: TestClient, planner: FakePlanner
+) -> None:
+    """Submit one complete, provenance-preserving revision through the public API."""
+
+    draft = refinement_context["draft_response"].json()
+    revision = planner.product_specification.model_dump(mode="json")
+    revision["title"]["text"] = "Reviewed rate limiting"
+    refinement_context["revision_response"] = client.post(
+        f"/api/v1/planning-runs/{refinement_context['run_id']}/revise-product-specification",
+        json={
+            "expected_product_specification_revision": 1,
+            "parent_artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            "specification": revision,
+        },
+        headers={"Idempotency-Key": "bdd-human-revision-1"},
+    )
+
+
+@then("the planning run exposes the new immutable product specification revision")
+def planning_run_exposes_new_immutable_revision(refinement_context: dict[str, object]) -> None:
+    """A human revision is retained separately and requires a fresh selection."""
+
+    response = refinement_context["revision_response"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["product_specification_revision"] == 2
+    assert body["selected_product_specification_artifact"] is None
