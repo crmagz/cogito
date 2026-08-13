@@ -176,7 +176,7 @@ def test_default_configuration_does_not_issue_mcp_grants(
 
     assert response.status_code == 202
     assert all(not resolution.mcp_grants for resolution in starter.started_runs[0].registry_resolutions)
-    assert set(supervisor_store.registry_policies) == {"phase12_initial"}
+    assert set(supervisor_store.registry_policies) == {"phase12_planner_v1_1_0"}
 
 
 def test_submit_resolves_a_pinned_agent_gateway_route(
@@ -192,7 +192,7 @@ def test_submit_resolves_a_pinned_agent_gateway_route(
     assert developer.gateway.model_alias == "complex"
     assert developer.gateway.max_budget_usd == 25
     assert developer.gateway.toolset == "development-restricted"
-    assert set(supervisor_store.registry_agent_gateway_policies) == {"agent_gateway_initial"}
+    assert set(supervisor_store.registry_agent_gateway_policies) == {"agent_gateway_planner_v1_1_0"}
 
 
 def test_enabled_configuration_uses_independent_mcp_policy(
@@ -218,7 +218,7 @@ def test_enabled_configuration_uses_independent_mcp_policy(
     assert [(grant.server_id, grant.server_version, grant.tool_name) for grant in developer.mcp_grants] == [
         ("cogito_readonly_mcp", "1.0.1", "catalog_read")
     ]
-    assert set(supervisor_store.registry_policies) == {"phase12_initial", "governed_mcp_initial"}
+    assert set(supervisor_store.registry_policies) == {"phase12_planner_v1_1_0", "governed_mcp_initial"}
 
 
 def test_github_connector_uses_a_separate_policy_and_exact_pinned_tools(
@@ -255,7 +255,7 @@ def test_github_connector_uses_a_separate_policy_and_exact_pinned_tools(
     assert {
         grant.repository_scope for grant in developer.mcp_grants if grant.server_id == "github_readonly_mcp"
     } == {"acme/api-gateway"}
-    assert set(supervisor_store.registry_policies) == {"phase12_initial", "governed_mcp_github_initial"}
+    assert set(supervisor_store.registry_policies) == {"phase12_planner_v1_1_0", "governed_mcp_github_initial"}
 
 
 def test_github_connector_grants_are_absent_when_the_run_does_not_target_its_repository(

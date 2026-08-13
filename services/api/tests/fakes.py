@@ -138,6 +138,7 @@ class InMemoryPlanStore:
 class InMemorySupervisorStore:
     def __init__(self) -> None:
         self.planning_runs: dict[str, PlanningRunRecord] = {}
+        self.product_specification_generation_claims: dict[str, str] = {}
         self.approvals: dict[tuple[str, int, str], ApprovalRecord] = {}
         self.approval_request_hashes: dict[tuple[str, int, str], str] = {}
         self.outbox: dict[str, OutboxDelivery] = {}
@@ -343,9 +344,12 @@ class InMemorySupervisorStore:
         artifact: ArtifactReference,
         planner_model: str,
         expected_product_specification_revision: int,
+        generation_claim: str | None = None,
     ) -> PlanningRunRecord:
         del planner_model
         record = self.planning_runs[run_id]
+        if generation_claim is not None and self.product_specification_generation_claims.get(run_id) != generation_claim:
+            raise ValueError("planning run is not eligible to accept a product specification draft")
         if (
             record.status is not PlanningRunStatus.PLANNING
             or record.product_specification_revision != expected_product_specification_revision
@@ -359,12 +363,26 @@ class InMemorySupervisorStore:
             }
         )
         self.planning_runs[run_id] = updated
+        self.product_specification_generation_claims.pop(run_id, None)
         self._append_coordination_event(run_id, "product_specification_draft_created", artifact=artifact)
         return updated
 
+    async def claim_product_specification_generation(self, run_id: str) -> str | None:
+        record = self.planning_runs[run_id]
+        if record.status is not PlanningRunStatus.PLANNING or record.product_specification_artifact is not None or run_id in self.product_specification_generation_claims:
+            return None
+        claim = f"claim-{run_id}"
+        self.product_specification_generation_claims[run_id] = claim
+        return claim
+
+    async def release_product_specification_generation(self, run_id: str, generation_claim: str) -> None:
+        if self.product_specification_generation_claims.get(run_id) == generation_claim:
+            self.product_specification_generation_claims.pop(run_id, None)
+
     async def select_product_specification(
-        self, run_id: str, revision: int, artifact_sha256: str
+        self, run_id: str, revision: int, artifact_sha256: str, actor_id: str, idempotency_key: str, request_sha256: str
     ) -> PlanningRunRecord:
+        del actor_id, idempotency_key, request_sha256
         record = self.planning_runs[run_id]
         artifact = record.product_specification_artifact
         if (
@@ -389,6 +407,31 @@ class InMemorySupervisorStore:
         )
         self.planning_runs[run_id] = updated
         self._append_coordination_event(run_id, "product_specification_selected", artifact=artifact)
+        return updated
+
+    async def attach_product_specification_revision(
+        self, run_id: str, artifact: ArtifactReference, expected_product_specification_revision: int,
+        parent_artifact_sha256: str, actor_id: str, idempotency_key: str, request_sha256: str,
+    ) -> PlanningRunRecord:
+        del actor_id, idempotency_key, request_sha256
+        record = self.planning_runs[run_id]
+        if (
+            record.status is not PlanningRunStatus.PLANNING
+            or record.product_specification_revision != expected_product_specification_revision
+            or record.product_specification_artifact is None
+            or record.product_specification_artifact.sha256 != parent_artifact_sha256
+        ):
+            raise ValueError("planning run is not eligible to accept this product specification revision")
+        updated = PlanningRunRecord(
+            **{
+                **record.__dict__, "product_specification_artifact": artifact,
+                "product_specification_revision": record.product_specification_revision + 1,
+                "selected_product_specification_artifact": None,
+                "selected_product_specification_revision": None,
+            }
+        )
+        self.planning_runs[run_id] = updated
+        self._append_coordination_event(run_id, "product_specification_revised", artifact=artifact)
         return updated
 
     async def record_workbench_feedback(

@@ -169,6 +169,39 @@ def test_selected_product_specification_is_the_only_plan_input(
     assert "Add a rate limiter with bounded, observable behavior." not in planner.contexts[0].initial_specification
 
 
+def test_human_revision_requires_fresh_selection_before_regenerating_a_plan(
+    client: TestClient, valid_plan: dict, planner: FakePlanner, valid_product_specification: dict
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+    revised = copy.deepcopy(valid_product_specification)
+    revised["title"]["text"] = "Reviewed rate limiting"
+
+    response = client.post(
+        f"/api/v1/planning-runs/{run_id}/revise-product-specification",
+        json={
+            "expected_product_specification_revision": 1,
+            "parent_artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            "specification": revised,
+        },
+        headers={"Idempotency-Key": "human-revision-1"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["product_specification_revision"] == 2
+    assert body["selected_product_specification_artifact"] is None
+    assert client.post(f"/api/v1/planning-runs/{run_id}/generate-plan").status_code == 409
+    selected = client.post(
+        f"/api/v1/planning-runs/{run_id}/select-product-specification",
+        json={"revision": 2, "artifact_sha256": body["product_specification_artifact"]["sha256"]},
+        headers={"Idempotency-Key": "select-human-revision"},
+    )
+    assert selected.status_code == 200
+    assert client.post(f"/api/v1/planning-runs/{run_id}/generate-plan").status_code == 200
+
+
 def test_submit_planning_run_rejects_unpinned_repository_without_writing(
     client: TestClient,
     valid_plan: dict,
