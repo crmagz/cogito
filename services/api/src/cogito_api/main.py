@@ -39,6 +39,7 @@ from .models import (
     PlanApprovalRequest,
     PlanApprovalResponse,
     ProductSpecification,
+    ProductSpecificationRevisionRequest,
     ProductSpecificationSelectionRequest,
     PlanningRunResponse,
     PlanningRunStatus,
@@ -211,7 +212,9 @@ def create_app(
     )
     agent_gateway_policy = load_agent_gateway_policy(Path(settings.registry_catalog_path), catalog)
     agents = {item.registration_id: item for item in catalog.components if item.kind.value == "agent"}
-    policy_revision = "phase12_initial"
+    # Registry policy revisions are immutable: changing an assigned agent release
+    # requires a new revision so historical runs retain their original pin.
+    policy_revision = "phase12_planner_v1_1_0"
     assignments = {role: f"{manifest.registration_id}@{manifest.version}" for role, manifest in agents.items()}
     telemetry = Telemetry(TelemetrySettings.from_environment())
     authenticator = ApprovalAuthenticator(settings)
@@ -499,41 +502,53 @@ def create_app(
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
         if record.status is PlanningRunStatus.PLANNING and record.product_specification_artifact is None:
-            try:
-                planner_resolution = (
-                    await resolve_roles(run_id, ["planner"], record.project_id or settings.workbench_default_project_id)
-                )[0]
-                require_tool(planner_resolution, "planning_model", "plan_generation")
-                if planner_resolution.gateway is None:
-                    raise RegistryConflictError("planner gateway route is unavailable")
-            except (RegistryAuthorizationError, RegistryConflictError) as error:
-                raise HTTPException(status_code=503, detail="planner registry grant is unavailable") from error
-            try:
-                initial_specification = store.get_source_specification(record.source_artifact.ref)
-                generated = await planner.generate_product_specification(
-                    ProductSpecificationContext(initial_specification=initial_specification), planner_resolution.gateway
-                )
-                artifact = store.put_product_specification(
-                    run_id, record.product_specification_revision + 1, generated
-                )
-            except PlanStoreUnavailableError as error:
-                raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
-            except PlannerError as error:
-                raise HTTPException(status_code=502, detail="planner failed to produce a valid product specification") from error
-            try:
-                updated = await supervisor_store.attach_product_specification_draft(
-                    run_id,
-                    artifact=artifact,
-                    planner_model=planner_resolution.gateway.model_alias,
-                    expected_product_specification_revision=record.product_specification_revision,
-                )
-            except ValueError:
+            generation_claim = await supervisor_store.claim_product_specification_generation(run_id)
+            if generation_claim is None:
                 latest = await supervisor_store.get_planning_run(run_id)
-                if latest is None or latest.product_specification_artifact is None:
-                    raise HTTPException(
-                        status_code=409, detail="planning run changed while the product specification was generated"
-                    ) from None
-                updated = latest
+                if latest is not None and latest.product_specification_artifact is not None:
+                    updated = latest
+                else:
+                    raise HTTPException(status_code=409, detail="product specification generation is already in progress")
+            else:
+                try:
+                    try:
+                        planner_resolution = (
+                            await resolve_roles(run_id, ["planner"], record.project_id or settings.workbench_default_project_id)
+                        )[0]
+                        require_tool(planner_resolution, "planning_model", "plan_generation")
+                        if planner_resolution.gateway is None:
+                            raise RegistryConflictError("planner gateway route is unavailable")
+                    except (RegistryAuthorizationError, RegistryConflictError) as error:
+                        raise HTTPException(status_code=503, detail="planner registry grant is unavailable") from error
+                    try:
+                        initial_specification = store.get_source_specification(record.source_artifact.ref)
+                        generated = await planner.generate_product_specification(
+                            ProductSpecificationContext(initial_specification=initial_specification), planner_resolution.gateway
+                        )
+                        artifact = store.put_product_specification(
+                            run_id, record.product_specification_revision + 1, generated
+                        )
+                    except PlanStoreUnavailableError as error:
+                        raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
+                    except PlannerError as error:
+                        raise HTTPException(status_code=502, detail="planner failed to produce a valid product specification") from error
+                    try:
+                        updated = await supervisor_store.attach_product_specification_draft(
+                            run_id,
+                            artifact=artifact,
+                            planner_model=planner_resolution.gateway.model_alias,
+                            expected_product_specification_revision=record.product_specification_revision,
+                            generation_claim=generation_claim,
+                        )
+                    except ValueError:
+                        latest = await supervisor_store.get_planning_run(run_id)
+                        if latest is None or latest.product_specification_artifact is None:
+                            raise HTTPException(
+                                status_code=409, detail="planning run changed while the product specification was generated"
+                            ) from None
+                        updated = latest
+                finally:
+                    await supervisor_store.release_product_specification_generation(run_id, generation_claim)
         elif record.product_specification_artifact is not None:
             updated = record
         else:
@@ -708,10 +723,18 @@ def create_app(
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
         try:
+            request_sha256 = sha256(
+                json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
             updated = await supervisor_store.select_product_specification(
-                run_id, request_body.revision, request_body.artifact_sha256
+                run_id,
+                request_body.revision,
+                request_body.artifact_sha256,
+                principal.subject,
+                idempotency_key,
+                request_sha256,
             )
-        except ValueError as error:
+        except (ValueError, ApprovalConflictError) as error:
             raise HTTPException(status_code=409, detail="product specification selection is stale or invalid") from error
         response = PlanningRunResponse(
             run_id=updated.run_id,
@@ -878,6 +901,52 @@ def create_app(
         )
         return JSONResponse(content=response.model_dump(mode="json"))
 
+    @app.post("/api/v1/planning-runs/{run_id}/revise-product-specification")
+    async def revise_product_specification(
+        run_id: str,
+        request_body: ProductSpecificationRevisionRequest,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """Persist one complete human-authored revision and require a fresh explicit selection."""
+
+        if not idempotency_key or len(idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        if record.status is not PlanningRunStatus.PLANNING:
+            raise HTTPException(status_code=409, detail="planning run is not eligible for product specification revision")
+        try:
+            artifact = store.put_product_specification(
+                run_id, request_body.expected_product_specification_revision + 1, request_body.specification
+            )
+        except PlanStoreUnavailableError as error:
+            raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
+        request_sha256 = sha256(
+            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        try:
+            updated = await supervisor_store.attach_product_specification_revision(
+                run_id, artifact, request_body.expected_product_specification_revision,
+                request_body.parent_artifact_sha256, principal.subject, idempotency_key, request_sha256,
+            )
+        except (ValueError, ApprovalConflictError) as error:
+            raise HTTPException(status_code=409, detail="product specification revision is stale or invalid") from error
+        response = PlanningRunResponse(
+            run_id=updated.run_id, status=updated.status, source_artifact=updated.source_artifact,
+            product_specification_artifact=updated.product_specification_artifact,
+            product_specification_revision=updated.product_specification_revision,
+            selected_product_specification_artifact=updated.selected_product_specification_artifact,
+            selected_product_specification_revision=updated.selected_product_specification_revision,
+            plan_artifact=updated.plan_artifact, implementation_artifact=updated.implementation_artifact,
+            submitted_at=updated.submitted_at,
+        )
+        return JSONResponse(content=response.model_dump(mode="json"))
+
     async def coordination_response(record: PlanningRunRecord) -> CoordinationRunResponse:
         """Build a bounded authenticated projection without exposing artifact contents."""
 
@@ -986,6 +1055,8 @@ def create_app(
             status=record.status,
             submitted_at=record.submitted_at,
             workflow_id=record.workflow_id,
+            product_specification_revision=record.product_specification_revision,
+            selected_product_specification_revision=record.selected_product_specification_revision,
             stages=stages,
             workflow_graph=workbench_graph(stages),
             active_gate=active_gate,

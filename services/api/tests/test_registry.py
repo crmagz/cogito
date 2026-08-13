@@ -81,7 +81,7 @@ def test_agent_gateway_policy_selects_a_project_scoped_route_for_each_registered
 
     policy = load_agent_gateway_policy(_catalog_root(), catalog)
 
-    assert policy.policy_revision == "agent_gateway_initial"
+    assert policy.policy_revision == "agent_gateway_planner_v1_1_0"
     planner = next(binding for binding in policy.bindings if binding.role == "planner")
     assert planner.registration_version == "1.1.0"
     assert planner.toolset == "planning-readonly"

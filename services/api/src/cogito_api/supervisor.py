@@ -290,6 +290,22 @@ class SupervisorStore(Protocol):
         artifact: ArtifactReference,
         planner_model: str,
         expected_product_specification_revision: int,
+        generation_claim: str | None = None,
+    ) -> PlanningRunRecord: ...
+
+    async def claim_product_specification_generation(self, run_id: str) -> str | None: ...
+
+    async def release_product_specification_generation(self, run_id: str, generation_claim: str) -> None: ...
+
+    async def attach_product_specification_revision(
+        self,
+        run_id: str,
+        artifact: ArtifactReference,
+        expected_product_specification_revision: int,
+        parent_artifact_sha256: str,
+        actor_id: str,
+        idempotency_key: str,
+        request_sha256: str,
     ) -> PlanningRunRecord: ...
 
     async def select_product_specification(
@@ -297,6 +313,9 @@ class SupervisorStore(Protocol):
         run_id: str,
         revision: int,
         artifact_sha256: str,
+        actor_id: str,
+        idempotency_key: str,
+        request_sha256: str,
     ) -> PlanningRunRecord: ...
 
     async def attach_generated_plan(
@@ -1100,12 +1119,119 @@ class PostgresSupervisorStore:
             return None
         return _planning_run_record(row)
 
+    async def attach_product_specification_revision(
+        self,
+        run_id: str,
+        artifact: ArtifactReference,
+        expected_product_specification_revision: int,
+        parent_artifact_sha256: str,
+        actor_id: str,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> PlanningRunRecord:
+        """Append a complete human-reviewed replacement and clear stale selected input."""
+
+        async with self._engine.begin() as connection:
+            existing_result = await connection.execute(
+                text(
+                    """SELECT revision, request_sha256 FROM product_specification_revision_decisions
+                           WHERE run_id = :run_id AND idempotency_key = :idempotency_key"""
+                ),
+                {"run_id": run_id, "idempotency_key": idempotency_key},
+            )
+            existing = existing_result.mappings().one_or_none()
+            if existing is not None:
+                if existing["request_sha256"] != request_sha256:
+                    raise ApprovalConflictError("idempotency key was reused with different product specification revision")
+                return (await self.get_planning_run(run_id))  # type: ignore[return-value]
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs
+                    SET product_specification_artifact_ref = :artifact_ref,
+                        product_specification_artifact_sha256 = :artifact_sha256,
+                        product_specification_revision = product_specification_revision + 1,
+                        selected_product_specification_artifact_ref = NULL,
+                        selected_product_specification_artifact_sha256 = NULL,
+                        selected_product_specification_revision = NULL
+                    WHERE run_id = :run_id
+                      AND status = 'planning'
+                      AND product_specification_revision = :expected_revision
+                      AND product_specification_artifact_sha256 = :parent_artifact_sha256
+                    RETURNING run_id, status, source_artifact_ref, source_artifact_sha256,
+                              target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
+                              plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
+                              implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
+                              product_specification_artifact_ref, product_specification_artifact_sha256,
+                              product_specification_revision, selected_product_specification_artifact_ref,
+                              selected_product_specification_artifact_sha256, selected_product_specification_revision
+                    """
+                ),
+                {"run_id": run_id, "artifact_ref": artifact.ref, "artifact_sha256": artifact.sha256,
+                 "expected_revision": expected_product_specification_revision,
+                 "parent_artifact_sha256": parent_artifact_sha256},
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                raise ValueError("planning run is not eligible to accept this product specification revision")
+            revision = row["product_specification_revision"]
+            await connection.execute(
+                text("""INSERT INTO product_specification_revisions (run_id, revision, artifact_ref, artifact_sha256, planner_model, created_at)
+                         VALUES (:run_id, :revision, :artifact_ref, :artifact_sha256, 'human-authored', now())"""),
+                {"run_id": run_id, "revision": revision, "artifact_ref": artifact.ref, "artifact_sha256": artifact.sha256},
+            )
+            await connection.execute(
+                text("""INSERT INTO product_specification_revision_decisions
+                         (decision_id, run_id, revision, parent_artifact_sha256, actor_id, idempotency_key, request_sha256, created_at)
+                         VALUES (:decision_id, :run_id, :revision, :parent_artifact_sha256, :actor_id, :idempotency_key, :request_sha256, now())"""),
+                {"decision_id": str(uuid.uuid4()), "run_id": run_id, "revision": revision,
+                 "parent_artifact_sha256": parent_artifact_sha256, "actor_id": actor_id,
+                 "idempotency_key": idempotency_key, "request_sha256": request_sha256},
+            )
+            await self._append_coordination_event(connection, run_id=run_id, event_type="product_specification_revised", artifact=artifact)
+        return _planning_run_record(row)
+
     async def select_product_specification(
-        self, run_id: str, revision: int, artifact_sha256: str
+        self,
+        run_id: str,
+        revision: int,
+        artifact_sha256: str,
+        actor_id: str,
+        idempotency_key: str,
+        request_sha256: str,
     ) -> PlanningRunRecord:
         """Atomically bind one displayed immutable specification revision as the only planning input."""
 
         async with self._engine.begin() as connection:
+            existing_result = await connection.execute(
+                text(
+                    """
+                    SELECT revision, artifact_sha256, request_sha256
+                    FROM product_specification_selection_decisions
+                    WHERE run_id = :run_id AND idempotency_key = :idempotency_key
+                    """
+                ),
+                {"run_id": run_id, "idempotency_key": idempotency_key},
+            )
+            existing = existing_result.mappings().one_or_none()
+            if existing is not None:
+                if existing["request_sha256"] != request_sha256:
+                    raise ApprovalConflictError("idempotency key was reused with different product specification selection")
+                current_result = await connection.execute(
+                    text(
+                        """SELECT run_id, status, source_artifact_ref, source_artifact_sha256,
+                                  target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
+                                  plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
+                                  implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
+                                  product_specification_artifact_ref, product_specification_artifact_sha256,
+                                  product_specification_revision, selected_product_specification_artifact_ref,
+                                  selected_product_specification_artifact_sha256, selected_product_specification_revision
+                           FROM supervisor_runs WHERE run_id = :run_id"""
+                    ),
+                    {"run_id": run_id},
+                )
+                current = current_result.mappings().one()
+                return _planning_run_record(current)
             result = await connection.execute(
                 text(
                     """
@@ -1160,6 +1286,22 @@ class PostgresSupervisorStore:
                 ref=row["selected_product_specification_artifact_ref"],
                 sha256=row["selected_product_specification_artifact_sha256"],
             )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO product_specification_selection_decisions (
+                        decision_id, run_id, revision, artifact_sha256, actor_id, idempotency_key, request_sha256, created_at
+                    ) VALUES (
+                        :decision_id, :run_id, :revision, :artifact_sha256, :actor_id, :idempotency_key, :request_sha256, now()
+                    )
+                    """
+                ),
+                {
+                    "decision_id": str(uuid.uuid4()), "run_id": run_id, "revision": revision,
+                    "artifact_sha256": artifact_sha256, "actor_id": actor_id,
+                    "idempotency_key": idempotency_key, "request_sha256": request_sha256,
+                },
+            )
             await self._append_coordination_event(
                 connection,
                 run_id=run_id,
@@ -1174,6 +1316,7 @@ class PostgresSupervisorStore:
         artifact: ArtifactReference,
         planner_model: str,
         expected_product_specification_revision: int,
+        generation_claim: str | None = None,
     ) -> PlanningRunRecord:
         """Atomically retain one generated product specification draft for a planning run."""
 
@@ -1184,10 +1327,12 @@ class PostgresSupervisorStore:
                     UPDATE supervisor_runs
                     SET product_specification_artifact_ref = :artifact_ref,
                         product_specification_artifact_sha256 = :artifact_sha256,
-                        product_specification_revision = product_specification_revision + 1
+                        product_specification_revision = product_specification_revision + 1,
+                        product_specification_generation_claim = NULL
                     WHERE run_id = :run_id
                       AND status = 'planning'
                       AND product_specification_revision = :expected_product_specification_revision
+                      AND (:generation_claim IS NULL OR product_specification_generation_claim = :generation_claim)
                     RETURNING run_id, status, source_artifact_ref, source_artifact_sha256,
                               target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
                               plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
@@ -1202,6 +1347,7 @@ class PostgresSupervisorStore:
                     "artifact_ref": artifact.ref,
                     "artifact_sha256": artifact.sha256,
                     "expected_product_specification_revision": expected_product_specification_revision,
+                    "generation_claim": generation_claim,
                 },
             )
             row = result.mappings().one_or_none()
@@ -1232,6 +1378,32 @@ class PostgresSupervisorStore:
                 artifact=artifact,
             )
         return _planning_run_record(row)
+
+    async def claim_product_specification_generation(self, run_id: str) -> str | None:
+        """Reserve draft generation so a concurrent model response cannot create an orphan revision object."""
+
+        claim = str(uuid.uuid4())
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """UPDATE supervisor_runs SET product_specification_generation_claim = :claim
+                       WHERE run_id = :run_id AND status = 'planning'
+                         AND product_specification_artifact_ref IS NULL
+                         AND product_specification_generation_claim IS NULL
+                       RETURNING product_specification_generation_claim"""
+                ),
+                {"run_id": run_id, "claim": claim},
+            )
+            row = result.mappings().one_or_none()
+        return row["product_specification_generation_claim"] if row is not None else None
+
+    async def release_product_specification_generation(self, run_id: str, generation_claim: str) -> None:
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text("""UPDATE supervisor_runs SET product_specification_generation_claim = NULL
+                        WHERE run_id = :run_id AND product_specification_generation_claim = :claim"""),
+                {"run_id": run_id, "claim": generation_claim},
+            )
 
     async def attach_generated_plan(
         self,

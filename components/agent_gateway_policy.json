@@ -1,5 +1,5 @@
 {
-  "policy_revision": "agent_gateway_initial",
+  "policy_revision": "agent_gateway_planner_v1_1_0",
   "bindings": [
     {
       "role": "planner",

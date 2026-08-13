@@ -757,6 +757,23 @@ class ProductSpecificationSelectionRequest(BaseModel):
     )
 
 
+class ProductSpecificationRevisionRequest(BaseModel):
+    """Strict human-authored revision anchored to the displayed current draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_product_specification_revision: int = Field(
+        ge=1, description="Displayed latest revision used to reject stale edits"
+    )
+    parent_artifact_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the displayed latest product specification",
+    )
+    specification: ProductSpecification = Field(description="Complete reviewed replacement specification")
+
+
 class AgentRunResponse(BaseModel):
     """Authoritative lifecycle projection for a submitted run."""
 
@@ -1063,6 +1080,8 @@ class WorkbenchRunResponse(BaseModel):
     status: PlanningRunStatus
     submitted_at: str
     workflow_id: str | None = Field(default=None, description="Authoritative workflow execution identity when available")
+    product_specification_revision: int = Field(default=0, ge=0)
+    selected_product_specification_revision: int | None = Field(default=None, ge=1)
     stages: list[WorkbenchStageSummary] = Field(default_factory=list, description="Ordered authoritative Workflow Map nodes")
     workflow_graph: WorkbenchWorkflowGraph = Field(default_factory=WorkbenchWorkflowGraph, description="Typed relay graph for this run")
     active_gate: CoordinationGate | None = None
