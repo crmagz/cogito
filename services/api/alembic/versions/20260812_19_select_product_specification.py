@@ -35,7 +35,7 @@ def upgrade() -> None:
         "(selected_product_specification_artifact_sha256 IS NULL)",
     )
     op.create_check_constraint(
-        "supervisor_runs_selected_product_specification_positive_revision",
+        "supervisor_runs_selected_spec_positive_revision",
         "supervisor_runs",
         "selected_product_specification_revision IS NULL OR selected_product_specification_revision > 0",
     )

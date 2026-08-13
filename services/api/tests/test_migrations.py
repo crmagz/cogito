@@ -20,3 +20,11 @@ def test_workbench_feedback_migration_matches_supervisor_actor_identifier_limit(
     migration = (Path(__file__).parents[1] / "alembic/versions/20260802_13_workbench_feedback.py").read_text()
 
     assert 'sa.Column("actor_id", sa.String(length=512), nullable=False)' in migration
+
+
+def test_product_specification_migration_uses_a_postgresql_safe_constraint_name() -> None:
+    """PostgreSQL identifiers cannot exceed 63 characters."""
+
+    migration = (Path(__file__).parents[1] / "alembic/versions/20260812_19_select_product_specification.py").read_text()
+
+    assert '"supervisor_runs_selected_spec_positive_revision"' in migration
