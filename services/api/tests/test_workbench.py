@@ -142,6 +142,10 @@ def test_workbench_detail_and_evidence_are_scope_and_digest_bound(client, valid_
     assert detail.status_code == 200
     assert detail.json()["artifacts"] == [
         {"kind": "source", "sha256": supervisor_store.planning_runs[run_id].source_artifact.sha256},
+        {
+            "kind": "product_specification",
+            "sha256": supervisor_store.planning_runs[run_id].product_specification_artifact.sha256,
+        },
         {"kind": "plan", "sha256": digest},
     ]
     assert evidence.status_code == 200
@@ -448,13 +452,15 @@ def test_workbench_stage_projection_is_typed_and_never_copies_terminal_run_state
     graph = response.json()["workflow_graph"]
     assert [(node["stage_id"], node["node_type"]) for node in graph["nodes"]] == [
         ("specification", "queue"),
+        ("product_specification", "queue"),
         ("planning", "agent"),
         ("plan_approval", "gate"),
         ("implementation", "agent"),
         ("implementation_approval", "gate"),
     ]
     assert [(edge["source_node_id"], edge["target_node_id"]) for edge in graph["edges"]] == [
-        ("specification", "planning"),
+        ("specification", "product_specification"),
+        ("product_specification", "planning"),
         ("planning", "plan_approval"),
         ("plan_approval", "implementation"),
         ("implementation", "implementation_approval"),
