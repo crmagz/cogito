@@ -39,6 +39,7 @@ from .models import (
     PlanApprovalRequest,
     PlanApprovalResponse,
     ProductSpecification,
+    MAX_PRODUCT_SPECIFICATION_BYTES,
     ProductSpecificationRevisionRequest,
     ProductSpecificationSelectionRequest,
     PlanningRunResponse,
@@ -600,7 +601,8 @@ def create_app(
                 raise HTTPException(status_code=503, detail="planner registry grant is unavailable") from error
             try:
                 specification_bytes = store.get_verified_artifact(
-                    record.selected_product_specification_artifact, max_bytes=1_000_000
+                    record.selected_product_specification_artifact,
+                    max_bytes=MAX_PRODUCT_SPECIFICATION_BYTES,
                 )
                 selected_specification = ProductSpecification.model_validate_json(specification_bytes)
                 initial_specification = json.dumps(
@@ -1047,7 +1049,7 @@ def create_app(
             settings.auth_oidc_admin_role,
         } & principal.roles:
             abilities.append("approve")
-        workflow = ["product_specification", "planning"]
+        workflow = ["specification", "product_specification", "planning"]
         if record.plan_artifact is not None:
             workflow.append("plan")
         if record.implementation_artifact is not None:
