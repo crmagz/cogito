@@ -188,3 +188,19 @@ def test_product_specification_rejects_a_question_as_a_requirement() -> None:
 
     with pytest.raises(ValueError, match="cannot be unresolved questions"):
         ProductSpecification.model_validate(fixture)
+
+
+def test_product_specification_is_bounded_to_readable_workbench_evidence() -> None:
+    fixture = valid_product_specification()
+    fixture["desired_outcomes"] = [
+        {
+            "id": f"outcome-{index}",
+            "text": "x" * 10_000,
+            "kind": "source",
+            "source_segment_ids": ["source-1"],
+        }
+        for index in range(10)
+    ]
+
+    with pytest.raises(ValueError, match="96 KiB evidence limit"):
+        ProductSpecification.model_validate(fixture)

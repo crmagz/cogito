@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
 from enum import Enum, StrEnum
 from math import isfinite
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+# Workbench evidence retrieval is capped at 100 KB. Keep immutable product
+# specifications below that boundary so every stored revision remains reviewable.
+MAX_PRODUCT_SPECIFICATION_BYTES = 96 * 1024
 
 
 class ReviewProfile(str, Enum):
@@ -222,6 +228,11 @@ class ProductSpecification(BaseModel):
             raise ValueError("product specification assumptions must be labelled assumptions")
         if any(statement.kind is not ProductSpecificationStatementKind.QUESTION for statement in self.unresolved_questions):
             raise ValueError("product specification unresolved questions must be labelled questions")
+        serialized = json.dumps(
+            self.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        if len(serialized) > MAX_PRODUCT_SPECIFICATION_BYTES:
+            raise ValueError("product specification exceeds the 96 KiB evidence limit")
         return self
 
 
