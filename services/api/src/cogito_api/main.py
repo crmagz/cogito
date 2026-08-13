@@ -943,6 +943,13 @@ def create_app(
     def workbench_response(record: PlanningRunRecord, principal) -> WorkbenchRunResponse:
         require_workbench_scope(record, principal)
         artifacts = [WorkbenchArtifactSummary(kind=WorkbenchArtifactKind.SOURCE, sha256=record.source_artifact.sha256)]
+        if record.product_specification_artifact is not None:
+            artifacts.append(
+                WorkbenchArtifactSummary(
+                    kind=WorkbenchArtifactKind.PRODUCT_SPECIFICATION,
+                    sha256=record.product_specification_artifact.sha256,
+                )
+            )
         if record.plan_artifact is not None:
             artifacts.append(WorkbenchArtifactSummary(kind=WorkbenchArtifactKind.PLAN, sha256=record.plan_artifact.sha256))
         if record.implementation_artifact is not None:
@@ -965,7 +972,7 @@ def create_app(
             settings.auth_oidc_admin_role,
         } & principal.roles:
             abilities.append("approve")
-        workflow = ["planning"]
+        workflow = ["product_specification", "planning"]
         if record.plan_artifact is not None:
             workflow.append("plan")
         if record.implementation_artifact is not None:
@@ -1004,7 +1011,7 @@ def create_app(
                     WorkbenchWorkflowNodeType.GATE
                     if stage.stage_id.endswith("_approval")
                     else WorkbenchWorkflowNodeType.QUEUE
-                    if stage.stage_id == "specification"
+                    if stage.stage_id in {"specification", "product_specification"}
                     else WorkbenchWorkflowNodeType.AGENT
                 ),
             )
@@ -1094,6 +1101,30 @@ def create_app(
                 availability=WorkbenchStageAvailability.AUTHORITATIVE,
                 reason="An immutable submitted specification is recorded.",
                 artifact_kind=WorkbenchArtifactKind.SOURCE,
+            ),
+            WorkbenchStageSummary(
+                stage_id="product_specification",
+                label="Product specification",
+                state=(
+                    WorkbenchStageState.COMPLETED
+                    if record.selected_product_specification_artifact is not None
+                    else WorkbenchStageState.AWAITING_OPERATOR
+                    if record.product_specification_artifact is not None
+                    else WorkbenchStageState.IN_PROGRESS
+                ),
+                availability=WorkbenchStageAvailability.AUTHORITATIVE,
+                reason=(
+                    "An operator selected this immutable product specification as the planning input."
+                    if record.selected_product_specification_artifact is not None
+                    else "A generated immutable product specification is available for operator selection."
+                    if record.product_specification_artifact is not None
+                    else "No immutable product specification draft is available yet."
+                ),
+                artifact_kind=(
+                    WorkbenchArtifactKind.PRODUCT_SPECIFICATION
+                    if record.product_specification_artifact is not None
+                    else None
+                ),
             ),
             WorkbenchStageSummary(
                 stage_id="planning",
@@ -1452,6 +1483,7 @@ def create_app(
             authenticator.require_approver(principal)
         artifact = {
             WorkbenchArtifactKind.SOURCE: record.source_artifact,
+            WorkbenchArtifactKind.PRODUCT_SPECIFICATION: record.product_specification_artifact,
             WorkbenchArtifactKind.PLAN: record.plan_artifact,
             WorkbenchArtifactKind.IMPLEMENTATION: record.implementation_artifact,
         }[kind]
