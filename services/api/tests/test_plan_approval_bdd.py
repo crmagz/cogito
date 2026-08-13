@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from pytest_bdd import given, scenarios, then, when
 
 from .fakes import FakeRunStarter, InMemorySupervisorStore
-from .test_planning_runs import _planning_request
+from .test_planning_runs import _planning_request, _select_product_specification
 
 scenarios("features/plan_approval.feature")
 
@@ -27,6 +27,7 @@ def generated_plan_is_awaiting_approval(
 
     submission = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
     run_id = submission.json()["run_id"]
+    _select_product_specification(client, run_id)
     planning = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
     approval_context["run_id"] = run_id
     approval_context["digest"] = planning.json()["plan_artifact"]["sha256"]

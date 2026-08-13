@@ -362,6 +362,35 @@ class InMemorySupervisorStore:
         self._append_coordination_event(run_id, "product_specification_draft_created", artifact=artifact)
         return updated
 
+    async def select_product_specification(
+        self, run_id: str, revision: int, artifact_sha256: str
+    ) -> PlanningRunRecord:
+        record = self.planning_runs[run_id]
+        artifact = record.product_specification_artifact
+        if (
+            record.status is not PlanningRunStatus.PLANNING
+            or artifact is None
+            or record.product_specification_revision != revision
+            or artifact.sha256 != artifact_sha256
+        ):
+            if (
+                record.selected_product_specification_revision == revision
+                and record.selected_product_specification_artifact is not None
+                and record.selected_product_specification_artifact.sha256 == artifact_sha256
+            ):
+                return record
+            raise ValueError("planning run is not eligible to select this product specification")
+        updated = PlanningRunRecord(
+            **{
+                **record.__dict__,
+                "selected_product_specification_artifact": artifact,
+                "selected_product_specification_revision": revision,
+            }
+        )
+        self.planning_runs[run_id] = updated
+        self._append_coordination_event(run_id, "product_specification_selected", artifact=artifact)
+        return updated
+
     async def record_workbench_feedback(
         self, *, run_id: str, intent: WorkbenchFeedbackIntent, artifact_sha256: str, stage_id: str,
         actor_id: str, comment: str, idempotency_key: str, request_sha256: str,
@@ -426,6 +455,10 @@ class InMemorySupervisorStore:
             workflow_id=workflow_id,
             plan_revision=record.plan_revision + 1,
             project_id=record.project_id,
+            product_specification_artifact=record.product_specification_artifact,
+            product_specification_revision=record.product_specification_revision,
+            selected_product_specification_artifact=record.selected_product_specification_artifact,
+            selected_product_specification_revision=record.selected_product_specification_revision,
         )
         self.planning_runs[run_id] = updated
         self._append_coordination_event(
@@ -559,6 +592,10 @@ class InMemorySupervisorStore:
                     workflow_id=None if status is PlanningRunStatus.PLANNING else run.workflow_id,
                     plan_revision=run.plan_revision,
                     project_id=run.project_id,
+                    product_specification_artifact=run.product_specification_artifact,
+                    product_specification_revision=run.product_specification_revision,
+                    selected_product_specification_artifact=run.selected_product_specification_artifact,
+                    selected_product_specification_revision=run.selected_product_specification_revision,
                 )
                 self.outbox.pop(decision_id, None)
                 self.leased_decision_ids.discard(decision_id)
@@ -899,7 +936,17 @@ class FakePlanner:
         self, context: ProductSpecificationContext, gateway: AgentGatewayResolution
     ) -> ProductSpecification:
         if self.product_specification is None:
-            raise RuntimeError("fake product specification is not configured")
+            def source(statement_id: str) -> dict[str, object]:
+                return {"id": statement_id, "text": statement_id.replace("-", " "), "kind": "source", "source_segment_ids": ["source-1"]}
+
+            self.product_specification = ProductSpecification.model_validate(
+                {
+                    "title": source("title"), "problem_statement": source("problem"),
+                    "desired_outcomes": [source("outcome")], "actors": [source("actor")],
+                    "in_scope": [source("in-scope")], "out_of_scope": [source("out-of-scope")],
+                    "functional_requirements": [source("requirement")], "acceptance_criteria": [source("acceptance")],
+                }
+            )
         self.product_specification_contexts.append(context)
         self.gateways.append(gateway)
         return self.product_specification

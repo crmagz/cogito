@@ -725,6 +725,15 @@ class PlanningRunResponse(BaseModel):
         ge=0,
         description="Latest immutable product specification draft revision",
     )
+    selected_product_specification_artifact: ArtifactReference | None = Field(
+        default=None,
+        description="Immutable product specification explicitly selected as the planning input",
+    )
+    selected_product_specification_revision: int | None = Field(
+        default=None,
+        ge=1,
+        description="Selected immutable product specification revision when planning is authorized",
+    )
     plan_artifact: ArtifactReference | None = Field(
         default=None, description="Immutable generated plan when planning has completed"
     )
@@ -732,6 +741,20 @@ class PlanningRunResponse(BaseModel):
         default=None, description="Frozen implementation and review evidence when approval is pending"
     )
     submitted_at: str = Field(description="ISO 8601 submission timestamp")
+
+
+class ProductSpecificationSelectionRequest(BaseModel):
+    """Digest-bound explicit promotion of one reviewed product-specification draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=1, description="Immutable product specification revision displayed to the operator")
+    artifact_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the displayed immutable product specification artifact",
+    )
 
 
 class AgentRunResponse(BaseModel):
@@ -854,6 +877,7 @@ class WorkbenchArtifactKind(StrEnum):
     """Server-owned evidence kinds available to an authorized Workbench."""
 
     SOURCE = "source"
+    PRODUCT_SPECIFICATION = "product_specification"
     PLAN = "plan"
     IMPLEMENTATION = "implementation"
 

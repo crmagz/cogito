@@ -61,6 +61,8 @@ class PlanningRunRecord:
     project_id: str | None = None
     product_specification_artifact: ArtifactReference | None = None
     product_specification_revision: int = 0
+    selected_product_specification_artifact: ArtifactReference | None = None
+    selected_product_specification_revision: int | None = None
 
 
 @dataclass(frozen=True)
@@ -263,6 +265,15 @@ def _planning_run_record(row: Mapping[str, Any]) -> PlanningRunRecord:
             else None
         ),
         product_specification_revision=int(row.get("product_specification_revision", 0)),
+        selected_product_specification_artifact=(
+            ArtifactReference(
+                ref=row["selected_product_specification_artifact_ref"],
+                sha256=row["selected_product_specification_artifact_sha256"],
+            )
+            if row.get("selected_product_specification_artifact_ref") is not None
+            else None
+        ),
+        selected_product_specification_revision=row.get("selected_product_specification_revision"),
     )
 
 
@@ -279,6 +290,13 @@ class SupervisorStore(Protocol):
         artifact: ArtifactReference,
         planner_model: str,
         expected_product_specification_revision: int,
+    ) -> PlanningRunRecord: ...
+
+    async def select_product_specification(
+        self,
+        run_id: str,
+        revision: int,
+        artifact_sha256: str,
     ) -> PlanningRunRecord: ...
 
     async def attach_generated_plan(
@@ -1069,7 +1087,8 @@ class PostgresSupervisorStore:
                            plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
                            implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                            product_specification_artifact_ref, product_specification_artifact_sha256,
-                           product_specification_revision
+                           product_specification_revision, selected_product_specification_artifact_ref,
+                           selected_product_specification_artifact_sha256, selected_product_specification_revision
                     FROM supervisor_runs
                     WHERE run_id = :run_id
                     """
@@ -1079,6 +1098,74 @@ class PostgresSupervisorStore:
             row = result.mappings().one_or_none()
         if row is None:
             return None
+        return _planning_run_record(row)
+
+    async def select_product_specification(
+        self, run_id: str, revision: int, artifact_sha256: str
+    ) -> PlanningRunRecord:
+        """Atomically bind one displayed immutable specification revision as the only planning input."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs AS run
+                    SET selected_product_specification_artifact_ref = revision.artifact_ref,
+                        selected_product_specification_artifact_sha256 = revision.artifact_sha256,
+                        selected_product_specification_revision = revision.revision
+                    FROM product_specification_revisions AS revision
+                    WHERE run.run_id = :run_id
+                      AND revision.run_id = run.run_id
+                      AND revision.revision = :revision
+                      AND revision.artifact_sha256 = :artifact_sha256
+                      AND run.status = 'planning'
+                      AND run.selected_product_specification_revision IS NULL
+                    RETURNING run.run_id, run.status, run.source_artifact_ref, run.source_artifact_sha256,
+                              run.target_repos, run.spec_set, run.constraints, run.priority, run.submitted_at, run.submitted_by,
+                              run.plan_artifact_ref, run.plan_artifact_sha256, run.planner_model, run.active_workflow_id, run.plan_revision,
+                              run.implementation_artifact_ref, run.implementation_artifact_sha256, run.implementation_revision, run.project_id,
+                              run.product_specification_artifact_ref, run.product_specification_artifact_sha256,
+                              run.product_specification_revision, run.selected_product_specification_artifact_ref,
+                              run.selected_product_specification_artifact_sha256, run.selected_product_specification_revision
+                    """
+                ),
+                {"run_id": run_id, "revision": revision, "artifact_sha256": artifact_sha256},
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                existing = await connection.execute(
+                    text(
+                        """
+                        SELECT run_id, status, source_artifact_ref, source_artifact_sha256,
+                               target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
+                               plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
+                               implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
+                               product_specification_artifact_ref, product_specification_artifact_sha256,
+                               product_specification_revision, selected_product_specification_artifact_ref,
+                               selected_product_specification_artifact_sha256, selected_product_specification_revision
+                        FROM supervisor_runs WHERE run_id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
+                current = existing.mappings().one_or_none()
+                if (
+                    current is not None
+                    and current["selected_product_specification_revision"] == revision
+                    and current["selected_product_specification_artifact_sha256"] == artifact_sha256
+                ):
+                    return _planning_run_record(current)
+                raise ValueError("planning run is not eligible to select this product specification")
+            artifact = ArtifactReference(
+                ref=row["selected_product_specification_artifact_ref"],
+                sha256=row["selected_product_specification_artifact_sha256"],
+            )
+            await self._append_coordination_event(
+                connection,
+                run_id=run_id,
+                event_type="product_specification_selected",
+                artifact=artifact,
+            )
         return _planning_run_record(row)
 
     async def attach_product_specification_draft(
@@ -1106,7 +1193,8 @@ class PostgresSupervisorStore:
                               plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
                               implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                               product_specification_artifact_ref, product_specification_artifact_sha256,
-                              product_specification_revision
+                              product_specification_revision, selected_product_specification_artifact_ref,
+                              selected_product_specification_artifact_sha256, selected_product_specification_revision
                     """
                 ),
                 {
@@ -1172,7 +1260,8 @@ class PostgresSupervisorStore:
                               plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
                               implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                               product_specification_artifact_ref, product_specification_artifact_sha256,
-                              product_specification_revision
+                              product_specification_revision, selected_product_specification_artifact_ref,
+                              selected_product_specification_artifact_sha256, selected_product_specification_revision
                     """
                 ),
                 {
@@ -2035,7 +2124,8 @@ class PostgresSupervisorStore:
                            plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
                            implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                            product_specification_artifact_ref, product_specification_artifact_sha256,
-                           product_specification_revision
+                           product_specification_revision, selected_product_specification_artifact_ref,
+                           selected_product_specification_artifact_sha256, selected_product_specification_revision
                     FROM supervisor_runs
                     ORDER BY submitted_at DESC LIMIT :limit
                     """
@@ -2057,7 +2147,8 @@ class PostgresSupervisorStore:
                            plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
                            implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                            product_specification_artifact_ref, product_specification_artifact_sha256,
-                           product_specification_revision
+                           product_specification_revision, selected_product_specification_artifact_ref,
+                           selected_product_specification_artifact_sha256, selected_product_specification_revision
                     FROM supervisor_runs
                     WHERE status IN ('implementing', 'finalizing') AND active_workflow_id IS NOT NULL
                     ORDER BY submitted_at
@@ -2169,7 +2260,8 @@ class PostgresSupervisorStore:
                            plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
                            implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                            product_specification_artifact_ref, product_specification_artifact_sha256,
-                           product_specification_revision
+                           product_specification_revision, selected_product_specification_artifact_ref,
+                           selected_product_specification_artifact_sha256, selected_product_specification_revision
                     FROM supervisor_runs
                     WHERE project_id = ANY(CAST(:project_ids AS text[]))
                     ORDER BY submitted_at DESC LIMIT :limit

@@ -38,6 +38,8 @@ from .models import (
     PlanApprovalDecision,
     PlanApprovalRequest,
     PlanApprovalResponse,
+    ProductSpecification,
+    ProductSpecificationSelectionRequest,
     PlanningRunResponse,
     PlanningRunStatus,
     PlanningRunSubmission,
@@ -470,6 +472,8 @@ def create_app(
             source_artifact=record.source_artifact,
             product_specification_artifact=record.product_specification_artifact,
             product_specification_revision=record.product_specification_revision,
+            selected_product_specification_artifact=record.selected_product_specification_artifact,
+            selected_product_specification_revision=record.selected_product_specification_revision,
             plan_artifact=record.plan_artifact,
             implementation_artifact=record.implementation_artifact,
             submitted_at=record.submitted_at,
@@ -540,6 +544,8 @@ def create_app(
             source_artifact=updated.source_artifact,
             product_specification_artifact=updated.product_specification_artifact,
             product_specification_revision=updated.product_specification_revision,
+            selected_product_specification_artifact=updated.selected_product_specification_artifact,
+            selected_product_specification_revision=updated.selected_product_specification_revision,
             plan_artifact=updated.plan_artifact,
             implementation_artifact=updated.implementation_artifact,
             submitted_at=updated.submitted_at,
@@ -563,6 +569,11 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
         require_workbench_scope(record, principal)
         if record.status is PlanningRunStatus.PLANNING:
+            if record.selected_product_specification_artifact is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="an explicitly selected product specification is required before plan generation",
+                )
             try:
                 planner_resolution = (
                     await resolve_roles(run_id, ["planner"], record.project_id or settings.workbench_default_project_id)
@@ -573,8 +584,17 @@ def create_app(
             except (RegistryAuthorizationError, RegistryConflictError) as error:
                 raise HTTPException(status_code=503, detail="planner registry grant is unavailable") from error
             try:
-                initial_specification = store.get_source_specification(record.source_artifact.ref)
-            except PlanStoreUnavailableError as error:
+                specification_bytes = store.get_verified_artifact(
+                    record.selected_product_specification_artifact, max_bytes=1_000_000
+                )
+                selected_specification = ProductSpecification.model_validate_json(specification_bytes)
+                initial_specification = json.dumps(
+                    selected_specification.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+            except (PlanStoreUnavailableError, ValueError) as error:
                 raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
             try:
                 generated_plan = await planner.generate(
@@ -662,6 +682,45 @@ def create_app(
             source_artifact=updated.source_artifact,
             product_specification_artifact=updated.product_specification_artifact,
             product_specification_revision=updated.product_specification_revision,
+            selected_product_specification_artifact=updated.selected_product_specification_artifact,
+            selected_product_specification_revision=updated.selected_product_specification_revision,
+            plan_artifact=updated.plan_artifact,
+            implementation_artifact=updated.implementation_artifact,
+            submitted_at=updated.submitted_at,
+        )
+        return JSONResponse(content=response.model_dump(mode="json"))
+
+    @app.post("/api/v1/planning-runs/{run_id}/select-product-specification")
+    async def select_product_specification(
+        run_id: str,
+        request_body: ProductSpecificationSelectionRequest,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """Bind a reviewed immutable product specification before any plan can be generated."""
+
+        if not idempotency_key or len(idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        try:
+            updated = await supervisor_store.select_product_specification(
+                run_id, request_body.revision, request_body.artifact_sha256
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail="product specification selection is stale or invalid") from error
+        response = PlanningRunResponse(
+            run_id=updated.run_id,
+            status=updated.status,
+            source_artifact=updated.source_artifact,
+            product_specification_artifact=updated.product_specification_artifact,
+            product_specification_revision=updated.product_specification_revision,
+            selected_product_specification_artifact=updated.selected_product_specification_artifact,
+            selected_product_specification_revision=updated.selected_product_specification_revision,
             plan_artifact=updated.plan_artifact,
             implementation_artifact=updated.implementation_artifact,
             submitted_at=updated.submitted_at,
@@ -811,6 +870,8 @@ def create_app(
             source_artifact=record.source_artifact,
             product_specification_artifact=record.product_specification_artifact,
             product_specification_revision=record.product_specification_revision,
+            selected_product_specification_artifact=record.selected_product_specification_artifact,
+            selected_product_specification_revision=record.selected_product_specification_revision,
             plan_artifact=record.plan_artifact,
             implementation_artifact=record.implementation_artifact,
             submitted_at=record.submitted_at,
