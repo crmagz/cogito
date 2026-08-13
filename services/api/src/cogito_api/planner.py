@@ -54,6 +54,10 @@ class Planner(Protocol):
 
     async def generate(self, context: PlanningContext, gateway: AgentGatewayResolution) -> AiPlan: ...
 
+    async def generate_product_specification(
+        self, context: ProductSpecificationContext, gateway: AgentGatewayResolution
+    ) -> ProductSpecification: ...
+
 
 class ProductSpecificationRefiner(Protocol):
     """Produces an evidence-labelled product specification without tool authority."""
