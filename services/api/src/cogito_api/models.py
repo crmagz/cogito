@@ -1115,6 +1115,7 @@ class WorkbenchFeedbackStage(StrEnum):
     """Current server-owned stages eligible for immutable review context."""
 
     SPECIFICATION = "specification"
+    PRODUCT_SPECIFICATION = "product_specification"
     PLANNING = "planning"
     PLAN_APPROVAL = "plan_approval"
     IMPLEMENTATION = "implementation"

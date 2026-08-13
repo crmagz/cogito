@@ -404,6 +404,7 @@ class InMemorySupervisorStore:
             return existing
         expected_artifact = {
             "specification": run.source_artifact if run is not None else None,
+            "product_specification": run.product_specification_artifact if run is not None else None,
             "planning": run.plan_artifact if run is not None else None,
             "plan_approval": run.plan_artifact if run is not None else None,
             "implementation": run.implementation_artifact if run is not None else None,

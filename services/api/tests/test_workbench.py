@@ -13,6 +13,7 @@ from cogito_api.models import AiPlan, PlanningRunStatus
 from .conftest import make_settings
 from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
 from .test_approvals import _awaiting_plan
+from .test_planning_runs import _planning_request
 
 
 def _headers(key: str = "workbench-action") -> dict[str, str]:
@@ -301,6 +302,27 @@ def test_workbench_feedback_is_digest_bound_idempotent_and_non_executable(client
         headers=_headers("feedback-invalid-stage"),
     )
     assert invalid_stage.status_code == 422
+
+
+def test_workbench_feedback_accepts_product_specification_review_context(client, valid_plan, supervisor_store) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+    supervisor_store.planning_runs[run_id] = replace(supervisor_store.planning_runs[run_id], project_id="default")
+
+    response = client.post(
+        f"/api/v1/workbench/runs/{run_id}/feedback",
+        json={
+            "intent": "note",
+            "artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            "stage_id": "product_specification",
+            "comment": "Clarify the acceptance criteria before selection.",
+        },
+        headers=_headers("product-specification-feedback"),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["stage_id"] == "product_specification"
 
 
 def test_workbench_feedback_accepts_a_512_character_oidc_subject(valid_plan) -> None:
