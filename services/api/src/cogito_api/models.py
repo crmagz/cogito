@@ -235,6 +235,34 @@ class ProductSpecification(BaseModel):
             raise ValueError("product specification exceeds the 96 KiB evidence limit")
         return self
 
+    def validate_source_segment_ids(self, known_source_segment_ids: set[str]) -> None:
+        """Reject source claims that do not belong to this run's immutable intake."""
+
+        statements = [
+            self.title,
+            self.problem_statement,
+            *self.desired_outcomes,
+            *self.actors,
+            *self.in_scope,
+            *self.out_of_scope,
+            *self.functional_requirements,
+            *self.non_functional_requirements,
+            *self.acceptance_criteria,
+            *self.assumptions,
+            *self.risks,
+            *self.unresolved_questions,
+        ]
+        invalid_statement_ids = [
+            statement.id
+            for statement in statements
+            if not set(statement.source_segment_ids).issubset(known_source_segment_ids)
+        ]
+        if invalid_statement_ids:
+            raise ValueError(
+                "product specification cited unknown source segments: "
+                + ", ".join(sorted(invalid_statement_ids))
+            )
+
 
 class RunSubmission(BaseModel):
     plan: AiPlan

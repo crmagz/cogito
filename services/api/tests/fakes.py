@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from cogito_api.models import (
     AgentGatewayPolicy,
@@ -139,6 +139,8 @@ class InMemorySupervisorStore:
     def __init__(self) -> None:
         self.planning_runs: dict[str, PlanningRunRecord] = {}
         self.product_specification_generation_claims: dict[str, str] = {}
+        self.product_specification_generation_claimed_at: dict[str, datetime] = {}
+        self.plan_product_specification_bindings: dict[tuple[str, int], tuple[int, ArtifactReference]] = {}
         self.approvals: dict[tuple[str, int, str], ApprovalRecord] = {}
         self.approval_request_hashes: dict[tuple[str, int, str], str] = {}
         self.outbox: dict[str, OutboxDelivery] = {}
@@ -364,20 +366,32 @@ class InMemorySupervisorStore:
         )
         self.planning_runs[run_id] = updated
         self.product_specification_generation_claims.pop(run_id, None)
+        self.product_specification_generation_claimed_at.pop(run_id, None)
         self._append_coordination_event(run_id, "product_specification_draft_created", artifact=artifact)
         return updated
 
     async def claim_product_specification_generation(self, run_id: str) -> str | None:
         record = self.planning_runs[run_id]
-        if record.status is not PlanningRunStatus.PLANNING or record.product_specification_artifact is not None or run_id in self.product_specification_generation_claims:
+        claimed_at = self.product_specification_generation_claimed_at.get(run_id)
+        if (
+            record.status is not PlanningRunStatus.PLANNING
+            or record.product_specification_artifact is not None
+            or (
+                claimed_at is not None
+                and claimed_at >= datetime.now(timezone.utc) - timedelta(minutes=15)
+                and run_id in self.product_specification_generation_claims
+            )
+        ):
             return None
         claim = f"claim-{run_id}"
         self.product_specification_generation_claims[run_id] = claim
+        self.product_specification_generation_claimed_at[run_id] = datetime.now(timezone.utc)
         return claim
 
     async def release_product_specification_generation(self, run_id: str, generation_claim: str) -> None:
         if self.product_specification_generation_claims.get(run_id) == generation_claim:
             self.product_specification_generation_claims.pop(run_id, None)
+            self.product_specification_generation_claimed_at.pop(run_id, None)
 
     async def select_product_specification(
         self, run_id: str, revision: int, artifact_sha256: str, actor_id: str, idempotency_key: str, request_sha256: str
@@ -480,9 +494,22 @@ class InMemorySupervisorStore:
         planner_model: str,
         workflow_id: str,
         expected_plan_revision: int,
+        expected_product_specification_revision: int | None = None,
+        expected_product_specification_sha256: str | None = None,
     ) -> PlanningRunRecord:
         record = self.planning_runs[run_id]
-        if record.status.value != "planning" or record.plan_revision != expected_plan_revision:
+        if (
+            record.status.value != "planning"
+            or record.plan_revision != expected_plan_revision
+            or (
+                expected_product_specification_revision is not None
+                and (
+                    record.selected_product_specification_revision != expected_product_specification_revision
+                    or record.selected_product_specification_artifact is None
+                    or record.selected_product_specification_artifact.sha256 != expected_product_specification_sha256
+                )
+            )
+        ):
             raise ValueError("planning run is not eligible to accept a generated plan")
         updated = PlanningRunRecord(
             run_id=record.run_id,
@@ -505,6 +532,11 @@ class InMemorySupervisorStore:
             selected_product_specification_revision=record.selected_product_specification_revision,
         )
         self.planning_runs[run_id] = updated
+        if expected_product_specification_revision is not None and record.selected_product_specification_artifact is not None:
+            self.plan_product_specification_bindings[(run_id, updated.plan_revision)] = (
+                expected_product_specification_revision,
+                record.selected_product_specification_artifact,
+            )
         self._append_coordination_event(
             run_id,
             "plan_approval_requested",

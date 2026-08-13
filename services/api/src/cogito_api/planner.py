@@ -234,31 +234,10 @@ def _validate_product_specification(
 ) -> None:
     """Reject product claims that cite an intake segment outside the trusted envelope."""
 
-    known_source_segments = set(context.source_segment_ids)
-    statements = [
-        specification.title,
-        specification.problem_statement,
-        *specification.desired_outcomes,
-        *specification.actors,
-        *specification.in_scope,
-        *specification.out_of_scope,
-        *specification.functional_requirements,
-        *specification.non_functional_requirements,
-        *specification.acceptance_criteria,
-        *specification.assumptions,
-        *specification.risks,
-        *specification.unresolved_questions,
-    ]
-    invalid_statements = [
-        statement.id
-        for statement in statements
-        if not set(statement.source_segment_ids).issubset(known_source_segments)
-    ]
-    if invalid_statements:
-        raise PlannerError(
-            "LiteLLM planner product specification cited unknown source segments: "
-            + ", ".join(sorted(invalid_statements))
-        )
+    try:
+        specification.validate_source_segment_ids(set(context.source_segment_ids))
+    except ValueError as error:
+        raise PlannerError(f"LiteLLM planner {error}") from error
 
 
 def _strip_json_fence(content: str) -> str:
