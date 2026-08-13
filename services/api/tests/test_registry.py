@@ -49,7 +49,14 @@ def test_component_catalog_is_complete_and_versioned() -> None:
         "github_readonly_mcp",
     }
     assert all(
-        item.version == ("1.0.1" if item.registration_id == "cogito_readonly_mcp" else "1.0.0")
+        item.version
+        == (
+            "1.1.0"
+            if item.registration_id == "planner"
+            else "1.0.1"
+            if item.registration_id == "cogito_readonly_mcp"
+            else "1.0.0"
+        )
         for item in catalog.components
     )
     assert all(
@@ -75,6 +82,9 @@ def test_agent_gateway_policy_selects_a_project_scoped_route_for_each_registered
     policy = load_agent_gateway_policy(_catalog_root(), catalog)
 
     assert policy.policy_revision == "agent_gateway_initial"
+    planner = next(binding for binding in policy.bindings if binding.role == "planner")
+    assert planner.registration_version == "1.1.0"
+    assert planner.toolset == "planning-readonly"
     developer = next(binding for binding in policy.bindings if binding.role == "developer")
     assert developer.registration_id == "developer"
     assert developer.model_alias == "complex"
@@ -152,10 +162,12 @@ def test_manifest_identity_is_canonical_and_role_reference_is_audit_safe() -> No
     reference = registration_reference("planner", manifest)
 
     assert reference.registration_id == "planner"
-    assert reference.version == "1.0.0"
+    assert reference.version == "1.1.0"
     assert reference.component_id == "planner"
     assert reference.manifest_sha256 == manifest_sha256(manifest)
     require_tool(reference, "planning_model", "plan_generation")
+    assert manifest.capabilities == ["generate_plan", "generate_product_specification"]
+    assert [(grant.tool_id, grant.scope) for grant in reference.grants] == [("planning_model", "plan_generation")]
 
 
 def test_non_mcp_manifest_identity_remains_compatible_with_registered_releases() -> None:
@@ -163,7 +175,7 @@ def test_non_mcp_manifest_identity_remains_compatible_with_registered_releases()
     planner = next(item for item in catalog.components if item.registration_id == "planner")
     planning_model = next(item for item in catalog.components if item.registration_id == "planning_model")
 
-    assert manifest_sha256(planner) == "bfad6b69affded9f48a63c049c66f120e09ce281c0f96b122cac7c59c639059a"
+    assert manifest_sha256(planner) == "e126d41f423db7351f5859e68e6692eff02d44e0372db5bcad1400257cc37278"
     assert manifest_sha256(planning_model) == "e26a3b427c07ef786885344de24481187b1f2a6a6dd51dffdd4fe196c5245cc6"
 
 
@@ -194,7 +206,7 @@ async def test_run_resolution_pins_the_policy_selected_release() -> None:
     planner = next(item for item in manifests if item.registration_id == "planner")
     store = InMemorySupervisorStore()
 
-    await store.bootstrap_registry(manifests, "phase12_initial", {"planner": "planner@1.0.0"})
+    await store.bootstrap_registry(manifests, "phase12_initial", {"planner": "planner@1.1.0"})
     first = await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
     repeated = await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
 
@@ -244,7 +256,7 @@ async def test_agent_gateway_route_rejects_a_project_without_a_binding() -> None
     planner = next(item for item in manifests if item.registration_id == "planner")
     store = InMemorySupervisorStore()
 
-    await store.bootstrap_registry(manifests, "phase12_initial", {"planner": "planner@1.0.0"})
+    await store.bootstrap_registry(manifests, "phase12_initial", {"planner": "planner@1.1.0"})
     await store.bootstrap_agent_gateway_policy(policy)
     registration = await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
 
@@ -337,7 +349,7 @@ async def test_postgres_resolution_converges_when_a_concurrent_insert_wins() -> 
                     }
                 )
             if "FROM registry_policy_revisions" in query:
-                return Result({"assignments": {"planner": "planner@1.0.0"}})
+                return Result({"assignments": {"planner": "planner@1.1.0"}})
             if "FROM registry_registrations" in query:
                 return Result(
                     {

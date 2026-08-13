@@ -80,6 +80,151 @@ class AiPlan(BaseModel):
     )
 
 
+class ProductSpecificationStatementKind(StrEnum):
+    """Whether a product-specification statement is sourced or explicitly uncertain."""
+
+    SOURCE = "source"
+    ASSUMPTION = "assumption"
+    QUESTION = "question"
+
+
+class ProductSpecificationStatement(BaseModel):
+    """One traceable statement in a structured product specification."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_-]{0,127}$",
+        description="Stable statement identifier within this immutable specification",
+    )
+    text: str = Field(
+        min_length=1,
+        max_length=10_000,
+        description="Bounded product statement, requirement, criterion, assumption, risk, or question",
+    )
+    kind: ProductSpecificationStatementKind = Field(
+        description="Whether the statement is grounded in intake, an assumption, or an unresolved question",
+    )
+    source_segment_ids: list[str] = Field(
+        default_factory=list,
+        max_length=32,
+        description="Explicit immutable intake segments supporting a source-grounded statement",
+    )
+
+    @model_validator(mode="after")
+    def validate_provenance(self) -> "ProductSpecificationStatement":
+        """Require source references only for claims grounded in the immutable intake."""
+
+        if len(set(self.source_segment_ids)) != len(self.source_segment_ids):
+            raise ValueError("product specification source segment IDs must be unique")
+        if self.kind is ProductSpecificationStatementKind.SOURCE and not self.source_segment_ids:
+            raise ValueError("source-grounded product specification statements require a source segment")
+        if self.kind is not ProductSpecificationStatementKind.SOURCE and self.source_segment_ids:
+            raise ValueError("assumptions and questions cannot claim source segments")
+        return self
+
+
+class ProductSpecification(BaseModel):
+    """Strict, evidence-labelled product contract produced before implementation planning."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: ProductSpecificationStatement = Field(description="Traceable concise name for the proposed outcome")
+    problem_statement: ProductSpecificationStatement = Field(description="Traceable problem to solve")
+    desired_outcomes: list[ProductSpecificationStatement] = Field(
+        min_length=1,
+        max_length=64,
+        description="Traceable expected product outcomes",
+    )
+    actors: list[ProductSpecificationStatement] = Field(
+        min_length=1,
+        max_length=64,
+        description="Traceable affected users or systems",
+    )
+    in_scope: list[ProductSpecificationStatement] = Field(
+        min_length=1,
+        max_length=128,
+        description="Traceable work included in the proposed feature",
+    )
+    out_of_scope: list[ProductSpecificationStatement] = Field(
+        min_length=1,
+        max_length=128,
+        description="Traceable work deliberately excluded from the proposed feature",
+    )
+    functional_requirements: list[ProductSpecificationStatement] = Field(
+        min_length=1,
+        max_length=256,
+        description="Traceable functional requirements for the future implementation plan",
+    )
+    non_functional_requirements: list[ProductSpecificationStatement] = Field(
+        default_factory=list,
+        max_length=256,
+        description="Traceable quality, security, performance, or operability requirements",
+    )
+    acceptance_criteria: list[ProductSpecificationStatement] = Field(
+        min_length=1,
+        max_length=256,
+        description="Traceable observable conditions required for feature acceptance",
+    )
+    assumptions: list[ProductSpecificationStatement] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Explicit assumptions requiring later human confirmation",
+    )
+    risks: list[ProductSpecificationStatement] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Traceable risks or explicitly assumed risks",
+    )
+    unresolved_questions: list[ProductSpecificationStatement] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Explicit questions that must not be treated as settled requirements",
+    )
+
+    @model_validator(mode="after")
+    def validate_statement_kinds(self) -> "ProductSpecification":
+        """Keep uncertain material visibly separate from claimed requirements."""
+
+        statements = [
+            self.title,
+            self.problem_statement,
+            *self.desired_outcomes,
+            *self.actors,
+            *self.in_scope,
+            *self.out_of_scope,
+            *self.functional_requirements,
+            *self.non_functional_requirements,
+            *self.acceptance_criteria,
+            *self.assumptions,
+            *self.risks,
+            *self.unresolved_questions,
+        ]
+        if len({statement.id for statement in statements}) != len(statements):
+            raise ValueError("product specification statement IDs must be unique")
+        factual = [
+            self.title,
+            self.problem_statement,
+            *self.desired_outcomes,
+            *self.actors,
+            *self.in_scope,
+            *self.out_of_scope,
+            *self.functional_requirements,
+            *self.non_functional_requirements,
+            *self.acceptance_criteria,
+            *self.risks,
+        ]
+        if any(statement.kind is ProductSpecificationStatementKind.QUESTION for statement in factual):
+            raise ValueError("product requirements and risks cannot be unresolved questions")
+        if any(statement.kind is not ProductSpecificationStatementKind.ASSUMPTION for statement in self.assumptions):
+            raise ValueError("product specification assumptions must be labelled assumptions")
+        if any(statement.kind is not ProductSpecificationStatementKind.QUESTION for statement in self.unresolved_questions):
+            raise ValueError("product specification unresolved questions must be labelled questions")
+        return self
+
+
 class RunSubmission(BaseModel):
     plan: AiPlan
     dry_run: bool = Field(
