@@ -2021,7 +2021,9 @@ class PostgresSupervisorStore:
             run_result = await connection.execute(
                 text(
                     """
-                    SELECT source_artifact_ref, source_artifact_sha256, plan_artifact_ref, plan_artifact_sha256,
+                    SELECT source_artifact_ref, source_artifact_sha256,
+                           product_specification_artifact_ref, product_specification_artifact_sha256,
+                           plan_artifact_ref, plan_artifact_sha256,
                            implementation_artifact_ref, implementation_artifact_sha256
                     FROM supervisor_runs WHERE run_id = :run_id FOR UPDATE
                     """
@@ -2042,6 +2044,10 @@ class PostgresSupervisorStore:
                 return _workbench_feedback_record(existing)
             expected_artifact = {
                 "specification": (run["source_artifact_ref"], run["source_artifact_sha256"]),
+                "product_specification": (
+                    run["product_specification_artifact_ref"],
+                    run["product_specification_artifact_sha256"],
+                ),
                 "planning": (run["plan_artifact_ref"], run["plan_artifact_sha256"]),
                 "plan_approval": (run["plan_artifact_ref"], run["plan_artifact_sha256"]),
                 "implementation": (run["implementation_artifact_ref"], run["implementation_artifact_sha256"]),
