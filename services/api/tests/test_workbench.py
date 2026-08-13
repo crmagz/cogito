@@ -487,6 +487,7 @@ def test_workbench_stage_projection_is_typed_and_never_copies_terminal_run_state
         ("plan_approval", "implementation"),
         ("implementation", "implementation_approval"),
     ]
+    assert response.json()["workflow"] == ["specification", "product_specification", "planning"]
 
 
 def test_workbench_stage_projection_attributes_rejections_only_when_artifacts_prove_the_gate(
