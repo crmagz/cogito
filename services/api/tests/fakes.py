@@ -12,6 +12,7 @@ from cogito_api.models import (
     ImplementationApprovalDecision,
     PlanApprovalDecision,
     PlanningRunStatus,
+    ProductSpecification,
     McpBindingPolicy,
     McpToolGrant,
     McpToolSelection,
@@ -21,8 +22,13 @@ from cogito_api.models import (
     WorkbenchFeedbackIntent,
 )
 from cogito_api.registry import manifest_sha256, registration_reference
-from cogito_api.planner import PlanningContext
-from cogito_api.storage import PlanSnapshot, plan_snapshot_bytes, source_specification_bytes
+from cogito_api.planner import PlanningContext, ProductSpecificationContext
+from cogito_api.storage import (
+    PlanSnapshot,
+    plan_snapshot_bytes,
+    product_specification_bytes,
+    source_specification_bytes,
+)
 from cogito_api.supervisor import (
     AgentRunRecord,
     ApprovalConflictError,
@@ -44,6 +50,7 @@ class InMemoryPlanStore:
         self.plans: dict[str, AiPlan] = {}
         self.statuses: dict[str, dict] = {}
         self.source_specifications: dict[str, str] = {}
+        self.product_specifications: dict[tuple[str, int], ProductSpecification] = {}
         self.artifacts: dict[str, bytes] = {}
 
     def put_plan(self, run_id: str, plan: AiPlan) -> PlanSnapshot:
@@ -80,6 +87,19 @@ class InMemoryPlanStore:
             sha256=sha256(source_specification_bytes(initial_specification)).hexdigest(),
         )
 
+    def put_product_specification(
+        self, run_id: str, revision: int, specification: ProductSpecification
+    ) -> ArtifactReference:
+        from hashlib import sha256
+
+        self.product_specifications[(run_id, revision)] = specification
+        data = product_specification_bytes(specification)
+        digest = sha256(data).hexdigest()
+        return ArtifactReference(
+            ref=f"s3://plan-snapshots/runs/{run_id}/product-specifications/{revision}/{digest}/specification.json",
+            sha256=digest,
+        )
+
     def put_artifact(self, ref: str, content: bytes) -> ArtifactReference:
         """Store a test-only immutable artifact with its matching digest."""
 
@@ -98,6 +118,11 @@ class InMemoryPlanStore:
         elif "/source-spec.json" in artifact.ref:
             run_id = artifact.ref.split("/")[4]
             body = source_specification_bytes(self.source_specifications[run_id])
+        elif "/product-specifications/" in artifact.ref:
+            parts = artifact.ref.split("/")
+            run_id = parts[4]
+            revision = int(parts[6])
+            body = product_specification_bytes(self.product_specifications[(run_id, revision)])
         else:
             run_id = artifact.ref.split("/")[4]
             body = plan_snapshot_bytes(self.plans[run_id])
@@ -311,6 +336,31 @@ class InMemorySupervisorStore:
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         return self.planning_runs.get(run_id)
+
+    async def attach_product_specification_draft(
+        self,
+        run_id: str,
+        artifact: ArtifactReference,
+        planner_model: str,
+        expected_product_specification_revision: int,
+    ) -> PlanningRunRecord:
+        del planner_model
+        record = self.planning_runs[run_id]
+        if (
+            record.status is not PlanningRunStatus.PLANNING
+            or record.product_specification_revision != expected_product_specification_revision
+        ):
+            raise ValueError("planning run is not eligible to accept a product specification draft")
+        updated = PlanningRunRecord(
+            **{
+                **record.__dict__,
+                "product_specification_artifact": artifact,
+                "product_specification_revision": record.product_specification_revision + 1,
+            }
+        )
+        self.planning_runs[run_id] = updated
+        self._append_coordination_event(run_id, "product_specification_draft_created", artifact=artifact)
+        return updated
 
     async def record_workbench_feedback(
         self, *, run_id: str, intent: WorkbenchFeedbackIntent, artifact_sha256: str, stage_id: str,
@@ -833,15 +883,26 @@ class InMemorySupervisorStore:
 
 
 class FakePlanner:
-    def __init__(self, plan: AiPlan) -> None:
+    def __init__(self, plan: AiPlan, product_specification: ProductSpecification | None = None) -> None:
         self.plan = plan
+        self.product_specification = product_specification
         self.contexts: list[PlanningContext] = []
         self.gateways: list[AgentGatewayResolution] = []
+        self.product_specification_contexts: list[ProductSpecificationContext] = []
 
     async def generate(self, context: PlanningContext, gateway: AgentGatewayResolution) -> AiPlan:
         self.contexts.append(context)
         self.gateways.append(gateway)
         return self.plan
+
+    async def generate_product_specification(
+        self, context: ProductSpecificationContext, gateway: AgentGatewayResolution
+    ) -> ProductSpecification:
+        if self.product_specification is None:
+            raise RuntimeError("fake product specification is not configured")
+        self.product_specification_contexts.append(context)
+        self.gateways.append(gateway)
+        return self.product_specification
 
 
 class FakeRunStarter:

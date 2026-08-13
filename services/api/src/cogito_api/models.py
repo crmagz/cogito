@@ -716,6 +716,15 @@ class PlanningRunResponse(BaseModel):
     run_id: str = Field(description="Stable planning run identifier")
     status: PlanningRunStatus = Field(description="Authoritative initial lifecycle state")
     source_artifact: ArtifactReference = Field(description="Immutable submitted specification")
+    product_specification_artifact: ArtifactReference | None = Field(
+        default=None,
+        description="Latest immutable structured product specification draft when available",
+    )
+    product_specification_revision: int = Field(
+        default=0,
+        ge=0,
+        description="Latest immutable product specification draft revision",
+    )
     plan_artifact: ArtifactReference | None = Field(
         default=None, description="Immutable generated plan when planning has completed"
     )

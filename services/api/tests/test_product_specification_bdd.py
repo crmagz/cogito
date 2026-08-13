@@ -8,11 +8,14 @@ import json
 import httpx
 import pytest
 from pytest_bdd import given, scenarios, then, when
+from fastapi.testclient import TestClient
 
 from cogito_api.models import AgentGatewayResolution
 from cogito_api.planner import LiteLLMPlanner, ProductSpecificationContext
 
 from .conftest import make_settings
+from .fakes import FakePlanner
+from .test_planning_runs import _planning_request
 
 scenarios("features/product_specification.feature")
 
@@ -106,3 +109,49 @@ def planner_request_has_no_tool_or_repository_authority(refinement_context: dict
     assert "tool" not in payload
     assert "target_repositories" not in payload
     assert "cannot access repositories" in payload["messages"][0]["content"]
+
+
+@given("a planning intake awaiting a product specification draft")
+def planning_intake_awaiting_draft(
+    refinement_context: dict[str, object], client: TestClient, valid_plan: dict
+) -> None:
+    """Create one authentic planning run through the public API boundary."""
+
+    response = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    assert response.status_code == 202
+    refinement_context["run_id"] = response.json()["run_id"]
+
+
+@when("the authorized operator generates the product specification draft")
+def authorized_operator_generates_draft(refinement_context: dict[str, object], client: TestClient) -> None:
+    """Generate the draft as the scoped test operator."""
+
+    refinement_context["draft_response"] = client.post(
+        f"/api/v1/planning-runs/{refinement_context['run_id']}/generate-product-specification"
+    )
+
+
+@then("the planning run exposes its immutable product specification draft")
+def planning_run_exposes_immutable_draft(refinement_context: dict[str, object]) -> None:
+    """The draft response carries a digest and revision, never an object-store credential."""
+
+    response = refinement_context["draft_response"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["product_specification_revision"] == 1
+    assert body["product_specification_artifact"]["ref"].startswith("s3://plan-snapshots/runs/")
+    refinement_context["artifact"] = body["product_specification_artifact"]
+
+
+@then("retrying the draft generation returns the existing draft")
+def retrying_draft_generation_returns_existing_draft(
+    refinement_context: dict[str, object], client: TestClient, planner: FakePlanner
+) -> None:
+    """A transport retry observes the pinned draft instead of requesting a second model result."""
+
+    response = client.post(
+        f"/api/v1/planning-runs/{refinement_context['run_id']}/generate-product-specification"
+    )
+    assert response.status_code == 200
+    assert response.json()["product_specification_artifact"] == refinement_context["artifact"]
+    assert len(planner.product_specification_contexts) == 1

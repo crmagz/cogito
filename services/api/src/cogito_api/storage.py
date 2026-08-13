@@ -12,7 +12,7 @@ from minio import Minio
 from minio.error import S3Error
 from minio.retention import COMPLIANCE, Retention
 
-from .models import AiPlan, ArtifactReference
+from .models import AiPlan, ArtifactReference, ProductSpecification
 
 
 class PlanStoreUnavailableError(RuntimeError):
@@ -29,6 +29,10 @@ class PlanStore(Protocol):
     def get_status(self, run_id: str) -> dict | None: ...
 
     def put_source_specification(self, run_id: str, initial_specification: str) -> ArtifactReference: ...
+
+    def put_product_specification(
+        self, run_id: str, revision: int, specification: ProductSpecification
+    ) -> ArtifactReference: ...
 
     def get_source_specification(self, source_artifact_ref: str) -> str: ...
 
@@ -59,6 +63,14 @@ def source_specification_bytes(initial_specification: str) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
+    ).encode()
+
+
+def product_specification_bytes(specification: ProductSpecification) -> bytes:
+    """Serialize a structured product specification deterministically for immutable storage."""
+
+    return json.dumps(
+        specification.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode()
 
 
@@ -103,6 +115,19 @@ class MinioPlanStore:
             ref=f"s3://{self._plan_snapshots_bucket}/runs/{run_id}/source-spec.json",
             sha256=sha256(data).hexdigest(),
         )
+
+    def put_product_specification(
+        self, run_id: str, revision: int, specification: ProductSpecification
+    ) -> ArtifactReference:
+        """Store one content-addressed product specification draft without overwriting another revision."""
+
+        if revision < 1:
+            raise ValueError("product specification revision must be positive")
+        data = product_specification_bytes(specification)
+        digest = sha256(data).hexdigest()
+        object_name = f"runs/{run_id}/product-specifications/{revision}/{digest}/specification.json"
+        self._put_snapshot(object_name, data)
+        return ArtifactReference(ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=digest)
 
     def get_source_specification(self, source_artifact_ref: str) -> str:
         """Load and validate a source artifact from the configured immutable bucket."""

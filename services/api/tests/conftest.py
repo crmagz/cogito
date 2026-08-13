@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cogito_api.config import Settings
-from cogito_api.models import AiPlan
+from cogito_api.models import AiPlan, ProductSpecification
 from cogito_api.main import create_app
 
 from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
@@ -87,8 +87,35 @@ def supervisor_store() -> InMemorySupervisorStore:
 
 
 @pytest.fixture
-def planner(valid_plan: dict) -> FakePlanner:
-    return FakePlanner(AiPlan.model_validate(valid_plan))
+def valid_product_specification() -> dict:
+    """Return a source-grounded product specification accepted by the planner draft contract."""
+
+    def source(statement_id: str, text: str) -> dict:
+        return {"id": statement_id, "text": text, "kind": "source", "source_segment_ids": ["source-1"]}
+
+    return {
+        "title": source("title", "Rate limiting"),
+        "problem_statement": source("problem", "The API needs bounded request rates."),
+        "desired_outcomes": [source("outcome-1", "Protect API endpoints from abuse.")],
+        "actors": [source("actor-1", "API consumers")],
+        "in_scope": [source("scope-in-1", "Rate limiting on API endpoints")],
+        "out_of_scope": [source("scope-out-1", "Changing authentication")],
+        "functional_requirements": [source("functional-1", "Enforce a bounded request rate.")],
+        "non_functional_requirements": [],
+        "acceptance_criteria": [source("acceptance-1", "Requests beyond the limit are rejected.")],
+        "assumptions": [
+            {"id": "assumption-1", "text": "A default threshold is acceptable.", "kind": "assumption", "source_segment_ids": []}
+        ],
+        "risks": [source("risk-1", "A low threshold can reject valid traffic.")],
+        "unresolved_questions": [
+            {"id": "question-1", "text": "What threshold should apply?", "kind": "question", "source_segment_ids": []}
+        ],
+    }
+
+
+@pytest.fixture
+def planner(valid_plan: dict, valid_product_specification: dict) -> FakePlanner:
+    return FakePlanner(AiPlan.model_validate(valid_plan), ProductSpecification.model_validate(valid_product_specification))
 
 
 @pytest.fixture

@@ -93,6 +93,45 @@ def test_generate_plan_requires_a_scoped_approver(
     assert planner.contexts == []
 
 
+def test_generate_product_specification_persists_an_immutable_draft(
+    client: TestClient,
+    valid_plan: dict,
+    store: InMemoryPlanStore,
+    supervisor_store: InMemorySupervisorStore,
+    planner: FakePlanner,
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+
+    response = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "planning"
+    assert body["product_specification_revision"] == 1
+    artifact = body["product_specification_artifact"]
+    assert artifact["ref"].endswith(
+        f"runs/{run_id}/product-specifications/1/{artifact['sha256']}/specification.json"
+    )
+    assert store.product_specifications[(run_id, 1)].title.text == "Rate limiting"
+    assert planner.product_specification_contexts[0].initial_specification == _planning_request(valid_plan)["initial_specification"]
+    assert supervisor_store.planning_runs[run_id].product_specification_artifact is not None
+
+
+def test_generate_product_specification_retries_without_generating_a_second_draft(
+    client: TestClient, valid_plan: dict, planner: FakePlanner
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+
+    first = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification")
+    repeated = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification")
+
+    assert first.status_code == repeated.status_code == 200
+    assert first.json()["product_specification_artifact"] == repeated.json()["product_specification_artifact"]
+    assert len(planner.product_specification_contexts) == 1
+
+
 def test_submit_planning_run_rejects_unpinned_repository_without_writing(
     client: TestClient,
     valid_plan: dict,

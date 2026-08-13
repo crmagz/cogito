@@ -6,3 +6,9 @@ Feature: Product specification refinement
     When the planner refines the product intake
     Then the structured draft preserves source provenance and unresolved questions
     And the planner request has no tool or repository authority
+
+  Scenario: An authorized operator retains one immutable product-specification draft
+    Given a planning intake awaiting a product specification draft
+    When the authorized operator generates the product specification draft
+    Then the planning run exposes its immutable product specification draft
+    And retrying the draft generation returns the existing draft
