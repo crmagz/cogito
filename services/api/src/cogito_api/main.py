@@ -51,6 +51,15 @@ from .models import (
     WorkbenchArtifactKind,
     WorkbenchArtifactSummary,
     WorkbenchApprovalSummary,
+    WorkbenchAgentEvidenceState,
+    WorkbenchAgentGatewayRoute,
+    WorkbenchAgentInvocationEvidence,
+    WorkbenchAgentInvocationListResponse,
+    WorkbenchAgentInvocationResponse,
+    WorkbenchAgentInvocationSummary,
+    WorkbenchAgentLifecycleTransition,
+    WorkbenchAgentListResponse,
+    WorkbenchAgentSummary,
     WorkbenchBudgetSummary,
     WorkbenchEvidenceResponse,
     WorkbenchExecutionSummary,
@@ -1017,6 +1026,82 @@ def create_app(
         if record.project_id is None or record.project_id not in principal.projects:
             raise HTTPException(status_code=404, detail="planning run not found")
 
+    def require_workbench_project(project_id: str, principal) -> None:
+        """Require a selected project without revealing unauthorized project inventory."""
+
+        if project_id not in principal.projects:
+            raise HTTPException(status_code=404, detail="Workbench project not found")
+
+    def workbench_agent_route_response(route) -> WorkbenchAgentGatewayRoute:  # type: ignore[no-untyped-def]
+        """Project only the non-secret immutable gateway route facts approved for the Workbench."""
+
+        return WorkbenchAgentGatewayRoute(
+            policy_revision=route.policy_revision,
+            role=route.role,
+            model_alias=route.model_alias,
+            max_budget_usd=route.max_budget_usd,
+            toolset=route.toolset,
+        )
+
+    def workbench_agent_response(record) -> WorkbenchAgentSummary:  # type: ignore[no-untyped-def]
+        """Build a safe agent release response without serializing a registry manifest."""
+
+        return WorkbenchAgentSummary(
+            registration_id=record.registration_id,
+            registration_version=record.registration_version,
+            manifest_sha256=record.manifest_sha256,
+            component_id=record.component_id,
+            component_version=record.component_version,
+            lifecycle=record.lifecycle,
+            maturity=record.maturity,
+            execution_class=record.execution_class,
+            owner=record.owner,
+            capabilities=record.capabilities,
+            gateway_routes=[workbench_agent_route_response(route) for route in record.gateway_routes],
+        )
+
+    def workbench_agent_invocation_summary(record) -> WorkbenchAgentInvocationSummary:  # type: ignore[no-untyped-def]
+        """Expose root-run lifecycle as such, never as an inferred per-role agent outcome."""
+
+        return WorkbenchAgentInvocationSummary(
+            run_id=record.run_id,
+            root_run_id=record.root_run_id,
+            parent_run_id=record.parent_run_id,
+            registration_id=record.registration_id,
+            registration_version=record.registration_version,
+            role=record.role,
+            run_lifecycle_status=record.run_lifecycle_status,
+            workflow_available=record.workflow_available,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            gateway_route=(workbench_agent_route_response(record.gateway_route) if record.gateway_route else None),
+        )
+
+    def workbench_agent_invocation_response(record) -> WorkbenchAgentInvocationResponse:  # type: ignore[no-untyped-def]
+        """Attach only safe pins and status-only lifecycle transitions to an invocation binding."""
+
+        summary = workbench_agent_invocation_summary(record)
+        return WorkbenchAgentInvocationResponse(
+            **summary.model_dump(),
+            mcp_grants=record.mcp_grants,
+            lifecycle_transitions=[
+                WorkbenchAgentLifecycleTransition(
+                    from_status=transition.from_status,
+                    to_status=transition.to_status,
+                    occurred_at=transition.occurred_at,
+                )
+                for transition in record.lifecycle_transitions
+            ],
+            evidence=WorkbenchAgentInvocationEvidence(
+                lifecycle=WorkbenchAgentEvidenceState.AVAILABLE,
+                actual_cost=WorkbenchAgentEvidenceState.UNAVAILABLE,
+                turns_used=WorkbenchAgentEvidenceState.UNAVAILABLE,
+                result_artifact=WorkbenchAgentEvidenceState.REDACTED,
+                failure_detail=WorkbenchAgentEvidenceState.REDACTED,
+                mcp_invocation_outcome=WorkbenchAgentEvidenceState.UNAVAILABLE,
+            ),
+        )
+
     def workbench_response(record: PlanningRunRecord, principal) -> WorkbenchRunResponse:
         require_workbench_scope(record, principal)
         artifacts = [WorkbenchArtifactSummary(kind=WorkbenchArtifactKind.SOURCE, sha256=record.source_artifact.sha256)]
@@ -1484,6 +1569,120 @@ def create_app(
             )
         draft = WorkbenchTimelineResponse(items=items, revision="")
         return draft.model_copy(update={"revision": workbench_revision(draft)})
+
+    @app.get("/api/v1/workbench/agents")
+    async def list_workbench_agents(
+        project_id: str,
+        authorization: str | None = Header(default=None),
+        if_none_match: str | None = Header(default=None, alias="If-None-Match"),
+        limit: int = 50,
+    ) -> Response:
+        """List bounded active agent releases that have a persisted route for one authorized project."""
+
+        if limit < 1 or limit > 100:
+            raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        require_workbench_project(project_id, principal)
+        records = await supervisor_store.list_workbench_agents(
+            project_id=project_id,
+            policy_revision=agent_gateway_policy.policy_revision,
+            limit=limit,
+        )
+        items = [workbench_agent_response(record) for record in records]
+        draft = WorkbenchAgentListResponse(items=items, revision="")
+        revision = workbench_revision(draft)
+        if workbench_etag_matches(if_none_match, revision):
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": revision})
+        return JSONResponse(
+            content=WorkbenchAgentListResponse(items=items, revision=revision).model_dump(mode="json"),
+            headers={"ETag": revision},
+        )
+
+    @app.get("/api/v1/workbench/agents/{registration_id}/{registration_version}")
+    async def get_workbench_agent(
+        registration_id: str,
+        registration_version: str,
+        project_id: str,
+        authorization: str | None = Header(default=None),
+        if_none_match: str | None = Header(default=None, alias="If-None-Match"),
+    ) -> Response:
+        """Return one safe immutable agent release detail only when it is authorized for the selected project."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        require_workbench_project(project_id, principal)
+        record = await supervisor_store.get_workbench_agent(
+            project_id=project_id,
+            policy_revision=agent_gateway_policy.policy_revision,
+            registration_id=registration_id,
+            registration_version=registration_version,
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="agent not found")
+        response = workbench_agent_response(record)
+        revision = workbench_revision(response)
+        if workbench_etag_matches(if_none_match, revision):
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": revision})
+        return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": revision})
+
+    @app.get("/api/v1/workbench/agents/{registration_id}/{registration_version}/invocations")
+    async def list_workbench_agent_invocations(
+        registration_id: str,
+        registration_version: str,
+        project_id: str,
+        authorization: str | None = Header(default=None),
+        if_none_match: str | None = Header(default=None, alias="If-None-Match"),
+        limit: int = 50,
+    ) -> Response:
+        """List bounded newest-first project-scoped run-role bindings for one eligible agent release."""
+
+        if limit < 1 or limit > 100:
+            raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        require_workbench_project(project_id, principal)
+        records = await supervisor_store.list_workbench_agent_invocations(
+            project_id=project_id,
+            registration_id=registration_id,
+            registration_version=registration_version,
+            limit=limit,
+        )
+        items = [workbench_agent_invocation_summary(record) for record in records]
+        draft = WorkbenchAgentInvocationListResponse(items=items, revision="")
+        revision = workbench_revision(draft)
+        if workbench_etag_matches(if_none_match, revision):
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": revision})
+        return JSONResponse(
+            content=WorkbenchAgentInvocationListResponse(items=items, revision=revision).model_dump(mode="json"),
+            headers={"ETag": revision},
+        )
+
+    @app.get("/api/v1/workbench/agent-invocations/{run_id}/{role}")
+    async def get_workbench_agent_invocation(
+        run_id: str,
+        role: str,
+        project_id: str,
+        authorization: str | None = Header(default=None),
+        if_none_match: str | None = Header(default=None, alias="If-None-Match"),
+    ) -> Response:
+        """Return a single scoped run-role binding without disclosing raw execution evidence."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        require_workbench_project(project_id, principal)
+        record = await supervisor_store.get_workbench_agent_invocation(
+            project_id=project_id,
+            run_id=run_id,
+            role=role,
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="agent invocation not found")
+        response = workbench_agent_invocation_response(record)
+        revision = workbench_revision(response)
+        if workbench_etag_matches(if_none_match, revision):
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": revision})
+        return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": revision})
 
     @app.get("/api/v1/workbench/runs")
     async def list_workbench_runs(

@@ -8,7 +8,8 @@ import json
 from fastapi.testclient import TestClient
 
 from cogito_api.main import create_app
-from cogito_api.models import AiPlan, PlanningRunStatus
+from cogito_api.models import AgentRunStatus, AiPlan, PlanningRunStatus, RegistrationLifecycle
+from cogito_api.supervisor import AgentRunRecord, WorkbenchAgentLifecycleTransitionRecord
 
 from .conftest import make_settings
 from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
@@ -827,3 +828,205 @@ def test_workbench_hides_foreign_detail_and_rejects_viewer_actions(valid_plan) -
     assert legacy_detail.status_code == 403
     assert coordination.status_code == 403
     assert action.status_code == 403
+
+
+def test_workbench_agent_inventory_is_scoped_bounded_and_etagged(client, valid_plan) -> None:
+    submitted = client.post("/api/v1/runs", json={"plan": valid_plan})
+    assert submitted.status_code == 202
+
+    first = client.get("/api/v1/workbench/agents", params={"project_id": "default", "limit": 1}, headers=_headers())
+    second = client.get(
+        "/api/v1/workbench/agents",
+        params={"project_id": "default", "limit": 1},
+        headers={"Authorization": "Bearer operator-test-token", "If-None-Match": first.headers["etag"]},
+    )
+    foreign = client.get("/api/v1/workbench/agents", params={"project_id": "foreign"}, headers=_headers())
+    invalid = client.get("/api/v1/workbench/agents", params={"project_id": "default", "limit": 101}, headers=_headers())
+
+    assert first.status_code == 200
+    assert len(first.json()["items"]) == 1
+    assert first.json()["items"][0]["gateway_routes"]
+    assert second.status_code == 304
+    assert second.content == b""
+    assert foreign.status_code == 404
+    assert invalid.status_code == 422
+
+
+def test_workbench_agent_inventory_uses_only_the_runtime_gateway_policy(valid_plan) -> None:
+    client, _, supervisor_store, _ = _mcp_workbench(valid_plan)
+    assert client.post("/api/v1/runs", json={"plan": valid_plan}).status_code == 202
+    current = supervisor_store.registry_agent_gateway_policies["agent_gateway_planner_v1_1_0"]
+    historical = current.model_copy(update={"policy_revision": "agent_gateway_historical_v1"})
+    supervisor_store.registry_agent_gateway_policies[historical.policy_revision] = historical
+
+    inventory = client.get("/api/v1/workbench/agents", params={"project_id": "default"}, headers=_headers())
+
+    assert inventory.status_code == 200
+    assert {route["policy_revision"] for item in inventory.json()["items"] for route in item["gateway_routes"]} == {
+        "agent_gateway_planner_v1_1_0"
+    }
+
+
+def test_workbench_agent_detail_returns_only_safe_project_authorized_release_facts(client, valid_plan) -> None:
+    assert client.post("/api/v1/runs", json={"plan": valid_plan}).status_code == 202
+
+    detail = client.get(
+        "/api/v1/workbench/agents/developer/1.0.0",
+        params={"project_id": "default"},
+        headers=_headers(),
+    )
+    foreign = client.get(
+        "/api/v1/workbench/agents/developer/1.0.0",
+        params={"project_id": "foreign"},
+        headers=_headers(),
+    )
+
+    assert detail.status_code == 200
+    assert detail.json()["registration_id"] == "developer"
+    assert detail.json()["gateway_routes"] == [
+        {
+            "policy_revision": "agent_gateway_planner_v1_1_0",
+            "role": "developer",
+            "model_alias": "complex",
+            "max_budget_usd": 25.0,
+            "toolset": "development-restricted",
+        }
+    ]
+    assert "mcp_endpoint" not in detail.text
+    assert foreign.status_code == 404
+
+
+def test_workbench_agent_invocation_history_and_detail_project_safe_pins_without_raw_evidence(valid_plan) -> None:
+    client, _, supervisor_store, _ = _mcp_workbench(valid_plan)
+    submitted = client.post("/api/v1/runs", json={"plan": valid_plan})
+    run_id = submitted.json()["run_id"]
+    supervisor_store.agent_runs[run_id] = replace(
+        supervisor_store.agent_runs[run_id],
+        status=AgentRunStatus.RUNNING,
+        worker_id="worker-should-not-leak",
+        trace_id="a" * 32,
+        result_artifact_uri="s3://private-artifact",
+        error_summary="private model failure detail",
+    )
+    supervisor_store.agent_run_lifecycle_transitions[run_id] = [
+        WorkbenchAgentLifecycleTransitionRecord(
+            from_status=AgentRunStatus.QUEUED,
+            to_status=AgentRunStatus.RUNNING,
+            occurred_at="2026-08-13T22:00:00+00:00",
+        )
+    ]
+
+    history = client.get(
+        "/api/v1/workbench/agents/developer/1.0.0/invocations",
+        params={"project_id": "default"},
+        headers=_headers(),
+    )
+    detail = client.get(
+        f"/api/v1/workbench/agent-invocations/{run_id}/developer",
+        params={"project_id": "default"},
+        headers=_headers(),
+    )
+    mismatched_role = client.get(
+        f"/api/v1/workbench/agent-invocations/{run_id}/planner",
+        params={"project_id": "default", "registration_id": "developer", "registration_version": "1.0.0"},
+        headers=_headers(),
+    )
+
+    assert history.status_code == 200
+    assert history.json()["items"] == [
+        {
+            "run_id": run_id,
+            "root_run_id": run_id,
+            "parent_run_id": None,
+            "registration_id": "developer",
+            "registration_version": "1.0.0",
+                "role": "developer",
+                "run_lifecycle_status": "RUNNING",
+                "workflow_available": False,
+                "created_at": supervisor_store.agent_runs[run_id].created_at,
+            "updated_at": supervisor_store.agent_runs[run_id].updated_at,
+            "gateway_route": {
+                "policy_revision": "agent_gateway_planner_v1_1_0",
+                "role": "developer",
+                "model_alias": "complex",
+                "max_budget_usd": 25.0,
+                "toolset": "development-restricted",
+            },
+        }
+    ]
+    assert detail.status_code == 200
+    assert detail.json()["mcp_grants"][0]["tool_name"] == "catalog_read"
+    assert detail.json()["lifecycle_transitions"] == [
+        {"from_status": "QUEUED", "to_status": "RUNNING", "occurred_at": "2026-08-13T22:00:00+00:00"}
+    ]
+    assert detail.json()["evidence"] == {
+        "lifecycle": "available",
+        "actual_cost": "unavailable",
+        "turns_used": "unavailable",
+        "result_artifact": "redacted",
+        "failure_detail": "redacted",
+        "mcp_invocation_outcome": "unavailable",
+    }
+    assert "worker-should-not-leak" not in detail.text
+    assert "private-artifact" not in detail.text
+    assert "private model failure detail" not in detail.text
+    assert "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" not in detail.text
+    assert mismatched_role.status_code == 200
+    assert mismatched_role.json()["registration_id"] == "planner"
+
+
+def test_workbench_agent_history_remains_available_after_release_revocation(valid_plan) -> None:
+    client, _, supervisor_store, _ = _mcp_workbench(valid_plan)
+    submitted = client.post("/api/v1/runs", json={"plan": valid_plan})
+    run_id = submitted.json()["run_id"]
+    developer = supervisor_store.registrations[("developer", "1.0.0")]
+    supervisor_store.registrations[("developer", "1.0.0")] = developer.model_copy(
+        update={"lifecycle": RegistrationLifecycle.REVOKED}
+    )
+
+    inventory_detail = client.get(
+        "/api/v1/workbench/agents/developer/1.0.0", params={"project_id": "default"}, headers=_headers()
+    )
+    history = client.get(
+        "/api/v1/workbench/agents/developer/1.0.0/invocations", params={"project_id": "default"}, headers=_headers()
+    )
+    invocation = client.get(
+        f"/api/v1/workbench/agent-invocations/{run_id}/developer", params={"project_id": "default"}, headers=_headers()
+    )
+
+    assert inventory_detail.status_code == 200
+    assert inventory_detail.json()["lifecycle"] == "revoked"
+    assert [item["run_id"] for item in history.json()["items"]] == [run_id]
+    assert invocation.status_code == 200
+
+
+def test_workbench_agent_invocation_reports_the_root_run_lifecycle(valid_plan) -> None:
+    client, _, supervisor_store, _ = _mcp_workbench(valid_plan)
+    submitted = client.post("/api/v1/runs", json={"plan": valid_plan})
+    root_run_id = submitted.json()["run_id"]
+    root = supervisor_store.agent_runs[root_run_id]
+    supervisor_store.agent_runs[root_run_id] = replace(root, status=AgentRunStatus.RUNNING)
+    child_run_id = "child-run"
+    supervisor_store.agent_runs[child_run_id] = AgentRunRecord(
+        run_id=child_run_id,
+        root_run_id=root_run_id,
+        parent_run_id=root_run_id,
+        agent_name="developer",
+        status=AgentRunStatus.SUCCEEDED,
+        trace_id="child-trace",
+        created_at=root.created_at,
+        updated_at=root.updated_at,
+    )
+    route = supervisor_store.run_agent_gateway_resolutions.pop((root_run_id, "developer"))
+    supervisor_store.run_agent_gateway_resolutions[(child_run_id, "developer")] = route.model_copy(
+        update={"run_id": child_run_id}
+    )
+
+    detail = client.get(
+        f"/api/v1/workbench/agent-invocations/{child_run_id}/developer",
+        params={"project_id": "default"},
+        headers=_headers(),
+    )
+
+    assert detail.status_code == 200
+    assert detail.json()["run_lifecycle_status"] == "RUNNING"

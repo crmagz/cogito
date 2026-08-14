@@ -38,6 +38,10 @@ from cogito_api.supervisor import (
     NotificationDelivery,
     OutboxDelivery,
     PlanningRunRecord,
+    WorkbenchAgentGatewayRouteRecord,
+    WorkbenchAgentInvocationRecord,
+    WorkbenchAgentLifecycleTransitionRecord,
+    WorkbenchAgentRecord,
     WorkbenchApprovalRecord,
     WorkbenchFeedbackRecord,
     RegistryConflictError,
@@ -146,6 +150,7 @@ class InMemorySupervisorStore:
         self.outbox: dict[str, OutboxDelivery] = {}
         self.leased_decision_ids: set[str] = set()
         self.agent_runs: dict[str, AgentRunRecord] = {}
+        self.agent_run_lifecycle_transitions: dict[str, list[WorkbenchAgentLifecycleTransitionRecord]] = {}
         self.implementation_approvals: dict[tuple[str, int, str], ImplementationApprovalRecord] = {}
         self.implementation_request_hashes: dict[tuple[str, int, str], str] = {}
         self.implementation_outbox: dict[str, OutboxDelivery] = {}
@@ -167,6 +172,153 @@ class InMemorySupervisorStore:
 
     async def get_agent_run(self, run_id: str) -> AgentRunRecord | None:
         return self.agent_runs.get(run_id)
+
+    async def list_workbench_agents(
+        self, *, project_id: str, policy_revision: str, limit: int = 50
+    ) -> list[WorkbenchAgentRecord]:
+        records = self._workbench_agents(project_id, policy_revision)
+        return records[: max(1, min(limit, 100))]
+
+    async def get_workbench_agent(
+        self, *, project_id: str, policy_revision: str, registration_id: str, registration_version: str
+    ) -> WorkbenchAgentRecord | None:
+        return next(
+            (
+                record
+                for record in self._workbench_agents(project_id, policy_revision)
+                if record.registration_id == registration_id and record.registration_version == registration_version
+            ),
+            None,
+        )
+
+    def _workbench_agents(self, project_id: str, policy_revision: str) -> list[WorkbenchAgentRecord]:
+        grouped: dict[tuple[str, str], WorkbenchAgentRecord] = {}
+        policy = self.registry_agent_gateway_policies.get(policy_revision)
+        if policy is not None:
+            for binding in policy.bindings:
+                if project_id not in binding.project_ids:
+                    continue
+                manifest = self.registrations.get((binding.registration_id, binding.registration_version))
+                if manifest is None or manifest.kind.value != "agent" or manifest.lifecycle.value != "active":
+                    continue
+                key = (manifest.registration_id, manifest.version)
+                route = WorkbenchAgentGatewayRouteRecord(
+                    policy_revision=policy.policy_revision,
+                    role=binding.role,
+                    model_alias=binding.model_alias,
+                    max_budget_usd=binding.max_budget_usd,
+                    toolset=binding.toolset,
+                )
+                current = grouped.get(key)
+                if current is None:
+                    grouped[key] = WorkbenchAgentRecord(
+                        registration_id=manifest.registration_id,
+                        registration_version=manifest.version,
+                        manifest_sha256=manifest_sha256(manifest),
+                        component_id=manifest.component_id,
+                        component_version=manifest.component_version,
+                        lifecycle=manifest.lifecycle.value,
+                        maturity=manifest.maturity.value,
+                        execution_class=manifest.execution_class.value,
+                        owner=manifest.owner,
+                        capabilities=list(manifest.capabilities),
+                        gateway_routes=[route],
+                    )
+                elif route not in current.gateway_routes:
+                    grouped[key] = replace(current, gateway_routes=[*current.gateway_routes, route])
+        for invocation in self._workbench_agent_invocations(project_id, None, None):
+            key = (invocation.registration_id, invocation.registration_version)
+            if key in grouped:
+                continue
+            manifest = self.registrations.get(key)
+            if manifest is None or manifest.kind.value != "agent":
+                continue
+            grouped[key] = WorkbenchAgentRecord(
+                registration_id=manifest.registration_id,
+                registration_version=manifest.version,
+                manifest_sha256=manifest_sha256(manifest),
+                component_id=manifest.component_id,
+                component_version=manifest.component_version,
+                lifecycle=manifest.lifecycle.value,
+                maturity=manifest.maturity.value,
+                execution_class=manifest.execution_class.value,
+                owner=manifest.owner,
+                capabilities=list(manifest.capabilities),
+                gateway_routes=[],
+            )
+        return sorted(grouped.values(), key=lambda item: (item.registration_id, item.registration_version))
+
+    async def list_workbench_agent_invocations(
+        self, *, project_id: str, registration_id: str, registration_version: str, limit: int = 50
+    ) -> list[WorkbenchAgentInvocationRecord]:
+        records = self._workbench_agent_invocations(project_id, registration_id, registration_version)
+        return records[: max(1, min(limit, 100))]
+
+    async def get_workbench_agent_invocation(
+        self, *, project_id: str, run_id: str, role: str
+    ) -> WorkbenchAgentInvocationRecord | None:
+        return next(
+            (
+                record
+                for record in self._workbench_agent_invocations(project_id, None, None)
+                if record.run_id == run_id and record.role == role
+            ),
+            None,
+        )
+
+    def _workbench_agent_invocations(
+        self, project_id: str, registration_id: str | None, registration_version: str | None
+    ) -> list[WorkbenchAgentInvocationRecord]:
+        records: list[WorkbenchAgentInvocationRecord] = []
+        binding_keys = set(self.run_registration_resolutions) | set(self.run_agent_gateway_resolutions)
+        for run_id, role in binding_keys:
+            run = self.agent_runs.get(run_id)
+            if run is None:
+                continue
+            resolution = self.run_registration_resolutions.get((run_id, role)) or self.run_registration_resolutions.get((run.root_run_id, role))
+            if resolution is None:
+                continue
+            route = self.run_agent_gateway_resolutions.get((run_id, role))
+            planning_run = self.planning_runs.get(run.root_run_id)
+            historical_project = planning_run.project_id if planning_run is not None else None
+            if (
+                (route is not None and route.project_id != project_id)
+                or (route is None and historical_project != project_id)
+                or (registration_id is not None and resolution.registration_id != registration_id)
+                or (registration_version is not None and resolution.version != registration_version)
+            ):
+                continue
+            root_run = self.agent_runs.get(run.root_run_id)
+            if root_run is None:
+                continue
+            records.append(
+                WorkbenchAgentInvocationRecord(
+                    run_id=run.run_id,
+                    root_run_id=run.root_run_id,
+                    parent_run_id=run.parent_run_id,
+                    registration_id=resolution.registration_id,
+                    registration_version=resolution.version,
+                    role=role,
+                    run_lifecycle_status=root_run.status,
+                    workflow_available=run.root_run_id in self.planning_runs,
+                    created_at=run.created_at,
+                    updated_at=run.updated_at,
+                    gateway_route=(
+                        WorkbenchAgentGatewayRouteRecord(
+                            policy_revision=route.policy_revision,
+                            role=role,
+                            model_alias=route.model_alias,
+                            max_budget_usd=route.max_budget_usd,
+                            toolset=route.toolset,
+                        )
+                        if route is not None
+                        else None
+                    ),
+                    mcp_grants=list(self.run_mcp_tool_resolutions.get((run_id, role), [])),
+                    lifecycle_transitions=list(self.agent_run_lifecycle_transitions.get(run_id, [])),
+                )
+            )
+        return sorted(records, key=lambda item: (item.created_at, item.run_id, item.role), reverse=True)
 
     async def bootstrap_registry(
         self,

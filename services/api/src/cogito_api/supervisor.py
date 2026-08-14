@@ -174,6 +174,62 @@ class AgentRunRecord:
     error_summary: str | None = None
 
 
+@dataclass(frozen=True)
+class WorkbenchAgentGatewayRouteRecord:
+    """One non-secret persisted policy route for a project-authorized agent release."""
+
+    policy_revision: str
+    role: str
+    model_alias: str
+    max_budget_usd: float
+    toolset: str
+
+
+@dataclass(frozen=True)
+class WorkbenchAgentRecord:
+    """Safe immutable agent-release facts and its routes for one authorized project."""
+
+    registration_id: str
+    registration_version: str
+    manifest_sha256: str
+    component_id: str
+    component_version: str
+    lifecycle: str
+    maturity: str
+    execution_class: str
+    owner: str
+    capabilities: list[str]
+    gateway_routes: list[WorkbenchAgentGatewayRouteRecord]
+
+
+@dataclass(frozen=True)
+class WorkbenchAgentLifecycleTransitionRecord:
+    """Status-only lifecycle evidence for a run-role binding."""
+
+    from_status: AgentRunStatus | None
+    to_status: AgentRunStatus | None
+    occurred_at: str
+
+
+@dataclass(frozen=True)
+class WorkbenchAgentInvocationRecord:
+    """Safe run-role binding facts; status remains authoritative only for the root run."""
+
+    run_id: str
+    root_run_id: str
+    parent_run_id: str | None
+    registration_id: str
+    registration_version: str
+    role: str
+    run_lifecycle_status: AgentRunStatus
+    workflow_available: bool
+    created_at: str
+    updated_at: str
+    gateway_route: WorkbenchAgentGatewayRouteRecord | None
+    mcp_grants: list[McpToolGrant]
+    lifecycle_transitions: list[WorkbenchAgentLifecycleTransitionRecord]
+
+
 class ApprovalConflictError(Exception):
     """Raised when a decision cannot safely apply to the current run state."""
 
@@ -384,6 +440,22 @@ class SupervisorStore(Protocol):
 
     async def get_agent_run(self, run_id: str) -> AgentRunRecord | None: ...
 
+    async def list_workbench_agents(
+        self, *, project_id: str, policy_revision: str, limit: int = 50
+    ) -> list[WorkbenchAgentRecord]: ...
+
+    async def get_workbench_agent(
+        self, *, project_id: str, policy_revision: str, registration_id: str, registration_version: str
+    ) -> WorkbenchAgentRecord | None: ...
+
+    async def list_workbench_agent_invocations(
+        self, *, project_id: str, registration_id: str, registration_version: str, limit: int = 50
+    ) -> list[WorkbenchAgentInvocationRecord]: ...
+
+    async def get_workbench_agent_invocation(
+        self, *, project_id: str, run_id: str, role: str
+    ) -> WorkbenchAgentInvocationRecord | None: ...
+
     async def bootstrap_registry(
         self,
         manifests: list[RegistrationManifest],
@@ -570,6 +642,247 @@ class PostgresSupervisorStore:
             )
             row = result.mappings().one_or_none()
         return _agent_run_record(row) if row is not None else None
+
+    async def list_workbench_agents(
+        self, *, project_id: str, policy_revision: str, limit: int = 50
+    ) -> list[WorkbenchAgentRecord]:
+        """List active agent releases with an explicit persisted route for exactly one project."""
+
+        rows = await self._workbench_agent_rows(
+            project_id=project_id,
+            policy_revision=policy_revision,
+            limit=max(1, min(limit, 100)),
+        )
+        return _workbench_agent_records(rows)
+
+    async def get_workbench_agent(
+        self, *, project_id: str, policy_revision: str, registration_id: str, registration_version: str
+    ) -> WorkbenchAgentRecord | None:
+        """Return one active project-authorized agent release without exposing its full manifest."""
+
+        rows = await self._workbench_agent_rows(
+            project_id=project_id,
+            policy_revision=policy_revision,
+            registration_id=registration_id,
+            registration_version=registration_version,
+            limit=100,
+        )
+        records = _workbench_agent_records(rows)
+        return records[0] if records else None
+
+    async def _workbench_agent_rows(
+        self,
+        *,
+        project_id: str,
+        policy_revision: str,
+        registration_id: str | None = None,
+        registration_version: str | None = None,
+        limit: int = 100,
+    ) -> list[Mapping[str, Any]]:
+        """Read only allow-listed agent inventory columns from immutable policy and registry tables."""
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    WITH project_routes AS (
+                        SELECT policy.policy_revision, binding.role, binding.registration_id,
+                               binding.registration_version, binding.model_alias,
+                               binding.max_budget_usd, binding.toolset
+                        FROM registry_agent_gateway_policy_revisions AS policy
+                        CROSS JOIN LATERAL jsonb_to_recordset(policy.bindings) AS binding(
+                            role text,
+                            registration_id text,
+                            registration_version text,
+                            project_ids jsonb,
+                            model_alias text,
+                            max_budget_usd numeric,
+                            toolset text
+                        )
+                        WHERE policy.policy_revision = :policy_revision
+                          AND binding.project_ids ? CAST(:project_id AS text)
+                    ), historical_releases AS (
+                        SELECT DISTINCT
+                               COALESCE(resolution.registration_id, root_resolution.registration_id) AS registration_id,
+                               COALESCE(resolution.registration_version, root_resolution.registration_version) AS registration_version
+                        FROM agent_runs AS run
+                        JOIN agent_runs AS root ON root.run_id = run.root_run_id
+                        LEFT JOIN run_agent_gateway_resolutions AS gateway ON gateway.run_id = run.run_id
+                        LEFT JOIN run_registration_resolutions AS resolution
+                          ON resolution.run_id = run.run_id
+                         AND (gateway.role IS NULL OR resolution.role = gateway.role)
+                        LEFT JOIN run_registration_resolutions AS root_resolution
+                          ON root_resolution.run_id = root.run_id
+                         AND root_resolution.role = COALESCE(gateway.role, resolution.role)
+                        LEFT JOIN supervisor_runs AS workflow ON workflow.run_id = run.root_run_id
+                        WHERE (gateway.project_id = :project_id OR (gateway.run_id IS NULL AND workflow.project_id = :project_id))
+                          AND COALESCE(resolution.registration_id, root_resolution.registration_id) IS NOT NULL
+                    ), inventory_releases AS (
+                        SELECT route.registration_id, route.registration_version
+                        FROM project_routes AS route
+                        JOIN registry_registrations AS registration
+                          ON registration.registration_id = route.registration_id
+                         AND registration.version = route.registration_version
+                        WHERE registration.kind = 'agent' AND registration.lifecycle = 'active'
+                        UNION
+                        SELECT registration_id, registration_version FROM historical_releases
+                    ), limited_releases AS (
+                        SELECT registration_id, registration_version
+                        FROM inventory_releases
+                        WHERE (CAST(:registration_id AS text) IS NULL OR registration_id = :registration_id)
+                          AND (CAST(:registration_version AS text) IS NULL OR registration_version = :registration_version)
+                        GROUP BY registration_id, registration_version
+                        ORDER BY registration_id, registration_version
+                        LIMIT :limit
+                    )
+                    SELECT registration.registration_id, registration.version AS registration_version,
+                           registration.manifest_sha256, registration.component_id, registration.component_version,
+                           registration.lifecycle, registration.maturity, registration.execution_class, registration.owner,
+                           COALESCE(registration.manifest -> 'capabilities', '[]'::jsonb) AS capabilities,
+                           route.policy_revision, route.role, route.model_alias, route.max_budget_usd, route.toolset
+                    FROM limited_releases AS release
+                    JOIN registry_registrations AS registration
+                      ON registration.registration_id = release.registration_id
+                     AND registration.version = release.registration_version
+                    LEFT JOIN project_routes AS route
+                      ON route.registration_id = release.registration_id
+                     AND route.registration_version = release.registration_version
+                    WHERE registration.kind = 'agent'
+                    ORDER BY registration.registration_id, registration.version, route.policy_revision NULLS LAST, route.role NULLS LAST
+                    """
+                ),
+                {
+                    "project_id": project_id,
+                    "policy_revision": policy_revision,
+                    "registration_id": registration_id,
+                    "registration_version": registration_version,
+                    "limit": limit,
+                },
+            )
+            return list(result.mappings().all())
+
+    async def list_workbench_agent_invocations(
+        self, *, project_id: str, registration_id: str, registration_version: str, limit: int = 50
+    ) -> list[WorkbenchAgentInvocationRecord]:
+        """List bounded newest-first run-role bindings only when their immutable route is project scoped."""
+
+        rows = await self._workbench_agent_invocation_rows(
+            project_id=project_id,
+            registration_id=registration_id,
+            registration_version=registration_version,
+            limit=limit,
+        )
+        return [_workbench_agent_invocation_record(row) for row in rows]
+
+    async def get_workbench_agent_invocation(
+        self, *, project_id: str, run_id: str, role: str
+    ) -> WorkbenchAgentInvocationRecord | None:
+        """Return one safe project-scoped run-role binding and status-only lifecycle evidence."""
+
+        rows = await self._workbench_agent_invocation_rows(
+            project_id=project_id,
+            registration_id=None,
+            registration_version=None,
+            run_id=run_id,
+            role=role,
+            limit=1,
+        )
+        if not rows:
+            return None
+        record = _workbench_agent_invocation_record(rows[0])
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT from_status, to_status, occurred_at
+                    FROM agent_run_events
+                    WHERE run_id = :run_id
+                    ORDER BY occurred_at ASC, event_id ASC
+                    LIMIT 100
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            transitions = [
+                WorkbenchAgentLifecycleTransitionRecord(
+                    from_status=AgentRunStatus(row["from_status"]) if row["from_status"] is not None else None,
+                    to_status=AgentRunStatus(row["to_status"]) if row["to_status"] is not None else None,
+                    occurred_at=row["occurred_at"].isoformat(),
+                )
+                for row in result.mappings().all()
+            ]
+        return WorkbenchAgentInvocationRecord(
+            **{**record.__dict__, "lifecycle_transitions": transitions}
+        )
+
+    async def _workbench_agent_invocation_rows(
+        self,
+        *,
+        project_id: str,
+        registration_id: str | None,
+        registration_version: str | None,
+        limit: int,
+        run_id: str | None = None,
+        role: str | None = None,
+    ) -> list[Mapping[str, Any]]:
+        """Read one project-scoped run-role binding projection without selecting unsafe run fields."""
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT run.run_id, run.root_run_id, run.parent_run_id, root.status AS run_lifecycle_status,
+                           (workflow.run_id IS NOT NULL) AS workflow_available,
+                           run.created_at, run.updated_at,
+                           COALESCE(resolution.registration_id, root_resolution.registration_id) AS registration_id,
+                           COALESCE(resolution.registration_version, root_resolution.registration_version) AS registration_version,
+                           COALESCE(gateway.role, resolution.role, root_resolution.role) AS role,
+                           gateway.policy_revision AS gateway_policy_revision,
+                           gateway.model_alias, gateway.max_budget_usd, gateway.toolset,
+                           COALESCE((
+                               SELECT jsonb_agg(jsonb_build_object(
+                                   'server_id', mcp_grant.server_registration_id,
+                                   'server_version', mcp_grant.server_version,
+                                   'server_manifest_sha256', mcp_grant.server_manifest_sha256,
+                                   'tool_name', mcp_grant.tool_name,
+                                   'input_schema_sha256', mcp_grant.input_schema_sha256,
+                                   'repository_scope', mcp_grant.repository_scope
+                               ) ORDER BY mcp_grant.server_registration_id, mcp_grant.server_version, mcp_grant.tool_name)
+                               FROM run_mcp_tool_resolutions AS mcp_grant
+                               WHERE mcp_grant.run_id = run.run_id
+                                 AND mcp_grant.role = COALESCE(gateway.role, resolution.role, root_resolution.role)
+                           ), '[]'::jsonb) AS mcp_grants
+                    FROM agent_runs AS run
+                    JOIN agent_runs AS root ON root.run_id = run.root_run_id
+                    LEFT JOIN run_agent_gateway_resolutions AS gateway
+                      ON gateway.run_id = run.run_id
+                    LEFT JOIN run_registration_resolutions AS resolution
+                      ON resolution.run_id = run.run_id
+                     AND (gateway.role IS NULL OR resolution.role = gateway.role)
+                    LEFT JOIN run_registration_resolutions AS root_resolution
+                      ON root_resolution.run_id = root.run_id
+                     AND root_resolution.role = COALESCE(gateway.role, resolution.role)
+                    LEFT JOIN supervisor_runs AS workflow ON workflow.run_id = run.root_run_id
+                    WHERE (gateway.project_id = :project_id OR (gateway.run_id IS NULL AND workflow.project_id = :project_id))
+                      AND COALESCE(resolution.registration_id, root_resolution.registration_id) IS NOT NULL
+                      AND (CAST(:registration_id AS text) IS NULL OR COALESCE(resolution.registration_id, root_resolution.registration_id) = :registration_id)
+                      AND (CAST(:registration_version AS text) IS NULL OR COALESCE(resolution.registration_version, root_resolution.registration_version) = :registration_version)
+                      AND (CAST(:run_id AS text) IS NULL OR run.run_id = :run_id)
+                      AND (CAST(:role AS text) IS NULL OR COALESCE(gateway.role, resolution.role, root_resolution.role) = :role)
+                    ORDER BY run.created_at DESC, run.run_id DESC, COALESCE(gateway.role, resolution.role, root_resolution.role) ASC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "project_id": project_id,
+                    "registration_id": registration_id,
+                    "registration_version": registration_version,
+                    "run_id": run_id,
+                    "role": role,
+                    "limit": max(1, min(limit, 100)),
+                },
+            )
+            return list(result.mappings().all())
 
     async def bootstrap_registry(
         self,
@@ -2748,3 +3061,91 @@ def _agent_run_record(row: object) -> AgentRunRecord:
         result_artifact_uri=values["result_artifact_uri"],  # type: ignore[index]
         error_summary=values["error_summary"],  # type: ignore[index]
     )
+
+
+def _workbench_agent_records(rows: list[Mapping[str, Any]]) -> list[WorkbenchAgentRecord]:
+    """Group persisted project routes under their immutable active agent release."""
+
+    grouped: dict[tuple[str, str], WorkbenchAgentRecord] = {}
+    for row in rows:
+        key = (row["registration_id"], row["registration_version"])
+        route = (
+            WorkbenchAgentGatewayRouteRecord(
+                policy_revision=row["policy_revision"],
+                role=row["role"],
+                model_alias=row["model_alias"],
+                max_budget_usd=float(row["max_budget_usd"]),
+                toolset=row["toolset"],
+            )
+            if row["policy_revision"] is not None
+            else None
+        )
+        current = grouped.get(key)
+        if current is None:
+            grouped[key] = WorkbenchAgentRecord(
+                registration_id=row["registration_id"],
+                registration_version=row["registration_version"],
+                manifest_sha256=row["manifest_sha256"],
+                component_id=row["component_id"],
+                component_version=row["component_version"],
+                lifecycle=row["lifecycle"],
+                maturity=row["maturity"],
+                execution_class=row["execution_class"],
+                owner=row["owner"],
+                capabilities=_json_string_list(row["capabilities"]),
+                gateway_routes=[route] if route is not None else [],
+            )
+        elif route is not None and route not in current.gateway_routes:
+            grouped[key] = WorkbenchAgentRecord(
+                **{**current.__dict__, "gateway_routes": [*current.gateway_routes, route]}
+            )
+    return list(grouped.values())
+
+
+def _workbench_agent_invocation_record(row: Mapping[str, Any]) -> WorkbenchAgentInvocationRecord:
+    """Materialize a narrow run-role projection without copying unsafe agent-run columns."""
+
+    return WorkbenchAgentInvocationRecord(
+        run_id=row["run_id"],
+        root_run_id=row["root_run_id"],
+        parent_run_id=row["parent_run_id"],
+        registration_id=row["registration_id"],
+        registration_version=row["registration_version"],
+        role=row["role"],
+        run_lifecycle_status=AgentRunStatus(row["run_lifecycle_status"]),
+        workflow_available=bool(row["workflow_available"]),
+        created_at=row["created_at"].isoformat(),
+        updated_at=row["updated_at"].isoformat(),
+        gateway_route=(
+            WorkbenchAgentGatewayRouteRecord(
+                policy_revision=row["gateway_policy_revision"],
+                role=row["role"],
+                model_alias=row["model_alias"],
+                max_budget_usd=float(row["max_budget_usd"]),
+                toolset=row["toolset"],
+            )
+            if row["gateway_policy_revision"] is not None
+            else None
+        ),
+        mcp_grants=[McpToolGrant.model_validate(item) for item in _json_list(row["mcp_grants"])],
+        lifecycle_transitions=[],
+    )
+
+
+def _json_string_list(value: object) -> list[str]:
+    """Return a persisted JSON string array or fail closed on malformed projection data."""
+
+    items = _json_list(value)
+    if not all(isinstance(item, str) for item in items):
+        raise RegistryConflictError("persisted agent capabilities are invalid")
+    return items
+
+
+def _json_list(value: object) -> list[object]:
+    """Normalize JSONB values returned by supported SQLAlchemy drivers."""
+
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, list):
+        raise RegistryConflictError("persisted agent operations projection is invalid")
+    return value
