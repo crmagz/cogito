@@ -96,17 +96,29 @@ async def main() -> None:
     settings = load_settings()
     catalog = load_component_catalog(Path(settings.registry_catalog_path))
     gateway_policy = load_agent_gateway_policy(Path(settings.registry_catalog_path), catalog)
-    assignments = {
-        item.registration_id: f"{item.registration_id}@{item.version}"
-        for item in catalog.components
-        if item.kind.value == "agent"
-    }
+    developer = next(item for item in catalog.components if item.registration_id == "developer")
     store = PostgresSupervisorStore(settings.supervisor_database_url)
     run_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
     try:
-        await store.bootstrap_registry(catalog.components, "phase12_planner_v1_1_0", assignments)
-        await store.bootstrap_agent_gateway_policy(gateway_policy)
+        async with store._engine.connect() as connection:
+            registration = await connection.execute(
+                text(
+                    "SELECT 1 FROM registry_registrations "
+                    "WHERE registration_id = :registration_id AND version = :registration_version"
+                ),
+                {"registration_id": developer.registration_id, "registration_version": developer.version},
+            )
+            registry_policy = await connection.execute(
+                text("SELECT 1 FROM registry_policy_revisions WHERE policy_revision = :policy_revision"),
+                {"policy_revision": "phase12_planner_v1_1_0"},
+            )
+            gateway = await connection.execute(
+                text("SELECT 1 FROM registry_agent_gateway_policy_revisions WHERE policy_revision = :policy_revision"),
+                {"policy_revision": gateway_policy.policy_revision},
+            )
+        if registration.scalar_one_or_none() is None or registry_policy.scalar_one_or_none() is None or gateway.scalar_one_or_none() is None:
+            raise RuntimeError("Phase 18 Kind E2E requires the deployed API to have bootstrapped its registry and gateway policy")
         await store.create_agent_run(
             AgentRunRecord(
                 run_id=run_id,
@@ -140,7 +152,6 @@ async def main() -> None:
                     "error_summary": "kind-e2e-private-error",
                 },
             )
-        developer = next(item for item in catalog.components if item.registration_id == "developer")
         registration = await store.resolve_run_registration(
             run_id, "developer", "phase12_planner_v1_1_0", developer
         )

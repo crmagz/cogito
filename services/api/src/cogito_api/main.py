@@ -1577,7 +1577,7 @@ def create_app(
         if_none_match: str | None = Header(default=None, alias="If-None-Match"),
         limit: int = 50,
     ) -> Response:
-        """List bounded active agent releases that have a persisted route for one authorized project."""
+        """List bounded project-visible agent releases for one authorized project."""
 
         if limit < 1 or limit > 100:
             raise HTTPException(status_code=422, detail="limit must be between 1 and 100")

@@ -120,7 +120,7 @@ COGITO_E2E_ENABLED=1 \
 
 ### Agent Operations Kind E2E
 
-This read-only check creates and removes an isolated persisted agent-route record inside the deployed API pod, then verifies the Agent Operations inventory, release detail, immutable invocation history, and safe invocation-detail projections through the public API. It does not invoke a model, start a worker execution, or modify a repository.
+This API-read verification creates and removes an isolated agent-route record inside the deployed API pod, then verifies the Agent Operations inventory, release detail, immutable invocation history, and safe invocation-detail projections through the public API. It relies on the catalog and gateway policy already bootstrapped by the deployed API; it does not mutate registry or policy rows, invoke a model, start a worker execution, or modify a repository.
 
 ```sh
 COGITO_E2E_ENABLED=1 \
