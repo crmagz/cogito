@@ -1147,6 +1147,105 @@ class WorkbenchProjectListResponse(BaseModel):
     items: list[WorkbenchProjectResponse] = Field(description="Projects authorized for the current principal")
 
 
+class WorkbenchAgentEvidenceState(StrEnum):
+    """Whether a requested agent-operation evidence category is safe and available to render."""
+
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    REDACTED = "redacted"
+
+
+class WorkbenchAgentGatewayRoute(BaseModel):
+    """Non-secret immutable gateway route facts for one policy-authorized agent release."""
+
+    policy_revision: str
+    role: str
+    model_alias: str
+    max_budget_usd: float = Field(gt=0)
+    toolset: str
+
+
+class WorkbenchAgentSummary(BaseModel):
+    """Safe immutable identity and project-authorized routes for one agent release."""
+
+    registration_id: str
+    registration_version: str
+    manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    component_id: str
+    component_version: str
+    lifecycle: RegistrationLifecycle
+    maturity: ComponentMaturity
+    execution_class: ExecutionClass
+    owner: str
+    capabilities: list[str] = Field(default_factory=list)
+    gateway_routes: list[WorkbenchAgentGatewayRoute] = Field(default_factory=list)
+
+
+class WorkbenchAgentListResponse(BaseModel):
+    """Bounded project-scoped agent inventory with an ETag-compatible revision."""
+
+    items: list[WorkbenchAgentSummary] = Field(default_factory=list)
+    revision: str
+
+
+class WorkbenchAgentInvocationEvidence(BaseModel):
+    """Availability-only evidence summary that never transports raw invocation material."""
+
+    lifecycle: WorkbenchAgentEvidenceState = WorkbenchAgentEvidenceState.AVAILABLE
+    actual_cost: WorkbenchAgentEvidenceState = WorkbenchAgentEvidenceState.UNAVAILABLE
+    turns_used: WorkbenchAgentEvidenceState = WorkbenchAgentEvidenceState.UNAVAILABLE
+    result_artifact: WorkbenchAgentEvidenceState = WorkbenchAgentEvidenceState.REDACTED
+    failure_detail: WorkbenchAgentEvidenceState = WorkbenchAgentEvidenceState.REDACTED
+    mcp_invocation_outcome: WorkbenchAgentEvidenceState = WorkbenchAgentEvidenceState.UNAVAILABLE
+
+
+class WorkbenchAgentLifecycleTransition(BaseModel):
+    """Safe status-only run lifecycle transition associated with a run-role binding."""
+
+    from_status: AgentRunStatus | None = None
+    to_status: AgentRunStatus | None = None
+    occurred_at: str
+
+
+class WorkbenchAgentInvocationSummary(BaseModel):
+    """Safe project-scoped run-role binding summary; lifecycle is authoritative only for the run."""
+
+    run_id: str
+    root_run_id: str
+    parent_run_id: str | None = None
+    registration_id: str
+    registration_version: str
+    role: str
+    run_lifecycle_status: AgentRunStatus = Field(
+        description="Authoritative root-run lifecycle status; not a role-specific agent outcome"
+    )
+    workflow_available: bool = Field(
+        default=False,
+        description="Whether the root run has a Workbench workflow page that the operator may open",
+    )
+    created_at: str
+    updated_at: str
+    gateway_route: WorkbenchAgentGatewayRoute | None = Field(
+        default=None,
+        description="Pinned gateway route when this historical invocation was recorded after gateway routing was introduced",
+    )
+
+
+class WorkbenchAgentInvocationListResponse(BaseModel):
+    """Bounded newest-first invocation-binding inventory with an ETag-compatible revision."""
+
+    items: list[WorkbenchAgentInvocationSummary] = Field(default_factory=list)
+    revision: str
+
+
+class WorkbenchAgentInvocationResponse(WorkbenchAgentInvocationSummary):
+    """Safe run-role binding detail including exact MCP pins and status-only lifecycle evidence."""
+
+    mcp_grants: list[McpToolGrant] = Field(default_factory=list)
+    lifecycle_transitions: list[WorkbenchAgentLifecycleTransition] = Field(default_factory=list)
+    evidence: WorkbenchAgentInvocationEvidence = Field(default_factory=WorkbenchAgentInvocationEvidence)
+
+
 class WorkbenchRunListResponse(BaseModel):
     """Bounded Workbench inventory with a representation revision."""
 

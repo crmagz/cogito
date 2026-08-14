@@ -117,3 +117,19 @@ COGITO_E2E_ENABLED=1 \
   uv run --project services/api pytest -q -m kind_e2e \
   services/api/tests/integration/test_kind_e2e_governed_mcp.py
 ```
+
+### Agent Operations Kind E2E
+
+This read-only check creates and removes an isolated persisted agent-route record inside the deployed API pod, then verifies the Agent Operations inventory, release detail, immutable invocation history, and safe invocation-detail projections through the public API. It does not invoke a model, start a worker execution, or modify a repository.
+
+```sh
+COGITO_E2E_ENABLED=1 \
+  uv run --project services/api pytest -q -m kind_e2e \
+  services/api/tests/integration/test_kind_e2e_phase18_agent_operations.py
+```
+
+Set `COGITO_E2E_KEEP_RUNS=1` to retain the seeded standalone agent-run binding
+for direct API inspection; the test prints its retained run ID. It deliberately
+has no `supervisor_runs` workflow, so Workbench correctly labels its workflow
+view unavailable. Use a real planning workflow and its matching agent run for
+the Workbench navigation E2E.
