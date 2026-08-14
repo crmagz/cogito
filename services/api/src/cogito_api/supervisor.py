@@ -646,7 +646,7 @@ class PostgresSupervisorStore:
     async def list_workbench_agents(
         self, *, project_id: str, policy_revision: str, limit: int = 50
     ) -> list[WorkbenchAgentRecord]:
-        """List active agent releases with an explicit persisted route for exactly one project."""
+        """List project-visible agent releases, including historical pinned releases."""
 
         rows = await self._workbench_agent_rows(
             project_id=project_id,
@@ -658,7 +658,7 @@ class PostgresSupervisorStore:
     async def get_workbench_agent(
         self, *, project_id: str, policy_revision: str, registration_id: str, registration_version: str
     ) -> WorkbenchAgentRecord | None:
-        """Return one active project-authorized agent release without exposing its full manifest."""
+        """Return one project-visible agent release without exposing its full manifest."""
 
         rows = await self._workbench_agent_rows(
             project_id=project_id,
@@ -3064,7 +3064,7 @@ def _agent_run_record(row: object) -> AgentRunRecord:
 
 
 def _workbench_agent_records(rows: list[Mapping[str, Any]]) -> list[WorkbenchAgentRecord]:
-    """Group persisted project routes under their immutable active agent release."""
+    """Group project routes under immutable releases, including historical releases."""
 
     grouped: dict[tuple[str, str], WorkbenchAgentRecord] = {}
     for row in rows:
