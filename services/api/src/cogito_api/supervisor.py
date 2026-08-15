@@ -1753,7 +1753,7 @@ class PostgresSupervisorStore:
                     WHERE run_id = :run_id
                       AND status = 'planning'
                       AND product_specification_revision = :expected_product_specification_revision
-                      AND (:generation_claim IS NULL OR product_specification_generation_claim = :generation_claim)
+                      AND (CAST(:generation_claim AS text) IS NULL OR product_specification_generation_claim = :generation_claim)
                     RETURNING run_id, status, source_artifact_ref, source_artifact_sha256,
                               target_repos, spec_set, constraints, priority, submitted_at, submitted_by,
                               plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
