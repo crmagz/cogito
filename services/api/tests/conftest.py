@@ -90,8 +90,14 @@ def supervisor_store() -> InMemorySupervisorStore:
 def valid_product_specification() -> dict:
     """Return a source-grounded product specification accepted by the planner draft contract."""
 
-    def source(statement_id: str, text: str) -> dict:
-        return {"id": statement_id, "text": text, "kind": "source", "source_segment_ids": ["source-1"]}
+    def source(statement_id: str, text: str, requirement_ids: list[str] | None = None) -> dict:
+        return {
+            "id": statement_id,
+            "text": text,
+            "kind": "source",
+            "source_segment_ids": ["source-1"],
+            "requirement_ids": requirement_ids or [],
+        }
 
     return {
         "schema_version": 2,
@@ -101,9 +107,15 @@ def valid_product_specification() -> dict:
         "actors": [source("actor-1", "API consumers")],
         "in_scope": [source("scope-in-1", "Rate limiting on API endpoints")],
         "out_of_scope": [source("scope-out-1", "Changing authentication")],
-        "functional_requirements": [source("functional-1", "Enforce a bounded request rate.")],
+        "functional_requirements": [
+            source("functional-1", "Enforce a bounded request rate."),
+            source("functional-2", "Report rate-limit decisions in request metrics."),
+        ],
         "non_functional_requirements": [],
-        "acceptance_criteria": [source("acceptance-1", "Requests beyond the limit are rejected.")],
+        "acceptance_criteria": [
+            source("acceptance-1", "Requests beyond the limit are rejected.", ["functional-1"]),
+            source("acceptance-2", "Rate-limit decisions are visible in request metrics.", ["functional-2"]),
+        ],
         "assumptions": [],
         "risks": [source("risk-1", "A low threshold can reject valid traffic.")],
         "unresolved_questions": [
@@ -164,7 +176,7 @@ def valid_plan() -> dict:
                 "acceptance_criteria": ["Rate limiting active on all routes"],
                 "verification": ["npm run test"],
                 "depends_on": ["phase-1"],
-                "requirement_ids": [],
+                "requirement_ids": ["functional-2"],
             },
         ],
         "constraints": {

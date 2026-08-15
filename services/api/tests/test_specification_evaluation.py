@@ -14,7 +14,7 @@ def test_v2_specification_evaluation_is_ready_and_digest_bound(valid_product_spe
     assert evaluation.readiness.value == "ready"
     assert evaluation.specification_sha256 == "a" * 64
     assert evaluation.specification_revision == 3
-    assert evaluation.coverage.covered_requirement_ids == ["functional-1"]
+    assert evaluation.coverage.covered_requirement_ids == ["functional-1", "functional-2"]
 
 
 def test_legacy_or_ambiguous_specification_needs_revision(valid_product_specification: dict) -> None:
@@ -37,7 +37,7 @@ def test_traceability_rejects_unknown_duplicate_and_uncovered_requirements(valid
     specification = ProductSpecification.model_validate(valid_product_specification)
 
     for phases, message in (
-        ([[]], "does not cover"),
+        ([[]], "each plan phase"),
         ([["unknown"]], "unknown"),
         ([["functional-1"], ["functional-1"]], "more than once"),
     ):
@@ -47,3 +47,28 @@ def test_traceability_rejects_unknown_duplicate_and_uncovered_requirements(valid
             assert message in str(error)
         else:
             raise AssertionError("invalid traceability was accepted")
+
+
+def test_evaluation_requires_acceptance_coverage_for_each_requirement(valid_product_specification: dict) -> None:
+    valid_product_specification["acceptance_criteria"][1]["requirement_ids"] = []
+
+    evaluation = evaluate_specification(
+        ProductSpecification.model_validate(valid_product_specification),
+        specification_sha256="c" * 64,
+        specification_revision=1,
+    )
+
+    assert evaluation.readiness.value == "needs_revision"
+    assert evaluation.coverage.uncovered_requirement_ids == ["functional-2"]
+
+
+def test_claimed_requirement_cannot_be_an_assumption(valid_product_specification: dict) -> None:
+    valid_product_specification["functional_requirements"][0]["kind"] = "assumption"
+    valid_product_specification["functional_requirements"][0]["source_segment_ids"] = []
+
+    try:
+        ProductSpecification.model_validate(valid_product_specification)
+    except ValueError as error:
+        assert "source-grounded" in str(error)
+    else:
+        raise AssertionError("uncertain requirement was accepted as a claimed requirement")

@@ -141,6 +141,11 @@ class ProductSpecificationStatement(BaseModel):
         max_length=32,
         description="Explicit immutable intake segments supporting a source-grounded statement",
     )
+    requirement_ids: list[str] = Field(
+        default_factory=list,
+        max_length=256,
+        description="Requirement IDs that this acceptance criterion verifies",
+    )
 
     @model_validator(mode="after")
     def validate_provenance(self) -> "ProductSpecificationStatement":
@@ -148,6 +153,8 @@ class ProductSpecificationStatement(BaseModel):
 
         if len(set(self.source_segment_ids)) != len(self.source_segment_ids):
             raise ValueError("product specification source segment IDs must be unique")
+        if len(set(self.requirement_ids)) != len(self.requirement_ids):
+            raise ValueError("product specification requirement IDs must be unique")
         if self.kind is ProductSpecificationStatementKind.SOURCE and not self.source_segment_ids:
             raise ValueError("source-grounded product specification statements require a source segment")
         if self.kind is not ProductSpecificationStatementKind.SOURCE and self.source_segment_ids:
@@ -280,8 +287,20 @@ class ProductSpecification(BaseModel):
             *self.constraints,
             *self.dependencies,
         ]
-        if any(statement.kind is ProductSpecificationStatementKind.QUESTION for statement in factual):
-            raise ValueError("product requirements and risks cannot be unresolved questions")
+        if any(statement.kind is not ProductSpecificationStatementKind.SOURCE for statement in factual):
+            raise ValueError("claimed product requirements and risks must be source-grounded")
+        requirement_ids = set(self.requirement_ids)
+        invalid_acceptance_references = {
+            requirement_id
+            for criterion in self.acceptance_criteria
+            for requirement_id in criterion.requirement_ids
+            if requirement_id not in requirement_ids
+        }
+        if invalid_acceptance_references:
+            raise ValueError(
+                "acceptance criteria reference unknown requirement IDs: "
+                + ", ".join(sorted(invalid_acceptance_references))
+            )
         if any(statement.kind is not ProductSpecificationStatementKind.ASSUMPTION for statement in self.assumptions):
             raise ValueError("product specification assumptions must be labelled assumptions")
         if any(statement.kind is not ProductSpecificationStatementKind.QUESTION for statement in self.unresolved_questions):
@@ -945,6 +964,20 @@ class ProductSpecificationSelectionRequest(BaseModel):
     )
 
 
+class SpecificationEvaluationWaiverRequest(BaseModel):
+    """An explicit, auditable exception for a failing immutable evaluation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the displayed evaluation being waived",
+    )
+    rationale: str = Field(min_length=1, max_length=2_000, description="Why the named evaluation finding is accepted")
+
+
 class ProductSpecificationRevisionRequest(BaseModel):
     """Strict human-authored revision anchored to the displayed current draft."""
 
@@ -1568,6 +1601,15 @@ class RunEnvelope(BaseModel):
     requires_implementation_approval: bool = Field(
         default=False,
         description="Whether converged implementation evidence must receive a human decision before finalization",
+    )
+    specification_evaluation_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Evaluation digest that authorized the immutable plan snapshot",
+    )
+    specification_requirement_ids: list[str] = Field(
+        default_factory=list,
+        description="Exact selected-specification requirements that must be traceable in the plan",
     )
     registry_resolutions: list[RegistrationReference] = Field(
         default_factory=list,

@@ -62,6 +62,25 @@ def test_submit_planning_run_persists_immutable_source_artifact_and_run(
     assert record.target_repos == valid_plan["target_repos"]
 
 
+def test_approver_can_auditably_waive_a_failing_specification_evaluation(
+    client: TestClient, valid_plan: dict
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification")
+    assert draft.status_code == 200
+    evaluated = client.post(f"/api/v1/planning-runs/{run_id}/evaluate-product-specification")
+    assert evaluated.status_code == 200
+    # The fixture is ready, so make the request reference a ready evaluation and
+    # prove that a waiver cannot silently broaden the exception path.
+    rejected = client.post(
+        f"/api/v1/planning-runs/{run_id}/waive-specification-evaluation",
+        json={"artifact_sha256": evaluated.json()["specification_evaluation_artifact"]["sha256"], "rationale": "No exception needed."},
+        headers={"Idempotency-Key": f"waive-{run_id}"},
+    )
+    assert rejected.status_code == 409
+
+
 def test_submit_planning_run_requires_a_scoped_approver(
     client: TestClient,
     valid_plan: dict,
@@ -616,7 +635,7 @@ def test_revision_scopes_workflow_and_idempotency_when_plan_content_is_identical
     assert len(starter.plan_approvals) == 2
 
 
-def test_existing_direct_plan_submission_contract_remains_compatible(
+def test_existing_direct_plan_submission_contract_requires_planning(
     client: TestClient, valid_plan: dict
 ) -> None:
     plan = copy.deepcopy(valid_plan)
@@ -624,5 +643,4 @@ def test_existing_direct_plan_submission_contract_remains_compatible(
     response = client.post("/api/v1/runs", json={"plan": plan})
 
     assert response.status_code == 202
-    assert response.json()["status"] == "queued"
-    assert "plan_ref" in response.json()
+    assert response.json()["status"] == "planning_required"

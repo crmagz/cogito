@@ -67,6 +67,8 @@ class RunEnvelope:
     submitted_by: str = ""
     requires_plan_approval: bool = False
     requires_implementation_approval: bool = False
+    specification_evaluation_sha256: str | None = None
+    specification_requirement_ids: list[str] = field(default_factory=list)
     registry_resolutions: list[RegistrationReference] = field(default_factory=list)
     traceparent: str | None = None
     tracestate: str | None = None
@@ -142,6 +144,7 @@ class PlanPhase:
     acceptance_criteria: list[str]
     verification: list[str]
     depends_on: list[str] = field(default_factory=list)
+    requirement_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, value: object) -> "PlanPhase":
@@ -163,6 +166,11 @@ class PlanPhase:
         depends_on = value.get("depends_on", [])
         if not isinstance(depends_on, list) or not all(isinstance(item, str) and item.strip() for item in depends_on):
             raise ValueError("plan phase dependencies must be a list of non-empty phase IDs")
+        requirement_ids = value.get("requirement_ids", [])
+        if not isinstance(requirement_ids, list) or not all(
+            isinstance(item, str) and item.strip() for item in requirement_ids
+        ) or len(set(requirement_ids)) != len(requirement_ids):
+            raise ValueError("plan phase requirement IDs must be unique non-empty strings")
         return cls(
             id=value["id"],
             name=value["name"],
@@ -171,6 +179,7 @@ class PlanPhase:
             acceptance_criteria=value["acceptance_criteria"],
             verification=value["verification"],
             depends_on=depends_on,
+            requirement_ids=requirement_ids,
         )
 
 

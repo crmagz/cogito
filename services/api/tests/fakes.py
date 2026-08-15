@@ -165,6 +165,7 @@ class InMemorySupervisorStore:
         self.planning_runs: dict[str, PlanningRunRecord] = {}
         self.product_specification_generation_claims: dict[str, str] = {}
         self.product_specification_generation_claimed_at: dict[str, datetime] = {}
+        self.specification_evaluation_generation_claims: dict[str, str] = {}
         self.plan_product_specification_bindings: dict[tuple[str, int], tuple[int, ArtifactReference]] = {}
         self.approvals: dict[tuple[str, int, str], ApprovalRecord] = {}
         self.approval_request_hashes: dict[tuple[str, int, str], str] = {}
@@ -573,8 +574,11 @@ class InMemorySupervisorStore:
         specification_revision: int,
         specification_sha256: str,
         readiness: str,
+        generation_claim: str | None = None,
     ) -> PlanningRunRecord:
         record = self.planning_runs[run_id]
+        if generation_claim is not None and self.specification_evaluation_generation_claims.get(run_id) != generation_claim:
+            raise ValueError("specification evaluation generation claim was lost")
         if (
             record.status is not PlanningRunStatus.PLANNING
             or record.product_specification_revision != specification_revision
@@ -590,7 +594,38 @@ class InMemorySupervisorStore:
             specification_evaluation_readiness=readiness,
         )
         self.planning_runs[run_id] = updated
+        self.specification_evaluation_generation_claims.pop(run_id, None)
         self._append_coordination_event(run_id, "specification_evaluated", artifact=artifact)
+        return updated
+
+    async def claim_specification_evaluation_generation(self, run_id: str) -> str | None:
+        record = self.planning_runs[run_id]
+        if record.specification_evaluation_artifact is not None or run_id in self.specification_evaluation_generation_claims:
+            return None
+        claim = f"evaluation-claim-{run_id}"
+        self.specification_evaluation_generation_claims[run_id] = claim
+        return claim
+
+    async def release_specification_evaluation_generation(self, run_id: str, generation_claim: str) -> None:
+        if self.specification_evaluation_generation_claims.get(run_id) == generation_claim:
+            self.specification_evaluation_generation_claims.pop(run_id, None)
+
+    async def waive_specification_evaluation(
+        self, *, run_id: str, artifact_sha256: str, actor_id: str, rationale: str,
+        idempotency_key: str, request_sha256: str,
+    ) -> PlanningRunRecord:
+        del actor_id, rationale, idempotency_key, request_sha256
+        record = self.planning_runs[run_id]
+        if (
+            record.status is not PlanningRunStatus.PLANNING
+            or record.specification_evaluation_artifact is None
+            or record.specification_evaluation_artifact.sha256 != artifact_sha256
+            or record.specification_evaluation_readiness != "needs_revision"
+        ):
+            raise ValueError("evaluation is not eligible for waiver")
+        updated = replace(record, specification_evaluation_readiness="waived")
+        self.planning_runs[run_id] = updated
+        self._append_coordination_event(run_id, "specification_evaluation_waived")
         return updated
 
     async def select_product_specification(
@@ -1222,8 +1257,8 @@ class FakePlanner:
         self, context: ProductSpecificationContext, gateway: AgentGatewayResolution
     ) -> ProductSpecification:
         if self.product_specification is None:
-            def source(statement_id: str) -> dict[str, object]:
-                return {"id": statement_id, "text": statement_id.replace("-", " "), "kind": "source", "source_segment_ids": ["source-1"]}
+            def source(statement_id: str, requirement_ids: list[str] | None = None) -> dict[str, object]:
+                return {"id": statement_id, "text": statement_id.replace("-", " "), "kind": "source", "source_segment_ids": ["source-1"], "requirement_ids": requirement_ids or []}
 
             self.product_specification = ProductSpecification.model_validate(
                 {
@@ -1231,7 +1266,8 @@ class FakePlanner:
                     "title": source("title"), "problem_statement": source("problem"),
                     "desired_outcomes": [source("outcome")], "actors": [source("actor")],
                     "in_scope": [source("in-scope")], "out_of_scope": [source("out-of-scope")],
-                    "functional_requirements": [source("functional-1")], "acceptance_criteria": [source("acceptance")],
+                    "functional_requirements": [source("functional-1"), source("functional-2")],
+                    "acceptance_criteria": [source("acceptance-1", ["functional-1"]), source("acceptance-2", ["functional-2"])],
                     "personas": [source("persona")], "user_journeys": [source("journey")],
                     "constraints": [source("constraint")], "dependencies": [source("dependency")],
                 }

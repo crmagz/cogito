@@ -42,6 +42,7 @@ from .models import (
     MAX_PRODUCT_SPECIFICATION_BYTES,
     ProductSpecificationRevisionRequest,
     ProductSpecificationSelectionRequest,
+    SpecificationEvaluationWaiverRequest,
     PlanningRunResponse,
     PlanningRunStatus,
     PlanningRunSubmission,
@@ -117,6 +118,26 @@ def _violation_response(violations: list[Violation]) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content={"error": "validation_failed", "violations": [v.model_dump() for v in violations]},
+    )
+
+
+def _planning_run_response(record: PlanningRunRecord) -> PlanningRunResponse:
+    """Serialize every lifecycle binding; mutation responses must not hide provenance."""
+
+    return PlanningRunResponse(
+        run_id=record.run_id,
+        status=record.status,
+        source_artifact=record.source_artifact,
+        product_specification_artifact=record.product_specification_artifact,
+        product_specification_revision=record.product_specification_revision,
+        selected_product_specification_artifact=record.selected_product_specification_artifact,
+        selected_product_specification_revision=record.selected_product_specification_revision,
+        specification_evaluation_artifact=record.specification_evaluation_artifact,
+        specification_evaluation_readiness=record.specification_evaluation_readiness,
+        selected_specification_evaluation_artifact=record.selected_specification_evaluation_artifact,
+        plan_artifact=record.plan_artifact,
+        implementation_artifact=record.implementation_artifact,
+        submitted_at=record.submitted_at,
     )
 
 
@@ -339,40 +360,31 @@ def create_app(
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"status": "not_ready"})
 
     @app.post("/api/v1/runs")
-    async def submit_run(submission: RunSubmission) -> JSONResponse:
+    async def submit_run(
+        submission: RunSubmission,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Accept only a non-executing legacy inventory request.
+
+        This compatibility route records role inventory for existing clients,
+        but deliberately neither persists the caller's plan nor starts
+        Temporal. Executable work must use the evaluated planning-run path.
+        """
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
         plan = submission.plan
-        violations = (
-            validate_phase_dag(plan.phases)
-            + validate_constraints(plan.constraints, settings)
-            + validate_target_repositories(plan.target_repos, settings.allowed_git_hosts)
-            + validate_spec_reference(plan.spec_set)
-        )
-        if violations:
-            raise PlanValidationError(violations)
-
         run_id = str(uuid.uuid4())
-
-        if submission.dry_run:
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"run_id": run_id, "status": "validated", "dry_run": True},
-            )
-
         submitted_at = datetime.now(timezone.utc).isoformat()
         await supervisor_store.create_agent_run(
             AgentRunRecord(
-                run_id=run_id,
-                root_run_id=run_id,
-                parent_run_id=None,
-                agent_name="supervisor",
-                status=AgentRunStatus.QUEUED,
-                trace_id=telemetry.trace_id() or secrets.token_hex(16),
-                created_at=submitted_at,
-                updated_at=submitted_at,
+                run_id=run_id, root_run_id=run_id, parent_run_id=None, agent_name="supervisor",
+                status=AgentRunStatus.QUEUED, trace_id=telemetry.trace_id() or secrets.token_hex(16),
+                created_at=submitted_at, updated_at=submitted_at,
             )
         )
         try:
-            resolutions = await resolve_roles(
+            await resolve_roles(
                 run_id,
                 ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
                 settings.workbench_default_project_id,
@@ -380,43 +392,9 @@ def create_app(
             )
         except RegistryConflictError as error:
             raise HTTPException(status_code=503, detail="registry is temporarily unavailable") from error
-        telemetry.transition(AgentRunStatus.QUEUED.value, "supervisor")
-        try:
-            snapshot = store.put_plan(run_id, plan)
-            store.put_status(
-                run_id,
-                {
-                    "run_id": run_id,
-                    "status": "queued",
-                    "plan_ref": snapshot.ref,
-                    "plan_sha256": snapshot.sha256,
-                    "submitted_at": submitted_at,
-                },
-            )
-        except PlanStoreUnavailableError as error:
-            raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
-
-        carrier: dict[str, str] = {}
-        telemetry.inject(carrier)
-        envelope = RunEnvelope(
-            run_id=run_id,
-            plan_ref=snapshot.ref,
-            plan_sha256=snapshot.sha256,
-            spec_ref=plan.spec_set,
-            target_repos=plan.target_repos,
-            constraints=plan.constraints,
-            priority=submission.priority,
-            submitted_at=submitted_at,
-            submitted_by="api",
-            registry_resolutions=resolutions,
-            traceparent=carrier.get("traceparent"),
-            tracestate=carrier.get("tracestate"),
-        )
-        await starter.start_run(envelope)
-
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
-            content={"run_id": run_id, "status": "queued", "plan_ref": snapshot.ref, "estimated_start": None},
+            content={"run_id": run_id, "status": "planning_required", "detail": "create a planning run to execute work"},
         )
 
     @app.post("/api/v1/planning-runs")
@@ -480,18 +458,7 @@ def create_app(
             project_id=settings.workbench_default_project_id,
         )
         await supervisor_store.create_planning_run(record)
-        response = PlanningRunResponse(
-            run_id=record.run_id,
-            status=record.status,
-            source_artifact=record.source_artifact,
-            product_specification_artifact=record.product_specification_artifact,
-            product_specification_revision=record.product_specification_revision,
-            selected_product_specification_artifact=record.selected_product_specification_artifact,
-            selected_product_specification_revision=record.selected_product_specification_revision,
-            plan_artifact=record.plan_artifact,
-            implementation_artifact=record.implementation_artifact,
-            submitted_at=record.submitted_at,
-        )
+        response = _planning_run_response(record)
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
 
     @app.post("/api/v1/planning-runs/{run_id}/generate-product-specification")
@@ -564,18 +531,7 @@ def create_app(
             updated = record
         else:
             raise HTTPException(status_code=409, detail="planning run is not eligible for product specification generation")
-        response = PlanningRunResponse(
-            run_id=updated.run_id,
-            status=updated.status,
-            source_artifact=updated.source_artifact,
-            product_specification_artifact=updated.product_specification_artifact,
-            product_specification_revision=updated.product_specification_revision,
-            selected_product_specification_artifact=updated.selected_product_specification_artifact,
-            selected_product_specification_revision=updated.selected_product_specification_revision,
-            plan_artifact=updated.plan_artifact,
-            implementation_artifact=updated.implementation_artifact,
-            submitted_at=updated.submitted_at,
-        )
+        response = _planning_run_response(updated)
         return JSONResponse(content=response.model_dump(mode="json"))
 
     @app.post("/api/v1/planning-runs/{run_id}/generate-plan")
@@ -688,6 +644,14 @@ def create_app(
             raise HTTPException(status_code=409, detail="planning run is not eligible for plan generation")
         assert updated.plan_artifact is not None
         try:
+            if updated.selected_product_specification_artifact is None or updated.selected_specification_evaluation_artifact is None:
+                raise ValueError("persisted plan is missing selected specification provenance")
+            selected_specification = ProductSpecification.model_validate_json(
+                store.get_verified_artifact(
+                    updated.selected_product_specification_artifact,
+                    max_bytes=MAX_PRODUCT_SPECIFICATION_BYTES,
+                )
+            )
             carrier: dict[str, str] = {}
             telemetry.inject(carrier)
             resolutions = await resolve_roles(
@@ -710,6 +674,8 @@ def create_app(
                     workflow_id=updated.workflow_id,
                     requires_plan_approval=True,
                     requires_implementation_approval=True,
+                    specification_evaluation_sha256=updated.selected_specification_evaluation_artifact.sha256,
+                    specification_requirement_ids=selected_specification.requirement_ids,
                     registry_resolutions=resolutions,
                     traceparent=carrier.get("traceparent"),
                     tracestate=carrier.get("tracestate"),
@@ -720,18 +686,7 @@ def create_app(
                 status_code=503,
                 detail="plan was persisted but Temporal is unavailable; retry this request to start its workflow",
             ) from error
-        response = PlanningRunResponse(
-            run_id=updated.run_id,
-            status=updated.status,
-            source_artifact=updated.source_artifact,
-            product_specification_artifact=updated.product_specification_artifact,
-            product_specification_revision=updated.product_specification_revision,
-            selected_product_specification_artifact=updated.selected_product_specification_artifact,
-            selected_product_specification_revision=updated.selected_product_specification_revision,
-            plan_artifact=updated.plan_artifact,
-            implementation_artifact=updated.implementation_artifact,
-            submitted_at=updated.submitted_at,
-        )
+        response = _planning_run_response(updated)
         return JSONResponse(content=response.model_dump(mode="json"))
 
     @app.post("/api/v1/planning-runs/{run_id}/select-product-specification")
@@ -775,18 +730,7 @@ def create_app(
             )
         except (ValueError, ApprovalConflictError) as error:
             raise HTTPException(status_code=409, detail="product specification selection is stale or invalid") from error
-        response = PlanningRunResponse(
-            run_id=updated.run_id,
-            status=updated.status,
-            source_artifact=updated.source_artifact,
-            product_specification_artifact=updated.product_specification_artifact,
-            product_specification_revision=updated.product_specification_revision,
-            selected_product_specification_artifact=updated.selected_product_specification_artifact,
-            selected_product_specification_revision=updated.selected_product_specification_revision,
-            plan_artifact=updated.plan_artifact,
-            implementation_artifact=updated.implementation_artifact,
-            submitted_at=updated.submitted_at,
-        )
+        response = _planning_run_response(updated)
         return JSONResponse(content=response.model_dump(mode="json"))
 
     @app.post("/api/v1/planning-runs/{run_id}/evaluate-product-specification")
@@ -807,42 +751,75 @@ def create_app(
         if record.specification_evaluation_artifact is not None:
             updated = record
         else:
-            try:
-                specification = ProductSpecification.model_validate_json(
-                    store.get_verified_artifact(record.product_specification_artifact, max_bytes=MAX_PRODUCT_SPECIFICATION_BYTES)
-                )
-                evaluation = evaluate_specification(
-                    specification,
-                    specification_sha256=record.product_specification_artifact.sha256,
-                    specification_revision=record.product_specification_revision,
-                )
-                artifact = store.put_specification_evaluation(run_id, record.product_specification_revision, evaluation)
-                updated = await supervisor_store.record_specification_evaluation(
-                    run_id,
-                    artifact,
-                    record.product_specification_revision,
-                    record.product_specification_artifact.sha256,
-                    evaluation.readiness.value,
-                )
-            except (PlanStoreUnavailableError, ValueError) as error:
-                raise HTTPException(status_code=503, detail="specification evaluation storage is temporarily unavailable") from error
-        return JSONResponse(
-            content=PlanningRunResponse(
-                run_id=updated.run_id,
-                status=updated.status,
-                source_artifact=updated.source_artifact,
-                product_specification_artifact=updated.product_specification_artifact,
-                product_specification_revision=updated.product_specification_revision,
-                selected_product_specification_artifact=updated.selected_product_specification_artifact,
-                selected_product_specification_revision=updated.selected_product_specification_revision,
-                specification_evaluation_artifact=updated.specification_evaluation_artifact,
-                specification_evaluation_readiness=updated.specification_evaluation_readiness,
-                selected_specification_evaluation_artifact=updated.selected_specification_evaluation_artifact,
-                plan_artifact=updated.plan_artifact,
-                implementation_artifact=updated.implementation_artifact,
-                submitted_at=updated.submitted_at,
-            ).model_dump(mode="json")
-        )
+            generation_claim = await supervisor_store.claim_specification_evaluation_generation(run_id)
+            if generation_claim is None:
+                latest = await supervisor_store.get_planning_run(run_id)
+                if latest is not None and latest.specification_evaluation_artifact is not None:
+                    updated = latest
+                else:
+                    raise HTTPException(status_code=409, detail="specification evaluation is already in progress")
+            else:
+                try:
+                    try:
+                        specification = ProductSpecification.model_validate_json(
+                            store.get_verified_artifact(record.product_specification_artifact, max_bytes=MAX_PRODUCT_SPECIFICATION_BYTES)
+                        )
+                        evaluation = evaluate_specification(
+                            specification,
+                            specification_sha256=record.product_specification_artifact.sha256,
+                            specification_revision=record.product_specification_revision,
+                        )
+                        artifact = store.put_specification_evaluation(run_id, record.product_specification_revision, evaluation)
+                        updated = await supervisor_store.record_specification_evaluation(
+                            run_id, artifact, record.product_specification_revision,
+                            record.product_specification_artifact.sha256, evaluation.readiness.value, generation_claim,
+                        )
+                    except PlanStoreUnavailableError as error:
+                        raise HTTPException(status_code=503, detail="specification evaluation storage is temporarily unavailable") from error
+                    except ValueError as error:
+                        raise HTTPException(status_code=409, detail="product specification changed while evaluation was generated") from error
+                finally:
+                    await supervisor_store.release_specification_evaluation_generation(run_id, generation_claim)
+            return JSONResponse(content=_planning_run_response(updated).model_dump(mode="json"))
+        # The completed-evaluation replay path is intentionally below the claim
+        # branch so it returns the original immutable digest.
+        if record.specification_evaluation_artifact is None:
+            raise HTTPException(status_code=409, detail="specification evaluation is already in progress")
+        updated = record
+        return JSONResponse(content=_planning_run_response(updated).model_dump(mode="json"))
+
+    @app.post("/api/v1/planning-runs/{run_id}/waive-specification-evaluation")
+    async def waive_specification_evaluation(
+        run_id: str,
+        request_body: SpecificationEvaluationWaiverRequest,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """Record a human exception without mutating the evaluated artifact."""
+
+        if not idempotency_key or len(idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        request_sha256 = sha256(
+            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        try:
+            updated = await supervisor_store.waive_specification_evaluation(
+                run_id=run_id,
+                artifact_sha256=request_body.artifact_sha256,
+                actor_id=principal.subject,
+                rationale=request_body.rationale.strip(),
+                idempotency_key=idempotency_key,
+                request_sha256=request_sha256,
+            )
+        except (ValueError, ApprovalConflictError) as error:
+            raise HTTPException(status_code=409, detail="specification evaluation waiver is stale or invalid") from error
+        return JSONResponse(content=_planning_run_response(updated).model_dump(mode="json"))
 
     @app.post("/api/v1/runs/{run_id}/approvals/plan")
     async def approve_plan(
@@ -981,18 +958,7 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
-        response = PlanningRunResponse(
-            run_id=record.run_id,
-            status=record.status,
-            source_artifact=record.source_artifact,
-            product_specification_artifact=record.product_specification_artifact,
-            product_specification_revision=record.product_specification_revision,
-            selected_product_specification_artifact=record.selected_product_specification_artifact,
-            selected_product_specification_revision=record.selected_product_specification_revision,
-            plan_artifact=record.plan_artifact,
-            implementation_artifact=record.implementation_artifact,
-            submitted_at=record.submitted_at,
-        )
+        response = _planning_run_response(record)
         return JSONResponse(content=response.model_dump(mode="json"))
 
     @app.post("/api/v1/planning-runs/{run_id}/revise-product-specification")
@@ -1034,15 +1000,7 @@ def create_app(
             )
         except (ValueError, ApprovalConflictError) as error:
             raise HTTPException(status_code=409, detail="product specification revision is stale or invalid") from error
-        response = PlanningRunResponse(
-            run_id=updated.run_id, status=updated.status, source_artifact=updated.source_artifact,
-            product_specification_artifact=updated.product_specification_artifact,
-            product_specification_revision=updated.product_specification_revision,
-            selected_product_specification_artifact=updated.selected_product_specification_artifact,
-            selected_product_specification_revision=updated.selected_product_specification_revision,
-            plan_artifact=updated.plan_artifact, implementation_artifact=updated.implementation_artifact,
-            submitted_at=updated.submitted_at,
-        )
+        response = _planning_run_response(updated)
         return JSONResponse(content=response.model_dump(mode="json"))
 
     async def coordination_response(record: PlanningRunRecord) -> CoordinationRunResponse:
@@ -1378,7 +1336,7 @@ def create_app(
                     if record.selected_product_specification_artifact is not None
                     else WorkbenchStageState.AWAITING_OPERATOR
                     if record.product_specification_artifact is not None
-                    else WorkbenchStageState.IN_PROGRESS
+                    else WorkbenchStageState.AWAITING_OPERATOR
                 ),
                 availability=WorkbenchStageAvailability.AUTHORITATIVE,
                 reason=(
@@ -1414,7 +1372,7 @@ def create_app(
                     if record.specification_evaluation_readiness in {"ready", "waived"}
                     else "The immutable evaluation requires a revised product specification."
                     if record.specification_evaluation_readiness == "needs_revision"
-                    else "A product specification is ready for deterministic evaluation."
+                    else "An operator must request immutable specification evaluation."
                     if record.product_specification_artifact is not None
                     else "No immutable product specification is available to evaluate."
                 ),

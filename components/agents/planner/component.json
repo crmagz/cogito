@@ -9,7 +9,7 @@
   "execution_class": "adapter",
   "owner": "cogito-platform",
   "input_schema": {"schema_id": "source_specification", "version": "1"},
-  "output_schema": {"schema_id": "product_specification", "version": "1"},
+  "output_schema": {"schema_id": "product_specification", "version": "2"},
   "capabilities": ["generate_plan", "generate_product_specification"],
   "grants": [{"tool_id": "planning_model", "tool_version": "1.0.0", "scope": "plan_generation"}],
   "quality_gates": ["artifact_contract", "plan_approval", "prompt_redaction"]

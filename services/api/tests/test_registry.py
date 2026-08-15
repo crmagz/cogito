@@ -175,7 +175,7 @@ def test_non_mcp_manifest_identity_remains_compatible_with_registered_releases()
     planner = next(item for item in catalog.components if item.registration_id == "planner")
     planning_model = next(item for item in catalog.components if item.registration_id == "planning_model")
 
-    assert manifest_sha256(planner) == "e126d41f423db7351f5859e68e6692eff02d44e0372db5bcad1400257cc37278"
+    assert manifest_sha256(planner) == "ac8eab63261d1316eb4f44ff060c2fe656593e4d8c073a2b20f8601bbf0f5417"
     assert manifest_sha256(planning_model) == "e26a3b427c07ef786885344de24481187b1f2a6a6dd51dffdd4fe196c5245cc6"
 
 

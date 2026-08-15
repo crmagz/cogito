@@ -31,9 +31,9 @@ graph TD
     G -->|ready| J --> K --> L --> M --> N --> O
 ```
 
-`waived` is a planned alternative to `ready`, but the current deployment has
-no persisted evaluation-waiver endpoint. A failed evaluation must remain
-blocked; it is not a waiver.
+`waived` is an explicit approver exception, not an evaluator outcome. It is
+available only through the digest-bound waiver endpoint, requires a rationale
+and idempotency key, and is recorded separately from the immutable evaluation.
 
 ## Operator states and evidence
 
@@ -41,7 +41,7 @@ blocked; it is not a waiver.
 | --- | --- | --- | --- |
 | Source | Submit a run | Store a digest-bound source artifact and planning record | `Specification: completed` |
 | Product specification | Generate draft | LiteLLM returns v2 contract; API stores immutable revision | `Product specification: awaiting_operator` |
-| Evaluation | Evaluate exact draft | Deterministic evaluator stores digest/revision-bound evidence | `completed` when `ready`; otherwise `needs_revision` |
+| Evaluation | Evaluate exact draft, then revise or explicitly waive if needed | Deterministic evaluator stores digest/revision-bound evidence; a waiver stores approver/rationale against that digest | `completed` when `ready` or `waived`; otherwise `needs_revision` |
 | Revision | Submit corrected specification | Store new revision; clear old selection/evaluation pointers | `Product specification: needs_revision` |
 | Selection | Select ready revision | Persist matching specification and evaluation provenance | `Product specification: completed` |
 | Planning | Generate plan | Validate requirement-to-phase coverage; store immutable plan | `Planning: completed`; then `Plan approval: awaiting_operator` |
@@ -52,16 +52,14 @@ The run's broad status can stay `planning` while it is stopped at a gate. The
 stage projection is the operator instruction: `Planning: needs_revision` means
 no planner or worker is executing and a specification revision is required.
 
-## Current Workbench limitation
+## Workbench integration
 
-The Kind Workbench image currently deployed as
-`cogito-workbench:phase18-agent-operations-r13` predates the evaluation UI. It
-can fetch the server's run projection but does not render an evaluation dossier
-or an **Evaluate product specification** control. Its relay allow-list also
-rejects the new evaluation mutation route.
-
-This is a UI deployment gap, not an authorization bypass. The server-owned
-projection is authoritative at:
+The companion [Workbench evaluation lifecycle PR](https://github.com/crmagz/workbench/pull/16)
+adds the relay allow-list, immutable evaluation evidence view, and the
+**Evaluate product specification** control. It holds selection until the API
+reports `ready` or `waived`; `needs_revision` explicitly directs the operator
+to revise the specification. The server-owned projection remains authoritative
+at:
 
 ```text
 GET /api/v1/workbench/runs/{run_id}
