@@ -28,3 +28,11 @@ def test_product_specification_migration_uses_a_postgresql_safe_constraint_name(
     migration = (Path(__file__).parents[1] / "alembic/versions/20260812_19_select_product_specification.py").read_text()
 
     assert '"supervisor_runs_selected_spec_positive_revision"' in migration
+
+
+def test_product_specification_generation_claim_is_typed_for_postgresql() -> None:
+    """A nullable claim must have a SQL type when the real PostgreSQL path binds it."""
+
+    supervisor = (Path(__file__).parents[1] / "src/cogito_api/supervisor.py").read_text()
+
+    assert "CAST(:generation_claim AS text) IS NULL" in supervisor
