@@ -9,26 +9,26 @@ action.
 ## Lifecycle
 
 ```mermaid
-flowchart TD
-    A[Operator submits source and pinned repository commit]
-    B[API stores immutable source artifact and creates run]
-    C[Operator requests Generate product specification]
-    D[Planner generates ProductSpecification v2; API stores revision]
-    E[Operator requests Evaluate product specification]
-    F[API deterministically evaluates exact revision and stores evidence]
-    G{Evaluation readiness}
-    H[needs_revision: findings and required decisions]
-    I[Operator submits corrected immutable specification revision]
-    J[ready: operator selects exact specification revision]
-    K[Operator requests Generate plan]
-    L[API validates traceability and stores immutable plan]
-    M[One plan-approval / workflow-authority decision]
-    N[Temporal worker executes approved plan and records bounded evidence]
-    O[Implementation review and completion]
+graph TD
+    A["Operator submits source and pinned repository commit"]
+    B["API stores immutable source artifact and creates run"]
+    C["Operator requests Generate product specification"]
+    D["Planner generates ProductSpecification v2 and API stores revision"]
+    E["Operator requests Evaluate product specification"]
+    F["API evaluates exact revision and stores immutable evidence"]
+    G{"Evaluation readiness"}
+    H["needs_revision: findings and required decisions"]
+    I["Operator submits corrected immutable specification revision"]
+    J["ready: operator selects exact specification revision"]
+    K["Operator requests Generate plan"]
+    L["API validates traceability and stores immutable plan"]
+    M["One plan approval and workflow authority decision"]
+    N["Temporal worker executes approved plan and records bounded evidence"]
+    O["Implementation review and completion"]
 
     A --> B --> C --> D --> E --> F --> G
-    G -- needs_revision --> H --> I --> E
-    G -- ready --> J --> K --> L --> M --> N --> O
+    G -->|needs_revision| H --> I --> E
+    G -->|ready| J --> K --> L --> M --> N --> O
 ```
 
 `waived` is a planned alternative to `ready`, but the current deployment has
