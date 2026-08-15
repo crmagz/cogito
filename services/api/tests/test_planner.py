@@ -119,10 +119,11 @@ def test_ai_plan_rejects_undeclared_output_fields(valid_plan: dict) -> None:
 def valid_product_specification() -> dict:
     """Return a source-grounded product specification fixture for planner contract tests."""
 
-    def source(statement_id: str, text: str) -> dict:
-        return {"id": statement_id, "text": text, "kind": "source", "source_segment_ids": ["source-1"]}
+    def source(statement_id: str, text: str, requirement_ids: list[str] | None = None) -> dict:
+        return {"id": statement_id, "text": text, "kind": "source", "source_segment_ids": ["source-1"], "requirement_ids": requirement_ids or []}
 
     return {
+        "schema_version": 2,
         "title": source("title", "Rate limiting"),
         "problem_statement": source("problem", "The API needs bounded request rates."),
         "desired_outcomes": [source("outcome-1", "Protect API endpoints from abuse.")],
@@ -131,7 +132,7 @@ def valid_product_specification() -> dict:
         "out_of_scope": [source("scope-out-1", "Changing authentication")],
         "functional_requirements": [source("functional-1", "Enforce a bounded request rate.")],
         "non_functional_requirements": [],
-        "acceptance_criteria": [source("acceptance-1", "Requests beyond the limit are rejected.")],
+        "acceptance_criteria": [source("acceptance-1", "Requests beyond the limit are rejected.", ["functional-1"])],
         "assumptions": [
             {"id": "assumption-1", "text": "A default threshold is acceptable.", "kind": "assumption", "source_segment_ids": []}
         ],
@@ -139,6 +140,10 @@ def valid_product_specification() -> dict:
         "unresolved_questions": [
             {"id": "question-1", "text": "What threshold should apply?", "kind": "question", "source_segment_ids": []}
         ],
+        "personas": [source("persona-1", "API consumer")],
+        "user_journeys": [source("journey-1", "Consumer receives an explicit rate-limit response")],
+        "constraints": [source("constraint-1", "The rate limiter remains observable")],
+        "dependencies": [source("dependency-1", "The API gateway middleware pipeline")],
     }
 
 
@@ -186,7 +191,7 @@ def test_product_specification_rejects_a_question_as_a_requirement() -> None:
     fixture["functional_requirements"][0]["kind"] = "question"
     fixture["functional_requirements"][0]["source_segment_ids"] = []
 
-    with pytest.raises(ValueError, match="cannot be unresolved questions"):
+    with pytest.raises(ValueError, match="must be source-grounded"):
         ProductSpecification.model_validate(fixture)
 
 

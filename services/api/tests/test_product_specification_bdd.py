@@ -35,6 +35,7 @@ def source_grounded_product_specification_response(refinement_context: dict[str,
         return {"id": statement_id, "text": text, "kind": "source", "source_segment_ids": ["source-1"]}
 
     refinement_context["response"] = {
+        "schema_version": 2,
         "title": source("title", "Rate limiting"),
         "problem_statement": source("problem", "The API needs bounded request rates."),
         "desired_outcomes": [source("outcome-1", "Protect API endpoints from abuse.")],
@@ -43,7 +44,7 @@ def source_grounded_product_specification_response(refinement_context: dict[str,
         "out_of_scope": [source("scope-out-1", "Changing authentication")],
         "functional_requirements": [source("functional-1", "Enforce a bounded request rate.")],
         "non_functional_requirements": [],
-        "acceptance_criteria": [source("acceptance-1", "Requests beyond the limit are rejected.")],
+        "acceptance_criteria": [{**source("acceptance-1", "Requests beyond the limit are rejected."), "requirement_ids": ["functional-1"]}],
         "assumptions": [
             {"id": "assumption-1", "text": "A default threshold is acceptable.", "kind": "assumption", "source_segment_ids": []}
         ],
@@ -51,6 +52,10 @@ def source_grounded_product_specification_response(refinement_context: dict[str,
         "unresolved_questions": [
             {"id": "question-1", "text": "What threshold should apply?", "kind": "question", "source_segment_ids": []}
         ],
+        "personas": [source("persona-1", "API consumer")],
+        "user_journeys": [source("journey-1", "Consumer receives an explicit rate-limit response")],
+        "constraints": [source("constraint-1", "The rate limiter remains observable")],
+        "dependencies": [source("dependency-1", "The API gateway middleware pipeline")],
     }
 
 

@@ -242,6 +242,12 @@ def _validate_product_specification(
 
     try:
         specification.validate_source_segment_ids(set(context.source_segment_ids))
+        if specification.schema_version != 2:
+            raise ValueError("must produce a version 2 product specification")
+        if not all(
+            (specification.personas, specification.user_journeys, specification.constraints, specification.dependencies)
+        ):
+            raise ValueError("must include every required version 2 section")
     except ValueError as error:
         raise PlannerError(f"LiteLLM planner {error}") from error
 
