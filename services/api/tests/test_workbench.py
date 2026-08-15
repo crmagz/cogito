@@ -497,6 +497,35 @@ def test_workbench_stage_projection_is_typed_and_never_copies_terminal_run_state
     assert response.json()["workflow"] == ["specification", "product_specification", "specification_evaluation", "planning"]
 
 
+def test_workbench_stage_projection_shows_evaluation_gate_before_planning(client, valid_plan, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    original = supervisor_store.planning_runs[run_id]
+    supervisor_store.planning_runs[run_id] = replace(
+        original,
+        status=PlanningRunStatus.PLANNING,
+        plan_artifact=None,
+        selected_product_specification_artifact=None,
+        selected_product_specification_revision=None,
+        selected_specification_evaluation_artifact=None,
+        specification_evaluation_readiness="needs_revision",
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    stages = {item["stage_id"]: item for item in response.json()["stages"]}
+    assert stages["product_specification"]["state"] == "needs_revision"
+    assert stages["specification_evaluation"]["state"] == "needs_revision"
+    assert stages["planning"] == {
+        "stage_id": "planning",
+        "label": "Planning",
+        "state": "needs_revision",
+        "availability": "authoritative",
+        "reason": "The selected product specification must be revised before planning can begin.",
+        "artifact_kind": None,
+    }
+
+
 def test_workbench_stage_projection_attributes_rejections_only_when_artifacts_prove_the_gate(
     client, valid_plan, supervisor_store
 ) -> None:
