@@ -1284,7 +1284,17 @@ def create_app(
 
         status = record.status
         planning_state = (
-            WorkbenchStageState.IN_PROGRESS
+            WorkbenchStageState.NEEDS_REVISION
+            if record.specification_evaluation_readiness == "needs_revision"
+            else WorkbenchStageState.AWAITING_OPERATOR
+            if (
+                record.plan_artifact is None
+                and (
+                    record.selected_product_specification_artifact is None
+                    or record.selected_specification_evaluation_artifact is None
+                )
+            )
+            else WorkbenchStageState.IN_PROGRESS
             if status is PlanningRunStatus.PLANNING
             else WorkbenchStageState.FAILED
             if status is PlanningRunStatus.PLANNING_FAILED
@@ -1293,7 +1303,11 @@ def create_app(
             else WorkbenchStageState.UNAVAILABLE
         )
         planning_reason = (
-            "The supervisor records planning in progress."
+            "The selected product specification must be revised before planning can begin."
+            if planning_state is WorkbenchStageState.NEEDS_REVISION
+            else "A selected product specification and ready evaluation are required before planning can begin."
+            if planning_state is WorkbenchStageState.AWAITING_OPERATOR
+            else "The supervisor records planning in progress."
             if planning_state is WorkbenchStageState.IN_PROGRESS
             else "The supervisor records planning as failed."
             if planning_state is WorkbenchStageState.FAILED
@@ -1358,7 +1372,9 @@ def create_app(
                 stage_id="product_specification",
                 label="Product specification",
                 state=(
-                    WorkbenchStageState.COMPLETED
+                    WorkbenchStageState.NEEDS_REVISION
+                    if record.specification_evaluation_readiness == "needs_revision"
+                    else WorkbenchStageState.COMPLETED
                     if record.selected_product_specification_artifact is not None
                     else WorkbenchStageState.AWAITING_OPERATOR
                     if record.product_specification_artifact is not None
@@ -1366,7 +1382,9 @@ def create_app(
                 ),
                 availability=WorkbenchStageAvailability.AUTHORITATIVE,
                 reason=(
-                    "An operator selected this immutable product specification as the planning input."
+                    "The immutable evaluation requires a revised product specification."
+                    if record.specification_evaluation_readiness == "needs_revision"
+                    else "An operator selected this immutable product specification as the planning input."
                     if record.selected_product_specification_artifact is not None
                     else "A generated immutable product specification is available for operator selection."
                     if record.product_specification_artifact is not None
