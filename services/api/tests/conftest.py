@@ -94,6 +94,7 @@ def valid_product_specification() -> dict:
         return {"id": statement_id, "text": text, "kind": "source", "source_segment_ids": ["source-1"]}
 
     return {
+        "schema_version": 2,
         "title": source("title", "Rate limiting"),
         "problem_statement": source("problem", "The API needs bounded request rates."),
         "desired_outcomes": [source("outcome-1", "Protect API endpoints from abuse.")],
@@ -103,13 +104,14 @@ def valid_product_specification() -> dict:
         "functional_requirements": [source("functional-1", "Enforce a bounded request rate.")],
         "non_functional_requirements": [],
         "acceptance_criteria": [source("acceptance-1", "Requests beyond the limit are rejected.")],
-        "assumptions": [
-            {"id": "assumption-1", "text": "A default threshold is acceptable.", "kind": "assumption", "source_segment_ids": []}
-        ],
+        "assumptions": [],
         "risks": [source("risk-1", "A low threshold can reject valid traffic.")],
         "unresolved_questions": [
-            {"id": "question-1", "text": "What threshold should apply?", "kind": "question", "source_segment_ids": []}
         ],
+        "personas": [source("persona-1", "API platform operator")],
+        "user_journeys": [source("journey-1", "An API client receives an explicit rate-limit response")],
+        "constraints": [source("constraint-1", "The rate limiter must remain observable")],
+        "dependencies": [source("dependency-1", "The API gateway middleware pipeline")],
     }
 
 
@@ -151,6 +153,8 @@ def valid_plan() -> dict:
                 "acceptance_criteria": ["Module exports middleware function"],
                 "verification": ["npm run typecheck"],
                 "depends_on": [],
+                "requirement_ids": ["functional-1"],
+                "verification_references": ["functional-1"],
             },
             {
                 "id": "phase-2",
@@ -160,6 +164,7 @@ def valid_plan() -> dict:
                 "acceptance_criteria": ["Rate limiting active on all routes"],
                 "verification": ["npm run test"],
                 "depends_on": ["phase-1"],
+                "requirement_ids": [],
             },
         ],
         "constraints": {

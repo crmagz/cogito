@@ -83,6 +83,7 @@ from .models import (
     WorkbenchTimelineEvent,
     WorkbenchTimelineResponse,
 )
+from .specification_evaluation import evaluate_specification, validate_plan_traceability
 from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDispatcher, stop_dispatcher
 from .notifications import NotificationOutboxDispatcher, notification_sink, stop_notification_dispatcher
 from .observability import Telemetry, TelemetrySettings
@@ -599,6 +600,14 @@ def create_app(
                     status_code=409,
                     detail="an explicitly selected product specification is required before plan generation",
                 )
+            if (
+                record.selected_specification_evaluation_artifact is None
+                or record.specification_evaluation_readiness not in {"ready", "waived"}
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="a matching ready or waived specification evaluation is required before plan generation",
+                )
             try:
                 planner_resolution = (
                     await resolve_roles(run_id, ["planner"], record.project_id or settings.workbench_default_project_id)
@@ -634,6 +643,13 @@ def create_app(
                 )
             except PlannerError as error:
                 raise HTTPException(status_code=502, detail="planner failed to produce a valid plan") from error
+            try:
+                validate_plan_traceability(selected_specification, [phase.requirement_ids for phase in generated_plan.phases])
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
+            generated_plan = generated_plan.model_copy(
+                update={"specification_evaluation_sha256": record.selected_specification_evaluation_artifact.sha256}
+            )
             next_plan_revision = record.plan_revision + 1
             try:
                 snapshot = store.put_planning_plan(run_id, next_plan_revision, generated_plan)
@@ -735,6 +751,16 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
+        if (
+            record.specification_evaluation_artifact is None
+            or record.specification_evaluation_readiness not in {"ready", "waived"}
+            or record.product_specification_artifact is None
+            or record.product_specification_artifact.sha256 != request_body.artifact_sha256
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="a matching ready or waived specification evaluation is required before selection",
+            )
         try:
             request_sha256 = sha256(
                 json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
@@ -762,6 +788,61 @@ def create_app(
             submitted_at=updated.submitted_at,
         )
         return JSONResponse(content=response.model_dump(mode="json"))
+
+    @app.post("/api/v1/planning-runs/{run_id}/evaluate-product-specification")
+    async def evaluate_product_specification(
+        run_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Persist deterministic, immutable readiness evidence for the latest specification."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        if record.status is not PlanningRunStatus.PLANNING or record.product_specification_artifact is None:
+            raise HTTPException(status_code=409, detail="planning run is not eligible for specification evaluation")
+        if record.specification_evaluation_artifact is not None:
+            updated = record
+        else:
+            try:
+                specification = ProductSpecification.model_validate_json(
+                    store.get_verified_artifact(record.product_specification_artifact, max_bytes=MAX_PRODUCT_SPECIFICATION_BYTES)
+                )
+                evaluation = evaluate_specification(
+                    specification,
+                    specification_sha256=record.product_specification_artifact.sha256,
+                    specification_revision=record.product_specification_revision,
+                )
+                artifact = store.put_specification_evaluation(run_id, record.product_specification_revision, evaluation)
+                updated = await supervisor_store.record_specification_evaluation(
+                    run_id,
+                    artifact,
+                    record.product_specification_revision,
+                    record.product_specification_artifact.sha256,
+                    evaluation.readiness.value,
+                )
+            except (PlanStoreUnavailableError, ValueError) as error:
+                raise HTTPException(status_code=503, detail="specification evaluation storage is temporarily unavailable") from error
+        return JSONResponse(
+            content=PlanningRunResponse(
+                run_id=updated.run_id,
+                status=updated.status,
+                source_artifact=updated.source_artifact,
+                product_specification_artifact=updated.product_specification_artifact,
+                product_specification_revision=updated.product_specification_revision,
+                selected_product_specification_artifact=updated.selected_product_specification_artifact,
+                selected_product_specification_revision=updated.selected_product_specification_revision,
+                specification_evaluation_artifact=updated.specification_evaluation_artifact,
+                specification_evaluation_readiness=updated.specification_evaluation_readiness,
+                selected_specification_evaluation_artifact=updated.selected_specification_evaluation_artifact,
+                plan_artifact=updated.plan_artifact,
+                implementation_artifact=updated.implementation_artifact,
+                submitted_at=updated.submitted_at,
+            ).model_dump(mode="json")
+        )
 
     @app.post("/api/v1/runs/{run_id}/approvals/plan")
     async def approve_plan(
@@ -1112,6 +1193,13 @@ def create_app(
                     sha256=record.product_specification_artifact.sha256,
                 )
             )
+        if record.specification_evaluation_artifact is not None:
+            artifacts.append(
+                WorkbenchArtifactSummary(
+                    kind=WorkbenchArtifactKind.SPECIFICATION_EVALUATION,
+                    sha256=record.specification_evaluation_artifact.sha256,
+                )
+            )
         if record.plan_artifact is not None:
             artifacts.append(WorkbenchArtifactSummary(kind=WorkbenchArtifactKind.PLAN, sha256=record.plan_artifact.sha256))
         if record.implementation_artifact is not None:
@@ -1134,7 +1222,7 @@ def create_app(
             settings.auth_oidc_admin_role,
         } & principal.roles:
             abilities.append("approve")
-        workflow = ["specification", "product_specification", "planning"]
+        workflow = ["specification", "product_specification", "specification_evaluation", "planning"]
         if record.plan_artifact is not None:
             workflow.append("plan")
         if record.implementation_artifact is not None:
@@ -1175,7 +1263,7 @@ def create_app(
                     WorkbenchWorkflowNodeType.GATE
                     if stage.stage_id.endswith("_approval")
                     else WorkbenchWorkflowNodeType.QUEUE
-                    if stage.stage_id in {"specification", "product_specification"}
+                    if stage.stage_id in {"specification", "product_specification", "specification_evaluation"}
                     else WorkbenchWorkflowNodeType.AGENT
                 ),
             )
@@ -1287,6 +1375,34 @@ def create_app(
                 artifact_kind=(
                     WorkbenchArtifactKind.PRODUCT_SPECIFICATION
                     if record.product_specification_artifact is not None
+                    else None
+                ),
+            ),
+            WorkbenchStageSummary(
+                stage_id="specification_evaluation",
+                label="Specification evaluation",
+                state=(
+                    WorkbenchStageState.COMPLETED
+                    if record.specification_evaluation_readiness in {"ready", "waived"}
+                    else WorkbenchStageState.NEEDS_REVISION
+                    if record.specification_evaluation_readiness == "needs_revision"
+                    else WorkbenchStageState.IN_PROGRESS
+                    if record.product_specification_artifact is not None
+                    else WorkbenchStageState.UNAVAILABLE
+                ),
+                availability=WorkbenchStageAvailability.AUTHORITATIVE,
+                reason=(
+                    "The immutable evaluation authorizes planning."
+                    if record.specification_evaluation_readiness in {"ready", "waived"}
+                    else "The immutable evaluation requires a revised product specification."
+                    if record.specification_evaluation_readiness == "needs_revision"
+                    else "A product specification is ready for deterministic evaluation."
+                    if record.product_specification_artifact is not None
+                    else "No immutable product specification is available to evaluate."
+                ),
+                artifact_kind=(
+                    WorkbenchArtifactKind.SPECIFICATION_EVALUATION
+                    if record.specification_evaluation_artifact is not None
                     else None
                 ),
             ),
@@ -1521,6 +1637,7 @@ def create_app(
         explicit_stage = payload.get("stage_id")
         if explicit_stage in {
             "specification",
+            "specification_evaluation",
             "planning",
             "plan_approval",
             "implementation",
@@ -1529,6 +1646,8 @@ def create_app(
             return [explicit_stage]
         if event_type == "specification_recorded":
             return ["specification"]
+        if event_type == "specification_evaluated":
+            return ["specification_evaluation"]
         if event_type == "planning_started":
             return ["planning"]
         if event_type == "plan_approval_requested":
@@ -1762,6 +1881,7 @@ def create_app(
         artifact = {
             WorkbenchArtifactKind.SOURCE: record.source_artifact,
             WorkbenchArtifactKind.PRODUCT_SPECIFICATION: record.product_specification_artifact,
+            WorkbenchArtifactKind.SPECIFICATION_EVALUATION: record.specification_evaluation_artifact,
             WorkbenchArtifactKind.PLAN: record.plan_artifact,
             WorkbenchArtifactKind.IMPLEMENTATION: record.implementation_artifact,
         }[kind]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from enum import Enum, StrEnum
+from enum import Enum, IntEnum, StrEnum
 from math import isfinite
 from urllib.parse import urlparse
 
@@ -36,6 +36,24 @@ class PlanPhase(BaseModel):
         default_factory=list,
         description="Phase IDs that must complete before this one starts",
     )
+    requirement_ids: list[str] = Field(
+        default_factory=list,
+        description="Stable selected-specification requirement IDs implemented by this phase",
+    )
+    verification_references: list[str] = Field(
+        default_factory=list,
+        description="Requirement IDs verified by this phase's checks",
+    )
+    risk_notes: list[str] = Field(default_factory=list, description="Bounded delivery risks for this phase")
+    rollback_notes: list[str] = Field(default_factory=list, description="Bounded rollback considerations for this phase")
+
+    @model_validator(mode="after")
+    def validate_requirement_traceability_shape(self) -> "PlanPhase":
+        if len(set(self.requirement_ids)) != len(self.requirement_ids):
+            raise ValueError("plan phase requirement IDs must be unique")
+        if len(set(self.verification_references)) != len(self.verification_references):
+            raise ValueError("plan phase verification references must be unique")
+        return self
 
 
 class PlanConstraints(BaseModel):
@@ -83,6 +101,11 @@ class AiPlan(BaseModel):
     constraints: PlanConstraints = Field(description="Execution limits")
     review_profile: ReviewProfile = Field(
         default=ReviewProfile.STANDARD, description="How strict the review loop is"
+    )
+    specification_evaluation_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the exact specification evaluation that authorized planning",
     )
 
 
@@ -137,6 +160,13 @@ class ProductSpecification(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: int = Field(
+        default=1,
+        ge=1,
+        le=2,
+        description="Product specification contract version; evaluation requires version 2",
+    )
+
     title: ProductSpecificationStatement = Field(description="Traceable concise name for the proposed outcome")
     problem_statement: ProductSpecificationStatement = Field(description="Traceable problem to solve")
     desired_outcomes: list[ProductSpecificationStatement] = Field(
@@ -189,6 +219,26 @@ class ProductSpecification(BaseModel):
         max_length=128,
         description="Explicit questions that must not be treated as settled requirements",
     )
+    personas: list[ProductSpecificationStatement] = Field(
+        default_factory=list,
+        max_length=64,
+        description="Version 2 personas whose needs are addressed by the journeys",
+    )
+    user_journeys: list[ProductSpecificationStatement] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Version 2 user or system journeys covered by the contract",
+    )
+    constraints: list[ProductSpecificationStatement] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Version 2 delivery or product constraints",
+    )
+    dependencies: list[ProductSpecificationStatement] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Version 2 external dependencies or explicit absence thereof",
+    )
 
     @model_validator(mode="after")
     def validate_statement_kinds(self) -> "ProductSpecification":
@@ -207,6 +257,10 @@ class ProductSpecification(BaseModel):
             *self.assumptions,
             *self.risks,
             *self.unresolved_questions,
+            *self.personas,
+            *self.user_journeys,
+            *self.constraints,
+            *self.dependencies,
         ]
         if len({statement.id for statement in statements}) != len(statements):
             raise ValueError("product specification statement IDs must be unique")
@@ -221,6 +275,10 @@ class ProductSpecification(BaseModel):
             *self.non_functional_requirements,
             *self.acceptance_criteria,
             *self.risks,
+            *self.personas,
+            *self.user_journeys,
+            *self.constraints,
+            *self.dependencies,
         ]
         if any(statement.kind is ProductSpecificationStatementKind.QUESTION for statement in factual):
             raise ValueError("product requirements and risks cannot be unresolved questions")
@@ -251,6 +309,10 @@ class ProductSpecification(BaseModel):
             *self.assumptions,
             *self.risks,
             *self.unresolved_questions,
+            *self.personas,
+            *self.user_journeys,
+            *self.constraints,
+            *self.dependencies,
         ]
         invalid_statement_ids = [
             statement.id
@@ -262,6 +324,84 @@ class ProductSpecification(BaseModel):
                 "product specification cited unknown source segments: "
                 + ", ".join(sorted(invalid_statement_ids))
             )
+
+    @property
+    def requirement_ids(self) -> list[str]:
+        """Return the stable requirement IDs that a generated plan must cover."""
+
+        return [
+            *(statement.id for statement in self.functional_requirements),
+            *(statement.id for statement in self.non_functional_requirements),
+        ]
+
+
+class SpecificationEvaluationReadiness(StrEnum):
+    READY = "ready"
+    NEEDS_REVISION = "needs_revision"
+    WAIVED = "waived"
+
+
+class SpecificationRiskTier(IntEnum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+
+
+class SpecificationEvaluationFindingKind(StrEnum):
+    MISSING = "missing"
+    AMBIGUOUS = "ambiguous"
+    CONFLICTING = "conflicting"
+    UNVERIFIABLE = "unverifiable"
+
+
+class SpecificationEvaluationFinding(BaseModel):
+    """One bounded, non-mutating gap in a product specification."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: SpecificationEvaluationFindingKind
+    message: str = Field(min_length=1, max_length=1_000)
+    requirement_ids: list[str] = Field(default_factory=list, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_references(self) -> "SpecificationEvaluationFinding":
+        if len(set(self.requirement_ids)) != len(self.requirement_ids):
+            raise ValueError("evaluation finding requirement IDs must be unique")
+        return self
+
+
+class SpecificationEvaluationCoverage(BaseModel):
+    """Exact requirement coverage claimed by the immutable evaluation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    covered_requirement_ids: list[str] = Field(default_factory=list)
+    uncovered_requirement_ids: list[str] = Field(default_factory=list)
+    deferred_requirement_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_partitions(self) -> "SpecificationEvaluationCoverage":
+        values = self.covered_requirement_ids + self.uncovered_requirement_ids + self.deferred_requirement_ids
+        if len(set(values)) != len(values):
+            raise ValueError("evaluation coverage requirement IDs must appear in one bucket")
+        return self
+
+
+class SpecificationEvaluation(BaseModel):
+    """Immutable, digest-bound assessment of one product-specification revision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    specification_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    specification_revision: int = Field(ge=1)
+    readiness: SpecificationEvaluationReadiness
+    risk_tier: SpecificationRiskTier
+    findings: list[SpecificationEvaluationFinding] = Field(default_factory=list)
+    coverage: SpecificationEvaluationCoverage
+    required_decisions: list[str] = Field(default_factory=list, max_length=64)
+    generated_at: str = Field(min_length=1)
+    generator_version: str = Field(min_length=1, max_length=128)
 
 
 class RunSubmission(BaseModel):
@@ -773,6 +913,15 @@ class PlanningRunResponse(BaseModel):
         ge=1,
         description="Selected immutable product specification revision when planning is authorized",
     )
+    specification_evaluation_artifact: ArtifactReference | None = Field(
+        default=None, description="Latest immutable evaluation for the latest product specification revision"
+    )
+    specification_evaluation_readiness: SpecificationEvaluationReadiness | None = Field(
+        default=None, description="Readiness established by the latest immutable evaluation"
+    )
+    selected_specification_evaluation_artifact: ArtifactReference | None = Field(
+        default=None, description="Evaluation immutably selected with the planning input"
+    )
     plan_artifact: ArtifactReference | None = Field(
         default=None, description="Immutable generated plan when planning has completed"
     )
@@ -934,6 +1083,7 @@ class WorkbenchArtifactKind(StrEnum):
 
     SOURCE = "source"
     PRODUCT_SPECIFICATION = "product_specification"
+    SPECIFICATION_EVALUATION = "specification_evaluation"
     PLAN = "plan"
     IMPLEMENTATION = "implementation"
 
