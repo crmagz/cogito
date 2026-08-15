@@ -13,6 +13,7 @@ from cogito_api.models import (
     PlanApprovalDecision,
     PlanningRunStatus,
     ProductSpecification,
+    SpecificationEvaluation,
     McpBindingPolicy,
     McpToolGrant,
     McpToolSelection,
@@ -27,6 +28,7 @@ from cogito_api.storage import (
     PlanSnapshot,
     plan_snapshot_bytes,
     product_specification_bytes,
+    specification_evaluation_bytes,
     source_specification_bytes,
 )
 from cogito_api.supervisor import (
@@ -55,6 +57,7 @@ class InMemoryPlanStore:
         self.statuses: dict[str, dict] = {}
         self.source_specifications: dict[str, str] = {}
         self.product_specifications: dict[tuple[str, int], ProductSpecification] = {}
+        self.specification_evaluations: dict[tuple[str, int], SpecificationEvaluation] = {}
         self.artifacts: dict[str, bytes] = {}
 
     def put_plan(self, run_id: str, plan: AiPlan) -> PlanSnapshot:
@@ -104,6 +107,19 @@ class InMemoryPlanStore:
             sha256=digest,
         )
 
+    def put_specification_evaluation(
+        self, run_id: str, specification_revision: int, evaluation: SpecificationEvaluation
+    ) -> ArtifactReference:
+        from hashlib import sha256
+
+        self.specification_evaluations[(run_id, specification_revision)] = evaluation
+        data = specification_evaluation_bytes(evaluation)
+        digest = sha256(data).hexdigest()
+        return ArtifactReference(
+            ref=f"s3://plan-snapshots/runs/{run_id}/specification-evaluations/{specification_revision}/{digest}/evaluation.json",
+            sha256=digest,
+        )
+
     def put_artifact(self, ref: str, content: bytes) -> ArtifactReference:
         """Store a test-only immutable artifact with its matching digest."""
 
@@ -127,6 +143,11 @@ class InMemoryPlanStore:
             run_id = parts[4]
             revision = int(parts[6])
             body = product_specification_bytes(self.product_specifications[(run_id, revision)])
+        elif "/specification-evaluations/" in artifact.ref:
+            parts = artifact.ref.split("/")
+            run_id = parts[4]
+            revision = int(parts[6])
+            body = specification_evaluation_bytes(self.specification_evaluations[(run_id, revision)])
         else:
             run_id = artifact.ref.split("/")[4]
             body = plan_snapshot_bytes(self.plans[run_id])
@@ -545,6 +566,33 @@ class InMemorySupervisorStore:
             self.product_specification_generation_claims.pop(run_id, None)
             self.product_specification_generation_claimed_at.pop(run_id, None)
 
+    async def record_specification_evaluation(
+        self,
+        run_id: str,
+        artifact: ArtifactReference,
+        specification_revision: int,
+        specification_sha256: str,
+        readiness: str,
+    ) -> PlanningRunRecord:
+        record = self.planning_runs[run_id]
+        if (
+            record.status is not PlanningRunStatus.PLANNING
+            or record.product_specification_revision != specification_revision
+            or record.product_specification_artifact is None
+            or record.product_specification_artifact.sha256 != specification_sha256
+        ):
+            raise ValueError("product specification changed while evaluation was generated")
+        if record.specification_evaluation_artifact is not None:
+            return record
+        updated = replace(
+            record,
+            specification_evaluation_artifact=artifact,
+            specification_evaluation_readiness=readiness,
+        )
+        self.planning_runs[run_id] = updated
+        self._append_coordination_event(run_id, "specification_evaluated", artifact=artifact)
+        return updated
+
     async def select_product_specification(
         self, run_id: str, revision: int, artifact_sha256: str, actor_id: str, idempotency_key: str, request_sha256: str
     ) -> PlanningRunRecord:
@@ -569,6 +617,7 @@ class InMemorySupervisorStore:
                 **record.__dict__,
                 "selected_product_specification_artifact": artifact,
                 "selected_product_specification_revision": revision,
+                "selected_specification_evaluation_artifact": record.specification_evaluation_artifact,
             }
         )
         self.planning_runs[run_id] = updated
@@ -594,6 +643,9 @@ class InMemorySupervisorStore:
                 "product_specification_revision": record.product_specification_revision + 1,
                 "selected_product_specification_artifact": None,
                 "selected_product_specification_revision": None,
+                "specification_evaluation_artifact": None,
+                "specification_evaluation_readiness": None,
+                "selected_specification_evaluation_artifact": None,
             }
         )
         self.planning_runs[run_id] = updated
@@ -682,6 +734,9 @@ class InMemorySupervisorStore:
             product_specification_revision=record.product_specification_revision,
             selected_product_specification_artifact=record.selected_product_specification_artifact,
             selected_product_specification_revision=record.selected_product_specification_revision,
+            specification_evaluation_artifact=record.specification_evaluation_artifact,
+            specification_evaluation_readiness=record.specification_evaluation_readiness,
+            selected_specification_evaluation_artifact=record.selected_specification_evaluation_artifact,
         )
         self.planning_runs[run_id] = updated
         if expected_product_specification_revision is not None and record.selected_product_specification_artifact is not None:
@@ -824,6 +879,9 @@ class InMemorySupervisorStore:
                     product_specification_revision=run.product_specification_revision,
                     selected_product_specification_artifact=run.selected_product_specification_artifact,
                     selected_product_specification_revision=run.selected_product_specification_revision,
+                    specification_evaluation_artifact=run.specification_evaluation_artifact,
+                    specification_evaluation_readiness=run.specification_evaluation_readiness,
+                    selected_specification_evaluation_artifact=run.selected_specification_evaluation_artifact,
                 )
                 self.outbox.pop(decision_id, None)
                 self.leased_decision_ids.discard(decision_id)
@@ -1169,10 +1227,13 @@ class FakePlanner:
 
             self.product_specification = ProductSpecification.model_validate(
                 {
+                    "schema_version": 2,
                     "title": source("title"), "problem_statement": source("problem"),
                     "desired_outcomes": [source("outcome")], "actors": [source("actor")],
                     "in_scope": [source("in-scope")], "out_of_scope": [source("out-of-scope")],
-                    "functional_requirements": [source("requirement")], "acceptance_criteria": [source("acceptance")],
+                    "functional_requirements": [source("functional-1")], "acceptance_criteria": [source("acceptance")],
+                    "personas": [source("persona")], "user_journeys": [source("journey")],
+                    "constraints": [source("constraint")], "dependencies": [source("dependency")],
                 }
             )
         self.product_specification_contexts.append(context)

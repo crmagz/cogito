@@ -148,6 +148,10 @@ def test_workbench_detail_and_evidence_are_scope_and_digest_bound(client, valid_
             "kind": "product_specification",
             "sha256": supervisor_store.planning_runs[run_id].product_specification_artifact.sha256,
         },
+        {
+            "kind": "specification_evaluation",
+            "sha256": supervisor_store.planning_runs[run_id].specification_evaluation_artifact.sha256,
+        },
         {"kind": "plan", "sha256": digest},
     ]
     assert evidence.status_code == 200
@@ -474,21 +478,23 @@ def test_workbench_stage_projection_is_typed_and_never_copies_terminal_run_state
     assert stages["implementation_approval"]["state"] == "unavailable"
     graph = response.json()["workflow_graph"]
     assert [(node["stage_id"], node["node_type"]) for node in graph["nodes"]] == [
-        ("specification", "queue"),
-        ("product_specification", "queue"),
-        ("planning", "agent"),
+            ("specification", "queue"),
+            ("product_specification", "queue"),
+            ("specification_evaluation", "queue"),
+            ("planning", "agent"),
         ("plan_approval", "gate"),
         ("implementation", "agent"),
         ("implementation_approval", "gate"),
     ]
     assert [(edge["source_node_id"], edge["target_node_id"]) for edge in graph["edges"]] == [
-        ("specification", "product_specification"),
-        ("product_specification", "planning"),
+            ("specification", "product_specification"),
+            ("product_specification", "specification_evaluation"),
+            ("specification_evaluation", "planning"),
         ("planning", "plan_approval"),
         ("plan_approval", "implementation"),
         ("implementation", "implementation_approval"),
     ]
-    assert response.json()["workflow"] == ["specification", "product_specification", "planning"]
+    assert response.json()["workflow"] == ["specification", "product_specification", "specification_evaluation", "planning"]
 
 
 def test_workbench_stage_projection_attributes_rejections_only_when_artifacts_prove_the_gate(

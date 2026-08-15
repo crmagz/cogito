@@ -63,6 +63,9 @@ class PlanningRunRecord:
     product_specification_revision: int = 0
     selected_product_specification_artifact: ArtifactReference | None = None
     selected_product_specification_revision: int | None = None
+    specification_evaluation_artifact: ArtifactReference | None = None
+    specification_evaluation_readiness: str | None = None
+    selected_specification_evaluation_artifact: ArtifactReference | None = None
 
 
 @dataclass(frozen=True)
@@ -330,6 +333,23 @@ def _planning_run_record(row: Mapping[str, Any]) -> PlanningRunRecord:
             else None
         ),
         selected_product_specification_revision=row.get("selected_product_specification_revision"),
+        specification_evaluation_artifact=(
+            ArtifactReference(
+                ref=row["specification_evaluation_artifact_ref"],
+                sha256=row["specification_evaluation_artifact_sha256"],
+            )
+            if row.get("specification_evaluation_artifact_ref") is not None
+            else None
+        ),
+        specification_evaluation_readiness=row.get("specification_evaluation_readiness"),
+        selected_specification_evaluation_artifact=(
+            ArtifactReference(
+                ref=row["selected_specification_evaluation_artifact_ref"],
+                sha256=row["selected_specification_evaluation_artifact_sha256"],
+            )
+            if row.get("selected_specification_evaluation_artifact_ref") is not None
+            else None
+        ),
     )
 
 
@@ -372,6 +392,15 @@ class SupervisorStore(Protocol):
         actor_id: str,
         idempotency_key: str,
         request_sha256: str,
+    ) -> PlanningRunRecord: ...
+
+    async def record_specification_evaluation(
+        self,
+        run_id: str,
+        artifact: ArtifactReference,
+        specification_revision: int,
+        specification_sha256: str,
+        readiness: str,
     ) -> PlanningRunRecord: ...
 
     async def attach_generated_plan(
@@ -1422,7 +1451,10 @@ class PostgresSupervisorStore:
                            implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                            product_specification_artifact_ref, product_specification_artifact_sha256,
                            product_specification_revision, selected_product_specification_artifact_ref,
-                           selected_product_specification_artifact_sha256, selected_product_specification_revision
+                           selected_product_specification_artifact_sha256, selected_product_specification_revision,
+                           specification_evaluation_artifact_ref, specification_evaluation_artifact_sha256,
+                           specification_evaluation_readiness, selected_specification_evaluation_artifact_ref,
+                           selected_specification_evaluation_artifact_sha256
                     FROM supervisor_runs
                     WHERE run_id = :run_id
                     """
@@ -1468,7 +1500,12 @@ class PostgresSupervisorStore:
                         product_specification_revision = product_specification_revision + 1,
                         selected_product_specification_artifact_ref = NULL,
                         selected_product_specification_artifact_sha256 = NULL,
-                        selected_product_specification_revision = NULL
+                        selected_product_specification_revision = NULL,
+                        specification_evaluation_artifact_ref = NULL,
+                        specification_evaluation_artifact_sha256 = NULL,
+                        specification_evaluation_readiness = NULL,
+                        selected_specification_evaluation_artifact_ref = NULL,
+                        selected_specification_evaluation_artifact_sha256 = NULL
                     WHERE run_id = :run_id
                       AND status = 'planning'
                       AND product_specification_revision = :expected_revision
@@ -1505,6 +1542,69 @@ class PostgresSupervisorStore:
             )
             await self._append_coordination_event(connection, run_id=run_id, event_type="product_specification_revised", artifact=artifact)
         return _planning_run_record(row)
+
+    async def record_specification_evaluation(
+        self,
+        run_id: str,
+        artifact: ArtifactReference,
+        specification_revision: int,
+        specification_sha256: str,
+        readiness: str,
+    ) -> PlanningRunRecord:
+        """Attach one immutable evaluation only when its exact spec revision is still current."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs
+                    SET specification_evaluation_artifact_ref = :artifact_ref,
+                        specification_evaluation_artifact_sha256 = :artifact_sha256,
+                        specification_evaluation_readiness = :readiness
+                    WHERE run_id = :run_id
+                      AND status = 'planning'
+                      AND product_specification_revision = :specification_revision
+                      AND product_specification_artifact_sha256 = :specification_sha256
+                      AND specification_evaluation_artifact_ref IS NULL
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "artifact_ref": artifact.ref,
+                    "artifact_sha256": artifact.sha256,
+                    "readiness": readiness,
+                    "specification_revision": specification_revision,
+                    "specification_sha256": specification_sha256,
+                },
+            )
+            if result.rowcount == 0:
+                current = await self.get_planning_run(run_id)
+                if current is not None and current.specification_evaluation_artifact is not None:
+                    return current
+                raise ValueError("product specification changed while evaluation was generated")
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO specification_evaluations (
+                        run_id, specification_revision, specification_sha256, artifact_ref, artifact_sha256, readiness, created_at
+                    ) VALUES (
+                        :run_id, :specification_revision, :specification_sha256, :artifact_ref, :artifact_sha256, :readiness, now()
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "specification_revision": specification_revision,
+                    "specification_sha256": specification_sha256,
+                    "artifact_ref": artifact.ref,
+                    "artifact_sha256": artifact.sha256,
+                    "readiness": readiness,
+                },
+            )
+            await self._append_coordination_event(
+                connection, run_id=run_id, event_type="specification_evaluated", artifact=artifact
+            )
+        return (await self.get_planning_run(run_id))  # type: ignore[return-value]
 
     async def select_product_specification(
         self,
@@ -1553,7 +1653,9 @@ class PostgresSupervisorStore:
                     UPDATE supervisor_runs AS run
                     SET selected_product_specification_artifact_ref = revision.artifact_ref,
                         selected_product_specification_artifact_sha256 = revision.artifact_sha256,
-                        selected_product_specification_revision = revision.revision
+                        selected_product_specification_revision = revision.revision,
+                        selected_specification_evaluation_artifact_ref = run.specification_evaluation_artifact_ref,
+                        selected_specification_evaluation_artifact_sha256 = run.specification_evaluation_artifact_sha256
                     FROM product_specification_revisions AS revision
                     WHERE run.run_id = :run_id
                       AND revision.run_id = run.run_id
@@ -1563,6 +1665,7 @@ class PostgresSupervisorStore:
                       AND run.selected_product_specification_revision IS NULL
                       AND run.product_specification_revision = :revision
                       AND run.product_specification_artifact_sha256 = :artifact_sha256
+                      AND run.specification_evaluation_readiness IN ('ready', 'waived')
                     RETURNING run.run_id, run.status, run.source_artifact_ref, run.source_artifact_sha256,
                               run.target_repos, run.spec_set, run.constraints, run.priority, run.submitted_at, run.submitted_by,
                               run.plan_artifact_ref, run.plan_artifact_sha256, run.planner_model, run.active_workflow_id, run.plan_revision,

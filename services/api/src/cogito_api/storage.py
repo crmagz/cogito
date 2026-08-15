@@ -12,7 +12,7 @@ from minio import Minio
 from minio.error import S3Error
 from minio.retention import COMPLIANCE, Retention
 
-from .models import AiPlan, ArtifactReference, ProductSpecification
+from .models import AiPlan, ArtifactReference, ProductSpecification, SpecificationEvaluation
 
 
 class PlanStoreUnavailableError(RuntimeError):
@@ -32,6 +32,10 @@ class PlanStore(Protocol):
 
     def put_product_specification(
         self, run_id: str, revision: int, specification: ProductSpecification
+    ) -> ArtifactReference: ...
+
+    def put_specification_evaluation(
+        self, run_id: str, specification_revision: int, evaluation: SpecificationEvaluation
     ) -> ArtifactReference: ...
 
     def get_source_specification(self, source_artifact_ref: str) -> str: ...
@@ -71,6 +75,14 @@ def product_specification_bytes(specification: ProductSpecification) -> bytes:
 
     return json.dumps(
         specification.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+
+
+def specification_evaluation_bytes(evaluation: SpecificationEvaluation) -> bytes:
+    """Serialize immutable evaluation evidence deterministically."""
+
+    return json.dumps(
+        evaluation.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode()
 
 
@@ -126,6 +138,17 @@ class MinioPlanStore:
         data = product_specification_bytes(specification)
         digest = sha256(data).hexdigest()
         object_name = f"runs/{run_id}/product-specifications/{revision}/{digest}/specification.json"
+        self._put_snapshot(object_name, data)
+        return ArtifactReference(ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=digest)
+
+    def put_specification_evaluation(
+        self, run_id: str, specification_revision: int, evaluation: SpecificationEvaluation
+    ) -> ArtifactReference:
+        if specification_revision < 1:
+            raise ValueError("product specification revision must be positive")
+        data = specification_evaluation_bytes(evaluation)
+        digest = sha256(data).hexdigest()
+        object_name = f"runs/{run_id}/specification-evaluations/{specification_revision}/{digest}/evaluation.json"
         self._put_snapshot(object_name, data)
         return ArtifactReference(ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=digest)
 

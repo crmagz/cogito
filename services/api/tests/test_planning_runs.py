@@ -28,6 +28,9 @@ def _select_product_specification(client: TestClient, run_id: str) -> dict:
     draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification")
     assert draft.status_code == 200
     body = draft.json()
+    evaluation = client.post(f"/api/v1/planning-runs/{run_id}/evaluate-product-specification")
+    assert evaluation.status_code == 200
+    assert evaluation.json()["specification_evaluation_readiness"] == "ready"
     selected = client.post(
         f"/api/v1/planning-runs/{run_id}/select-product-specification",
         json={
@@ -233,6 +236,14 @@ def test_human_revision_requires_fresh_selection_before_regenerating_a_plan(
     assert body["product_specification_revision"] == 2
     assert body["selected_product_specification_artifact"] is None
     assert client.post(f"/api/v1/planning-runs/{run_id}/generate-plan").status_code == 409
+    selected = client.post(
+        f"/api/v1/planning-runs/{run_id}/select-product-specification",
+        json={"revision": 2, "artifact_sha256": body["product_specification_artifact"]["sha256"]},
+        headers={"Idempotency-Key": "select-human-revision"},
+    )
+    assert selected.status_code == 409
+    evaluated = client.post(f"/api/v1/planning-runs/{run_id}/evaluate-product-specification")
+    assert evaluated.status_code == 200
     selected = client.post(
         f"/api/v1/planning-runs/{run_id}/select-product-specification",
         json={"revision": 2, "artifact_sha256": body["product_specification_artifact"]["sha256"]},
