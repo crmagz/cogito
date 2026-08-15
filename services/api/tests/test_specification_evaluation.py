@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from cogito_api.models import ProductSpecification
+import pytest
+
+from cogito_api.models import ProductSpecification, SpecificationEvaluationWaiverRequest
 from cogito_api.specification_evaluation import evaluate_specification, validate_plan_traceability
 
 
@@ -72,3 +74,8 @@ def test_claimed_requirement_cannot_be_an_assumption(valid_product_specification
         assert "source-grounded" in str(error)
     else:
         raise AssertionError("uncertain requirement was accepted as a claimed requirement")
+
+
+def test_waiver_rationale_must_contain_non_whitespace_text() -> None:
+    with pytest.raises(ValueError, match="non-whitespace"):
+        SpecificationEvaluationWaiverRequest(artifact_sha256="a" * 64, rationale="   ")

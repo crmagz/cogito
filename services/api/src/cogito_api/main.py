@@ -379,7 +379,7 @@ def create_app(
         await supervisor_store.create_agent_run(
             AgentRunRecord(
                 run_id=run_id, root_run_id=run_id, parent_run_id=None, agent_name="supervisor",
-                status=AgentRunStatus.QUEUED, trace_id=telemetry.trace_id() or secrets.token_hex(16),
+                status=AgentRunStatus.CANCELLED, trace_id=telemetry.trace_id() or secrets.token_hex(16),
                 created_at=submitted_at, updated_at=submitted_at,
             )
         )
@@ -1196,6 +1196,12 @@ def create_app(
             workflow_id=record.workflow_id,
             product_specification_revision=record.product_specification_revision,
             selected_product_specification_revision=record.selected_product_specification_revision,
+            specification_evaluation_readiness=record.specification_evaluation_readiness,
+            selected_specification_evaluation_sha256=(
+                record.selected_specification_evaluation_artifact.sha256
+                if record.selected_specification_evaluation_artifact is not None
+                else None
+            ),
             stages=stages,
             workflow_graph=workbench_graph(stages),
             active_gate=active_gate,
@@ -1362,7 +1368,7 @@ def create_app(
                     if record.specification_evaluation_readiness in {"ready", "waived"}
                     else WorkbenchStageState.NEEDS_REVISION
                     if record.specification_evaluation_readiness == "needs_revision"
-                    else WorkbenchStageState.IN_PROGRESS
+                    else WorkbenchStageState.AWAITING_OPERATOR
                     if record.product_specification_artifact is not None
                     else WorkbenchStageState.UNAVAILABLE
                 ),
@@ -1623,6 +1629,8 @@ def create_app(
         if event_type == "specification_recorded":
             return ["specification"]
         if event_type == "specification_evaluated":
+            return ["specification_evaluation"]
+        if event_type == "specification_evaluation_waived":
             return ["specification_evaluation"]
         if event_type == "planning_started":
             return ["planning"]

@@ -977,6 +977,12 @@ class SpecificationEvaluationWaiverRequest(BaseModel):
     )
     rationale: str = Field(min_length=1, max_length=2_000, description="Why the named evaluation finding is accepted")
 
+    @model_validator(mode="after")
+    def require_nonblank_rationale(self) -> "SpecificationEvaluationWaiverRequest":
+        if not self.rationale.strip():
+            raise ValueError("waiver rationale must contain non-whitespace text")
+        return self
+
 
 class ProductSpecificationRevisionRequest(BaseModel):
     """Strict human-authored revision anchored to the displayed current draft."""
@@ -1304,6 +1310,14 @@ class WorkbenchRunResponse(BaseModel):
     workflow_id: str | None = Field(default=None, description="Authoritative workflow execution identity when available")
     product_specification_revision: int = Field(default=0, ge=0)
     selected_product_specification_revision: int | None = Field(default=None, ge=1)
+    specification_evaluation_readiness: SpecificationEvaluationReadiness | None = Field(
+        default=None, description="Latest immutable evaluation readiness for the displayed specification"
+    )
+    selected_specification_evaluation_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Evaluation digest selected with the product specification for planning",
+    )
     stages: list[WorkbenchStageSummary] = Field(default_factory=list, description="Ordered authoritative Workflow Map nodes")
     workflow_graph: WorkbenchWorkflowGraph = Field(default_factory=WorkbenchWorkflowGraph, description="Typed relay graph for this run")
     active_gate: CoordinationGate | None = None

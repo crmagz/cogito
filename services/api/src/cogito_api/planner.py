@@ -164,6 +164,8 @@ class LiteLLMPlanner:
                         "Produce schema_version 2 and provide at least one persona, user journey, constraint, and "
                         "dependency. If a section has no real dependency, state that absence explicitly as a "
                         "source-grounded statement; do not omit the section. "
+                        "Every acceptance criterion must list the requirement_ids it verifies, and every "
+                        "functional or non-functional requirement must be linked by at least one acceptance criterion. "
                         "Unknown information must be represented only as an assumption or unresolved question; "
                         "do not present it as a source-grounded requirement."
                     ),

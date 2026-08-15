@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import re
 
 from .models import (
@@ -126,9 +127,7 @@ def evaluate_specification(
             uncovered_requirement_ids=uncovered_requirement_ids,
         ),
         required_decisions=decisions,
-        # Creation time is recorded by the supervisor's immutable audit row.
-        # Keep the canonical evaluation payload itself revision-deterministic.
-        generated_at="1970-01-01T00:00:00+00:00",
+        generated_at=datetime.now(timezone.utc).isoformat(),
         generator_version=EVALUATOR_VERSION,
     )
 
