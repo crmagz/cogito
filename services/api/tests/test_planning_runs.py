@@ -81,6 +81,20 @@ def test_approver_can_auditably_waive_a_failing_specification_evaluation(
     assert rejected.status_code == 409
 
 
+def test_workbench_projects_evaluation_readiness_after_evaluation(
+    client: TestClient, valid_plan: dict
+) -> None:
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
+    run_id = submitted.json()["run_id"]
+    assert client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").status_code == 200
+    assert client.post(f"/api/v1/planning-runs/{run_id}/evaluate-product-specification").status_code == 200
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}")
+
+    assert response.status_code == 200
+    assert response.json()["specification_evaluation_readiness"] == "ready"
+
+
 def test_submit_planning_run_requires_a_scoped_approver(
     client: TestClient,
     valid_plan: dict,

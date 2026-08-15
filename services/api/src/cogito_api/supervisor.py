@@ -1514,7 +1514,9 @@ class PostgresSupervisorStore:
                         specification_evaluation_artifact_sha256 = NULL,
                         specification_evaluation_readiness = NULL,
                         selected_specification_evaluation_artifact_ref = NULL,
-                        selected_specification_evaluation_artifact_sha256 = NULL
+                        selected_specification_evaluation_artifact_sha256 = NULL,
+                        specification_evaluation_generation_claim = NULL,
+                        specification_evaluation_generation_claimed_at = NULL
                     WHERE run_id = :run_id
                       AND status = 'planning'
                       AND product_specification_revision = :expected_revision
@@ -1591,6 +1593,7 @@ class PostgresSupervisorStore:
                     "readiness": readiness,
                     "specification_revision": specification_revision,
                     "specification_sha256": specification_sha256,
+                    "generation_claim": generation_claim,
                 },
             )
             if result.rowcount == 0:
@@ -1762,7 +1765,10 @@ class PostgresSupervisorStore:
                               run.implementation_artifact_ref, run.implementation_artifact_sha256, run.implementation_revision, run.project_id,
                               run.product_specification_artifact_ref, run.product_specification_artifact_sha256,
                               run.product_specification_revision, run.selected_product_specification_artifact_ref,
-                              run.selected_product_specification_artifact_sha256, run.selected_product_specification_revision
+                              run.selected_product_specification_artifact_sha256, run.selected_product_specification_revision,
+                              run.specification_evaluation_artifact_ref, run.specification_evaluation_artifact_sha256,
+                              run.specification_evaluation_readiness, run.selected_specification_evaluation_artifact_ref,
+                              run.selected_specification_evaluation_artifact_sha256
                     """
                 ),
                 {"run_id": run_id, "revision": revision, "artifact_sha256": artifact_sha256},
@@ -1853,7 +1859,10 @@ class PostgresSupervisorStore:
                               implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                               product_specification_artifact_ref, product_specification_artifact_sha256,
                               product_specification_revision, selected_product_specification_artifact_ref,
-                              selected_product_specification_artifact_sha256, selected_product_specification_revision
+                              selected_product_specification_artifact_sha256, selected_product_specification_revision,
+                              specification_evaluation_artifact_ref, specification_evaluation_artifact_sha256,
+                              specification_evaluation_readiness, selected_specification_evaluation_artifact_ref,
+                              selected_specification_evaluation_artifact_sha256
                     """
                 ),
                 {
@@ -1962,7 +1971,10 @@ class PostgresSupervisorStore:
                               implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                               product_specification_artifact_ref, product_specification_artifact_sha256,
                               product_specification_revision, selected_product_specification_artifact_ref,
-                              selected_product_specification_artifact_sha256, selected_product_specification_revision
+                              selected_product_specification_artifact_sha256, selected_product_specification_revision,
+                              specification_evaluation_artifact_ref, specification_evaluation_artifact_sha256,
+                              specification_evaluation_readiness, selected_specification_evaluation_artifact_ref,
+                              selected_specification_evaluation_artifact_sha256
                     """
                 ),
                 {
