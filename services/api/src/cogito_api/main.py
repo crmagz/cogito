@@ -1198,6 +1198,11 @@ def create_app(
             product_specification_revision=record.product_specification_revision,
             selected_product_specification_revision=record.selected_product_specification_revision,
             specification_evaluation_readiness=record.specification_evaluation_readiness,
+            specification_evaluation_sha256=(
+                record.specification_evaluation_artifact.sha256
+                if record.specification_evaluation_artifact is not None
+                else None
+            ),
             selected_specification_evaluation_sha256=(
                 record.selected_specification_evaluation_artifact.sha256
                 if record.selected_specification_evaluation_artifact is not None

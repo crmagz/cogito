@@ -1322,6 +1322,11 @@ class WorkbenchRunResponse(BaseModel):
     specification_evaluation_readiness: SpecificationEvaluationReadiness | None = Field(
         default=None, description="Latest immutable evaluation readiness for the displayed specification"
     )
+    specification_evaluation_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the latest immutable evaluation for the displayed specification",
+    )
     selected_specification_evaluation_sha256: str | None = Field(
         default=None,
         pattern=r"^[a-f0-9]{64}$",

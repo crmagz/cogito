@@ -1155,6 +1155,26 @@ def test_plan_snapshot_validation_rejects_a_mutated_plan() -> None:
         _validate_plan_snapshot(plan, envelope)
 
 
+@pytest.mark.parametrize("invalid_requirement_id", [1, {}, " "])
+def test_plan_snapshot_validation_rejects_malformed_requirement_traceability(invalid_requirement_id: object) -> None:
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    plan["specification_evaluation_sha256"] = "b" * 64
+    plan["phases"][0]["requirement_ids"] = [invalid_requirement_id]
+    plan_sha256 = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    envelope = RunEnvelope(
+        run_id="run-traceability",
+        plan_ref="s3://plans/plans/run-traceability/plan.json",
+        plan_sha256=plan_sha256,
+        spec_ref=plan["spec_set"],
+        target_repos=plan["target_repos"],
+        specification_evaluation_sha256="b" * 64,
+        specification_requirement_ids=["requirement-1"],
+    )
+
+    with pytest.raises(ValueError, match="requirement traceability"):
+        _validate_plan_snapshot(plan, envelope)
+
+
 def test_execution_plan_orders_multi_phase_dependencies_stably() -> None:
     plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
     plan["phases"] = [
