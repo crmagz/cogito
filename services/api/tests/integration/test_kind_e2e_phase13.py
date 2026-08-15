@@ -546,6 +546,23 @@ def test_provider_neutral_coordination_end_to_end(control_plane: KindControlPlan
         })
         assert status == 202, submission
         run_id = str(submission["run_id"])
+        status, product_specification = control_plane.api(
+            "POST", f"/api/v1/planning-runs/{run_id}/generate-product-specification", {}
+        )
+        assert status == 200, product_specification
+        status, evaluation = control_plane.api(
+            "POST", f"/api/v1/planning-runs/{run_id}/evaluate-product-specification", {}
+        )
+        assert status == 200 and evaluation["specification_evaluation_readiness"] == "ready", evaluation
+        status, selected = control_plane.api(
+            "POST",
+            f"/api/v1/planning-runs/{run_id}/select-product-specification",
+            {
+                "revision": product_specification["product_specification_revision"],
+                "artifact_sha256": product_specification["product_specification_artifact"]["sha256"],
+            },
+        )
+        assert status == 200, selected
         status, generated = control_plane.api("POST", f"/api/v1/planning-runs/{run_id}/generate-plan", {})
         assert status == 200, generated
         planning = control_plane.wait_for_status(run_id, "awaiting_plan_approval")
