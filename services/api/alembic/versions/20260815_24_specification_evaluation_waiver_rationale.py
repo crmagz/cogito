@@ -16,6 +16,14 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Revision 23 accepted whitespace-only rationale values. Preserve those
+    # historical decisions while making their missing audit detail explicit
+    # before validating the new invariant.
+    op.execute(
+        """UPDATE specification_evaluation_waivers
+           SET rationale = '[legacy waiver rationale unavailable]'
+           WHERE btrim(rationale) = ''"""
+    )
     op.create_check_constraint(
         "specification_evaluation_waivers_nonblank_rationale",
         "specification_evaluation_waivers",

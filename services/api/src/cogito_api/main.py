@@ -74,6 +74,7 @@ from .models import (
     WorkbenchProjectResponse,
     WorkbenchRunListResponse,
     WorkbenchRunResponse,
+    WorkbenchSpecificationEvaluationWaiverSummary,
     WorkbenchStageAvailability,
     WorkbenchStageState,
     WorkbenchStageSummary,
@@ -1350,7 +1351,7 @@ def create_app(
                     if record.specification_evaluation_readiness == "needs_revision"
                     else "An operator selected this immutable product specification as the planning input."
                     if record.selected_product_specification_artifact is not None
-                    else "A generated immutable product specification is available for operator selection."
+                    else "A generated immutable product specification is ready for operator evaluation."
                     if record.product_specification_artifact is not None
                     else "No immutable product specification draft is available yet."
                 ),
@@ -1532,6 +1533,15 @@ def create_app(
 
         base = workbench_response(record, principal)
         approvals = await supervisor_store.list_workbench_approvals(record.run_id) if base.approval_history_available else []
+        waiver = None
+        if (
+            base.approval_history_available
+            and record.specification_evaluation_readiness == "waived"
+            and record.specification_evaluation_artifact is not None
+        ):
+            waiver = await supervisor_store.get_specification_evaluation_waiver(
+                record.run_id, record.specification_evaluation_artifact.sha256
+            )
         mcp_capabilities = None
         if base.approval_history_available:
             pins, selected, has_approved_decision = await supervisor_store.get_run_mcp_capabilities(
@@ -1565,6 +1575,16 @@ def create_app(
                     )
                     for item in approvals
                 ],
+                "specification_evaluation_waiver": (
+                    WorkbenchSpecificationEvaluationWaiverSummary(
+                        artifact_sha256=waiver.artifact_sha256,
+                        actor_id=waiver.actor_id,
+                        rationale=waiver.rationale,
+                        created_at=waiver.created_at,
+                    )
+                    if waiver is not None
+                    else None
+                ),
                 "execution": execution,
                 "mcp_capabilities": mcp_capabilities,
                 "budget": base.budget.model_copy(update={"actual_cost_usd": actual_cost_usd, "turns_used": turns_used}),

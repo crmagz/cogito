@@ -46,6 +46,7 @@ from cogito_api.supervisor import (
     WorkbenchAgentRecord,
     WorkbenchApprovalRecord,
     WorkbenchFeedbackRecord,
+    SpecificationEvaluationWaiverRecord,
     RegistryConflictError,
     _binding_targets_a_run_repository,
 )
@@ -166,6 +167,7 @@ class InMemorySupervisorStore:
         self.product_specification_generation_claims: dict[str, str] = {}
         self.product_specification_generation_claimed_at: dict[str, datetime] = {}
         self.specification_evaluation_generation_claims: dict[str, str] = {}
+        self.specification_evaluation_waivers: dict[tuple[str, str], SpecificationEvaluationWaiverRecord] = {}
         self.plan_product_specification_bindings: dict[tuple[str, int], tuple[int, ArtifactReference]] = {}
         self.approvals: dict[tuple[str, int, str], ApprovalRecord] = {}
         self.approval_request_hashes: dict[tuple[str, int, str], str] = {}
@@ -614,7 +616,7 @@ class InMemorySupervisorStore:
         self, *, run_id: str, artifact_sha256: str, actor_id: str, rationale: str,
         idempotency_key: str, request_sha256: str,
     ) -> PlanningRunRecord:
-        del actor_id, rationale, idempotency_key, request_sha256
+        del idempotency_key, request_sha256
         record = self.planning_runs[run_id]
         if (
             record.status is not PlanningRunStatus.PLANNING
@@ -625,6 +627,12 @@ class InMemorySupervisorStore:
             raise ValueError("evaluation is not eligible for waiver")
         updated = replace(record, specification_evaluation_readiness="waived")
         self.planning_runs[run_id] = updated
+        self.specification_evaluation_waivers[(run_id, artifact_sha256)] = SpecificationEvaluationWaiverRecord(
+            artifact_sha256=artifact_sha256,
+            actor_id=actor_id,
+            rationale=rationale,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
         self._append_coordination_event(run_id, "specification_evaluation_waived")
         return updated
 
@@ -1136,6 +1144,11 @@ class InMemorySupervisorStore:
             if item.run_id == run_id
         ]
         return sorted(records, key=lambda item: (item.created_at, item.decision_id), reverse=True)[:max(1, min(limit, 100))]
+
+    async def get_specification_evaluation_waiver(
+        self, run_id: str, artifact_sha256: str
+    ) -> SpecificationEvaluationWaiverRecord | None:
+        return self.specification_evaluation_waivers.get((run_id, artifact_sha256))
 
     async def get_run_mcp_capabilities(
         self, run_id: str, plan_revision: int

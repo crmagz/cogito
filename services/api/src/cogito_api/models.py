@@ -1222,6 +1222,15 @@ class WorkbenchApprovalSummary(BaseModel):
     mcp_selection: list[McpToolSelection] | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
+class WorkbenchSpecificationEvaluationWaiverSummary(BaseModel):
+    """Bounded approver-only audit record for a waived evaluation."""
+
+    artifact_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    actor_id: str
+    rationale: str
+    created_at: str
+
+
 class WorkbenchMcpCapabilityState(StrEnum):
     """Server-owned capability selection state for an approver's Workbench view."""
 
@@ -1327,6 +1336,7 @@ class WorkbenchRunResponse(BaseModel):
     budget: WorkbenchBudgetSummary
     approval_history_available: bool = False
     approval_history: list[WorkbenchApprovalSummary] = Field(default_factory=list)
+    specification_evaluation_waiver: WorkbenchSpecificationEvaluationWaiverSummary | None = None
     mcp_capabilities: WorkbenchMcpCapabilities | None = None
     execution: WorkbenchExecutionSummary | None = None
     external_links: list[WorkbenchExternalLink] = Field(default_factory=list)

@@ -113,6 +113,16 @@ class WorkbenchApprovalRecord:
 
 
 @dataclass(frozen=True)
+class SpecificationEvaluationWaiverRecord:
+    """Approver-visible audit fields for one immutable evaluation exception."""
+
+    artifact_sha256: str
+    actor_id: str
+    rationale: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class WorkbenchFeedbackRecord:
     """Immutable Workbench review context with no execution authority."""
 
@@ -534,6 +544,10 @@ class SupervisorStore(Protocol):
     async def list_coordination_events(self, run_id: str, *, limit: int = 100) -> list[tuple[CoordinationEvent, bool, int, str | None]]: ...
 
     async def list_workbench_approvals(self, run_id: str, *, limit: int = 100) -> list[WorkbenchApprovalRecord]: ...
+
+    async def get_specification_evaluation_waiver(
+        self, run_id: str, artifact_sha256: str
+    ) -> SpecificationEvaluationWaiverRecord | None: ...
 
     async def record_workbench_feedback(
         self,
@@ -2736,6 +2750,31 @@ class PostgresSupervisorStore:
             )
             for row in rows
         ]
+
+    async def get_specification_evaluation_waiver(
+        self, run_id: str, artifact_sha256: str
+    ) -> SpecificationEvaluationWaiverRecord | None:
+        """Return the latest bounded exception record for its exact evaluation digest."""
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """SELECT artifact_sha256, actor_id, rationale, created_at
+                       FROM specification_evaluation_waivers
+                       WHERE run_id = :run_id AND artifact_sha256 = :artifact_sha256
+                       ORDER BY created_at DESC, decision_id DESC LIMIT 1"""
+                ),
+                {"run_id": run_id, "artifact_sha256": artifact_sha256},
+            )
+            row = result.mappings().one_or_none()
+        if row is None:
+            return None
+        return SpecificationEvaluationWaiverRecord(
+            artifact_sha256=row["artifact_sha256"],
+            actor_id=row["actor_id"],
+            rationale=row["rationale"],
+            created_at=row["created_at"].isoformat(),
+        )
 
     async def record_workbench_feedback(
         self,
