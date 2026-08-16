@@ -111,7 +111,7 @@ async def main() -> None:
             )
             registry_policy = await connection.execute(
                 text("SELECT 1 FROM registry_policy_revisions WHERE policy_revision = :policy_revision"),
-                {"policy_revision": "phase12_planner_v1_1_0"},
+                {"policy_revision": "phase12_planner_v1_2_0"},
             )
             gateway = await connection.execute(
                 text("SELECT 1 FROM registry_agent_gateway_policy_revisions WHERE policy_revision = :policy_revision"),
@@ -153,7 +153,7 @@ async def main() -> None:
                 },
             )
         registration = await store.resolve_run_registration(
-            run_id, "developer", "phase12_planner_v1_1_0", developer
+            run_id, "developer", "phase12_planner_v1_2_0", developer
         )
         await store.resolve_run_agent_gateway(run_id, "developer", "default", registration, gateway_policy)
         print(json.dumps({

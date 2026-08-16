@@ -443,6 +443,7 @@ class PlanningRunStatus(StrEnum):
     PLANNING_FAILED = "planning_failed"
     REJECTED = "rejected"
     REVISION_REQUESTED = "revision_requested"
+    CANCELLED = "cancelled"
 
 
 class AgentRunStatus(StrEnum):
@@ -964,6 +965,23 @@ class ProductSpecificationSelectionRequest(BaseModel):
     )
 
 
+class ProductSpecificationAcceptanceRequest(ProductSpecificationSelectionRequest):
+    """Digest-bound request to validate and accept one displayed product specification."""
+
+
+class ProductSpecificationAcceptanceOutcome(StrEnum):
+    """The operator-visible result of accepting a product specification."""
+
+    ACCEPTED = "accepted"
+    NEEDS_REFINEMENT = "needs_refinement"
+
+
+class ProductSpecificationAcceptanceResponse(PlanningRunResponse):
+    """Authoritative state after validating and conditionally selecting a specification."""
+
+    outcome: ProductSpecificationAcceptanceOutcome
+
+
 class SpecificationEvaluationWaiverRequest(BaseModel):
     """An explicit, auditable exception for a failing immutable evaluation."""
 
@@ -1136,6 +1154,7 @@ class WorkbenchStageState(StrEnum):
     NEEDS_REVISION = "needs_revision"
     FAILED = "failed"
     UNAVAILABLE = "unavailable"
+    CANCELLED = "cancelled"
 
 
 class WorkbenchStageAvailability(StrEnum):
@@ -1200,6 +1219,26 @@ class WorkbenchWorkflowGraph(BaseModel):
 
     nodes: list[WorkbenchWorkflowNode] = Field(default_factory=list)
     edges: list[WorkbenchWorkflowEdge] = Field(default_factory=list)
+
+
+class WorkbenchActionId(StrEnum):
+    """Stable operator action identifiers rendered from the server-owned projection."""
+
+    GENERATE_PRODUCT_SPECIFICATION = "generate_product_specification"
+    ACCEPT_PRODUCT_SPECIFICATION = "accept_product_specification"
+    REFINE_PRODUCT_SPECIFICATION = "refine_product_specification"
+    GENERATE_PLAN = "generate_plan"
+    CANCEL_PLANNING_RUN = "cancel_planning_run"
+
+
+class WorkbenchActionSummary(BaseModel):
+    """One permitted action with copy supplied by the workflow authority."""
+
+    action_id: WorkbenchActionId
+    stage_id: str
+    label: str
+    description: str
+    requires_confirmation: bool = False
 
 
 class WorkbenchArtifactSummary(BaseModel):
@@ -1331,6 +1370,10 @@ class WorkbenchRunResponse(BaseModel):
         default=None,
         pattern=r"^[a-f0-9]{64}$",
         description="Evaluation digest selected with the product specification for planning",
+    )
+    available_actions: list[WorkbenchActionSummary] = Field(
+        default_factory=list,
+        description="Server-authorized operator actions for the current immutable workflow state",
     )
     stages: list[WorkbenchStageSummary] = Field(default_factory=list, description="Ordered authoritative Workflow Map nodes")
     workflow_graph: WorkbenchWorkflowGraph = Field(default_factory=WorkbenchWorkflowGraph, description="Typed relay graph for this run")

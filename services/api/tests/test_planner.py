@@ -169,6 +169,8 @@ async def test_litellm_planner_generates_a_source_grounded_product_specification
     payload = json.loads(captured["body"]["messages"][1]["content"])  # type: ignore[index]
     assert payload == {"source_segments": [{"id": "source-1", "content": "Add a rate limiter."}]}
     assert "no tools" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "title and problem_statement" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "Only assumptions may use kind=assumption" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
 
 
 async def test_litellm_planner_rejects_product_specification_with_unknown_source_segment() -> None:
@@ -184,6 +186,22 @@ async def test_litellm_planner_rejects_product_specification_with_unknown_source
             ProductSpecificationContext(initial_specification="Add a rate limiter."),
             planner_gateway(),
         )
+
+
+async def test_litellm_planner_repairs_omitted_citation_for_a_single_source_segment() -> None:
+    fixture = valid_product_specification()
+    fixture["title"]["source_segment_ids"] = []
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(fixture)}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
+    specification = await planner.generate_product_specification(
+        ProductSpecificationContext(initial_specification="Add a rate limiter."),
+        planner_gateway(),
+    )
+
+    assert specification.title.source_segment_ids == ["source-1"]
 
 
 def test_product_specification_rejects_a_question_as_a_requirement() -> None:

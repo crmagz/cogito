@@ -160,6 +160,60 @@ def test_workbench_detail_and_evidence_are_scope_and_digest_bound(client, valid_
     assert forged.status_code == 404
 
 
+def test_workbench_projects_permitted_product_specification_actions(client, valid_plan) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification")
+    assert draft.status_code == 200
+
+    review = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert review.status_code == 200
+    assert review.json()["available_actions"] == [
+        {
+            "action_id": "accept_product_specification",
+            "stage_id": "product_specification",
+            "label": "Accept",
+            "description": "Record this reviewed revision as the contract for planning.",
+            "requires_confirmation": True,
+        },
+        {
+            "action_id": "refine_product_specification",
+            "stage_id": "product_specification",
+            "label": "Needs refinement",
+            "description": "Edit the specification to resolve gaps, questions, or incorrect assumptions.",
+            "requires_confirmation": False,
+        },
+        {
+            "action_id": "cancel_planning_run",
+            "stage_id": "product_specification",
+            "label": "Cancel",
+            "description": "Stop this run before a plan is generated.",
+            "requires_confirmation": True,
+        },
+    ]
+
+    accepted = client.post(
+        f"/api/v1/planning-runs/{run_id}/accept-product-specification",
+        json={
+            "revision": draft.json()["product_specification_revision"],
+            "artifact_sha256": draft.json()["product_specification_artifact"]["sha256"],
+        },
+        headers=_headers("workbench-accept-product-specification"),
+    )
+    assert accepted.status_code == 200
+    selected = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    assert [action["action_id"] for action in selected.json()["available_actions"]] == [
+        "generate_plan",
+        "refine_product_specification",
+        "cancel_planning_run",
+    ]
+    assert [action["label"] for action in selected.json()["available_actions"]] == [
+        "Proceed",
+        "Needs refinement",
+        "Cancel",
+    ]
+
+
 def test_workbench_approver_can_view_pinned_mcp_capabilities_and_submit_selection(valid_plan: dict) -> None:
     client, starter, supervisor_store, _ = _mcp_workbench(valid_plan)
     run_id, digest = _awaiting_plan(client, valid_plan)
@@ -890,7 +944,7 @@ def test_workbench_agent_inventory_is_scoped_bounded_and_etagged(client, valid_p
 def test_workbench_agent_inventory_uses_only_the_runtime_gateway_policy(valid_plan) -> None:
     client, _, supervisor_store, _ = _mcp_workbench(valid_plan)
     assert client.post("/api/v1/runs", json={"plan": valid_plan}).status_code == 202
-    current = supervisor_store.registry_agent_gateway_policies["agent_gateway_planner_v1_1_0"]
+    current = supervisor_store.registry_agent_gateway_policies["agent_gateway_planner_v1_2_0"]
     historical = current.model_copy(update={"policy_revision": "agent_gateway_historical_v1"})
     supervisor_store.registry_agent_gateway_policies[historical.policy_revision] = historical
 
@@ -898,7 +952,7 @@ def test_workbench_agent_inventory_uses_only_the_runtime_gateway_policy(valid_pl
 
     assert inventory.status_code == 200
     assert {route["policy_revision"] for item in inventory.json()["items"] for route in item["gateway_routes"]} == {
-        "agent_gateway_planner_v1_1_0"
+        "agent_gateway_planner_v1_2_0"
     }
 
 
@@ -920,7 +974,7 @@ def test_workbench_agent_detail_returns_only_safe_project_authorized_release_fac
     assert detail.json()["registration_id"] == "developer"
     assert detail.json()["gateway_routes"] == [
         {
-            "policy_revision": "agent_gateway_planner_v1_1_0",
+            "policy_revision": "agent_gateway_planner_v1_2_0",
             "role": "developer",
             "model_alias": "complex",
             "max_budget_usd": 25.0,
@@ -981,7 +1035,7 @@ def test_workbench_agent_invocation_history_and_detail_project_safe_pins_without
             "created_at": supervisor_store.agent_runs[run_id].created_at,
             "updated_at": supervisor_store.agent_runs[run_id].updated_at,
             "gateway_route": {
-                "policy_revision": "agent_gateway_planner_v1_1_0",
+                "policy_revision": "agent_gateway_planner_v1_2_0",
                 "role": "developer",
                 "model_alias": "complex",
                 "max_budget_usd": 25.0,

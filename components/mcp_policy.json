@@ -1,5 +1,5 @@
 {
-  "policy_revision": "governed_mcp_initial",
+  "policy_revision": "governed_mcp_planner_v1_2_0",
   "bindings": [
     {
       "role": "developer",

@@ -516,6 +516,17 @@ class InMemorySupervisorStore:
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         return self.planning_runs.get(run_id)
 
+    async def cancel_planning_run(self, run_id: str) -> PlanningRunRecord:
+        record = self.planning_runs[run_id]
+        if record.status is not PlanningRunStatus.PLANNING or record.plan_artifact is not None:
+            raise ValueError("planning run is not eligible for cancellation")
+        updated = replace(record, status=PlanningRunStatus.CANCELLED)
+        self.planning_runs[run_id] = updated
+        self._append_coordination_event(
+            run_id, "planning_cancelled", lifecycle_status=PlanningRunStatus.CANCELLED.value
+        )
+        return updated
+
     async def attach_product_specification_draft(
         self,
         run_id: str,
@@ -647,6 +658,7 @@ class InMemorySupervisorStore:
             or artifact is None
             or record.product_specification_revision != revision
             or artifact.sha256 != artifact_sha256
+            or record.specification_evaluation_artifact is None
         ):
             if (
                 record.selected_product_specification_revision == revision
