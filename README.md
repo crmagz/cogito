@@ -14,6 +14,10 @@ API, worker, and Helm chart artifacts.
 Operational health, reconciliation boundaries, and incident response are
 documented in the [operations guide](docs/operations.md).
 
+The specification lifecycle and its centralized Workbench operator workflow
+are documented in the [specification evaluation lifecycle guide](docs/specification-evaluation-lifecycle.md)
+and the durable [project context](docs/CONTEXT.md).
+
 ## Helm Chart
 
 Cogito deploys as an umbrella Helm chart with the following components:

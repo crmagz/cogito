@@ -54,19 +54,35 @@ no planner or worker is executing and a specification revision is required.
 
 ## Workbench integration
 
-The companion [Workbench evaluation lifecycle PR](https://github.com/crmagz/workbench/pull/16)
-adds the relay allow-list, immutable evaluation evidence view, and the
-**Evaluate product specification** control. It holds selection until the API
-reports `ready` or `waived`; `needs_revision` explicitly directs the operator
-to revise the specification. The server-owned projection remains authoritative
-at:
+The Workbench now provides a centralized workflow-specification workspace for
+the whole run rather than duplicating a dossier in every stage. It places the
+current phase, source and product-specification artifact references (including
+their SHA-256 digests), the editable product-specification JSON, workflow
+actions, and the durable workflow audit activity in one operator form.
+
+The workspace renders only the current source and product-specification
+references; it does not treat browser content as evidence authority. Existing
+detail routes retain the full immutable-evidence viewer for other artifact
+kinds, including evaluation and plan evidence. A product-specification edit is
+confirmed before submission and creates a new immutable revision. If the
+authoritative run refreshes to a newer revision while an edit is open,
+Workbench preserves the draft as stale and requires an explicit reload before
+it can be submitted.
+
+The green **Approve**, blue **Needs refinement**, and red **Cancel** actions
+are available in that same workspace when the current gate permits them.
+Refinement and cancellation collect a durable rationale. They remain
+digest-bound API actions; Workbench does not advance a stage locally. The
+server-owned projection remains authoritative at:
 
 ```text
 GET /api/v1/workbench/runs/{run_id}
 ```
 
-The Workbench follow-up must render the evaluation node, readiness/findings,
-revision and selection controls, and explicit “next operator action” text.
+The companion [Workbench evaluation lifecycle PR](https://github.com/crmagz/workbench/pull/16)
+introduced the allow-listed relay and immutable evaluation flow. The
+[centralized workflow workspace PR](https://github.com/crmagz/workbench/pull/17)
+completes the operator surface while retaining that contract.
 
 ## Local Kind validation commands
 
