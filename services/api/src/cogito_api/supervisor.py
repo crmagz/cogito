@@ -370,6 +370,8 @@ class SupervisorStore(Protocol):
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None: ...
 
+    async def cancel_planning_run(self, run_id: str) -> PlanningRunRecord: ...
+
     async def attach_product_specification_draft(
         self,
         run_id: str,
@@ -1489,6 +1491,33 @@ class PostgresSupervisorStore:
             return None
         return _planning_run_record(row)
 
+    async def cancel_planning_run(self, run_id: str) -> PlanningRunRecord:
+        """Terminally stop a run before any generated plan can be executed."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs
+                    SET status = 'cancelled'
+                    WHERE run_id = :run_id AND status = 'planning' AND plan_artifact_ref IS NULL
+                    RETURNING run_id
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            if result.scalar_one_or_none() is not None:
+                await self._append_coordination_event(
+                    connection,
+                    run_id=run_id,
+                    event_type="planning_cancelled",
+                    lifecycle_status=PlanningRunStatus.CANCELLED.value,
+                )
+        record = await self.get_planning_run(run_id)
+        if record is None or record.status is not PlanningRunStatus.CANCELLED:
+            raise ValueError("planning run is not eligible for cancellation")
+        return record
+
     async def attach_product_specification_revision(
         self,
         run_id: str,
@@ -1772,7 +1801,7 @@ class PostgresSupervisorStore:
                       AND run.selected_product_specification_revision IS NULL
                       AND run.product_specification_revision = :revision
                       AND run.product_specification_artifact_sha256 = :artifact_sha256
-                      AND run.specification_evaluation_readiness IN ('ready', 'waived')
+                      AND run.specification_evaluation_artifact_sha256 IS NOT NULL
                     RETURNING run.run_id, run.status, run.source_artifact_ref, run.source_artifact_sha256,
                               run.target_repos, run.spec_set, run.constraints, run.priority, run.submitted_at, run.submitted_by,
                               run.plan_artifact_ref, run.plan_artifact_sha256, run.planner_model, run.active_workflow_id, run.plan_revision,

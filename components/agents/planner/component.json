@@ -1,9 +1,9 @@
 {
   "registration_id": "planner",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "kind": "agent",
   "component_id": "planner",
-  "component_version": "1.1.0",
+  "component_version": "1.2.0",
   "lifecycle": "active",
   "maturity": "incubating",
   "execution_class": "adapter",

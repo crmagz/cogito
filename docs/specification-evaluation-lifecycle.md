@@ -9,27 +9,46 @@ action.
 ## Lifecycle
 
 ```mermaid
-graph TD
-    A["Operator submits source and pinned repository commit"]
-    B["API stores immutable source artifact and creates run"]
-    C["Operator requests Generate product specification"]
-    D["Planner generates ProductSpecification v2 and API stores revision"]
-    E["Operator requests Evaluate product specification"]
-    F["API evaluates exact revision and stores immutable evidence"]
-    G{"Evaluation readiness"}
-    H["needs_revision: findings and required decisions"]
-    I["Operator submits corrected immutable specification revision"]
-    J["ready: operator selects exact specification revision"]
-    K["Operator requests Generate plan"]
-    L["API validates traceability and stores immutable plan"]
-    M["One plan approval and workflow authority decision"]
-    N["Temporal worker executes approved plan and records bounded evidence"]
-    O["Implementation review and completion"]
-
-    A --> B --> C --> D --> E --> F --> G
-    G -->|needs_revision| H --> I --> E
-    G -->|ready| J --> K --> L --> M --> N --> O
+stateDiagram-v2
+    [*] --> SourceRecorded: submit planning run
+    SourceRecorded --> NoDraft
+    NoDraft --> ReviewReady: Generate product specification
+    ReviewReady --> Confirming: Accept specification
+    ReviewReady --> Editing: Needs refinement
+    Editing --> ReviewReady: Save refined specification
+    Confirming --> Accepting: Confirm specification
+    Accepting --> Accepted: evaluation ready + select revision
+    Accepting --> RefinementRequired: evaluation needs revision
+    RefinementRequired --> Editing: Edit specification
+    Accepted --> PlanApproval: Generate plan
+    PlanApproval --> Implementing: Approve plan
+    Implementing --> Completed
 ```
+
+`Confirming` and `Accepting` are transient UI states. The durable acceptance
+command validates and selects the exact displayed revision as one idempotent
+transition. A failed evaluation persists evidence but never selects that
+revision; the operator returns to editing. An explicit waiver remains an
+exceptional, separately explained API action rather than an accept outcome.
+
+The product specification is a model-generated, source-provenanced proposal,
+not boilerplate. The planner infers fields such as requirements, actors,
+assumptions, risks, and journeys from the recorded source. The operator is
+accountable for reviewing, correcting, and accepting the resulting contract.
+
+The Workbench presents only these normal review actions:
+
+| Control | Purpose |
+| --- | --- |
+| **Accept specification** | Opens confirmation; validation and promotion happen only after confirmation. |
+| **Needs refinement** | Opens the editor; saving creates a new immutable revision for review. |
+| **Confirm specification** | The dialog primary action. |
+| **Continue editing** | Leaves confirmation and opens the editor without changing the run. |
+
+The confirmation dialog description is: “Cogito will validate this revision
+and, if it is ready, lock it as the input to planning. You can continue editing
+instead.” The separate evaluate and select mechanics remain server-side and
+are intentionally not normal Workbench controls.
 
 `waived` is an explicit approver exception, not an evaluator outcome. It is
 available only through the digest-bound waiver endpoint, requires a rationale
@@ -41,9 +60,8 @@ and idempotency key, and is recorded separately from the immutable evaluation.
 | --- | --- | --- | --- |
 | Source | Submit a run | Store a digest-bound source artifact and planning record | `Specification: completed` |
 | Product specification | Generate draft | LiteLLM returns v2 contract; API stores immutable revision | `Product specification: awaiting_operator` |
-| Evaluation | Evaluate exact draft, then revise or explicitly waive if needed | Deterministic evaluator stores digest/revision-bound evidence; a waiver stores approver/rationale against that digest | `completed` when `ready` or `waived`; otherwise `needs_revision` |
-| Revision | Submit corrected specification | Store new revision; clear old selection/evaluation pointers | `Product specification: needs_revision` |
-| Selection | Select ready revision | Persist matching specification and evaluation provenance | `Product specification: completed` |
+| Acceptance | Confirm the displayed draft | Deterministically evaluate then select the same digest only if it is `ready` | `completed` when accepted; otherwise `needs_revision` |
+| Revision | Submit corrected specification | Store new revision; clear old selection/evaluation pointers | `Product specification: awaiting_operator` |
 | Planning | Generate plan | Validate requirement-to-phase coverage; store immutable plan | `Planning: completed`; then `Plan approval: awaiting_operator` |
 | Plan approval | Approve/reject/request revision | Persist durable decision and outbox message to Temporal | Gate reflects the decision |
 | Implementation | Worker executes approved plan only | Create workspace/job and implementation evidence | `in_progress`, then terminal state |
@@ -63,8 +81,8 @@ actions, and the durable workflow audit activity in one operator form.
 The workspace renders only the current source and product-specification
 references; it does not treat browser content as evidence authority. Existing
 detail routes retain the full immutable-evidence viewer for other artifact
-kinds, including evaluation and plan evidence. A product-specification edit is
-confirmed before submission and creates a new immutable revision. If the
+kinds, including evaluation and plan evidence. A product-specification edit
+creates a new immutable revision; acceptance is confirmed separately. If the
 authoritative run refreshes to a newer revision while an edit is open,
 Workbench preserves the draft as stale and requires an explicit reload before
 it can be submitted.
@@ -157,7 +175,7 @@ printf 'run: %s\n' "$RUN_ID"
 
 Expected: HTTP `202`, a new run ID, and one immutable source artifact.
 
-### 3. Generate and evaluate the specification
+### 3. Generate and accept the specification
 
 ```sh
 curl --fail-with-body --silent --show-error \
@@ -172,13 +190,26 @@ content-addressed specification artifact. Repeating the request returns the
 same canonical draft.
 
 ```sh
+SPECIFICATION_JSON="$(
+  curl --fail-with-body --silent --show-error \
+    "http://127.0.0.1:8000/api/v1/workbench/runs/$RUN_ID" |
+  jq
+)"
+
 curl --fail-with-body --silent --show-error \
-  --request POST "http://127.0.0.1:8000/api/v1/planning-runs/$RUN_ID/evaluate-product-specification" \
-  --header "Authorization: Bearer $COGITO_AUTH_TOKEN" | jq
+  --request POST "http://127.0.0.1:8000/api/v1/planning-runs/$RUN_ID/accept-product-specification" \
+  --header "Authorization: Bearer $COGITO_AUTH_TOKEN" \
+  --header "Content-Type: application/json" \
+  --header "Idempotency-Key: accept-$RUN_ID" \
+  --data "$(jq -n --argjson specification "$SPECIFICATION_JSON" '{
+    revision: $specification.product_specification_revision,
+    artifact_sha256: ($specification.artifacts[] | select(.kind == "product_specification") | .sha256)
+  }')" | jq
 ```
 
-Expected: HTTP `200` and a digest-bound evaluation whose
-`specification_evaluation_readiness` is `ready` or `needs_revision`.
+Expected: HTTP `200` and an `outcome` of `accepted` or `needs_refinement`.
+The command persists an evaluation for the displayed digest; only `accepted`
+selects it for planning.
 
 ### 4. Track the state and inspect evidence
 
@@ -238,7 +269,7 @@ curl --fail-with-body --silent --show-error \
     }')" | jq
 ```
 
-Evaluate the resulting revision again with the command above. Do not generate
+Use the accept command again after saving the resulting revision. Do not generate
 a plan while it remains `needs_revision`. Expected stage sequence:
 
 ```text
@@ -248,29 +279,7 @@ Specification evaluation: needs_revision
 Planning: needs_revision
 ```
 
-For `ready`, select the exact revision and digest:
-
-```sh
-SPECIFICATION_JSON="$(
-  curl --fail-with-body --silent --show-error \
-    --request POST "http://127.0.0.1:8000/api/v1/planning-runs/$RUN_ID/generate-product-specification" \
-    --header "Authorization: Bearer $COGITO_AUTH_TOKEN" \
-    --header "Content-Type: application/json" \
-    --data '{}'
-)"
-
-curl --fail-with-body --silent --show-error \
-  --request POST "http://127.0.0.1:8000/api/v1/planning-runs/$RUN_ID/select-product-specification" \
-  --header "Authorization: Bearer $COGITO_AUTH_TOKEN" \
-  --header "Content-Type: application/json" \
-  --header "Idempotency-Key: select-$RUN_ID" \
-  --data "$(jq -n --argjson specification "$SPECIFICATION_JSON" '{
-    revision: $specification.product_specification_revision,
-    artifact_sha256: $specification.product_specification_artifact.sha256
-  }')" | jq
-```
-
-Then generate a plan:
+After an `accepted` outcome, generate a plan:
 
 ```sh
 curl --fail-with-body --silent --show-error \

@@ -51,7 +51,7 @@ def test_component_catalog_is_complete_and_versioned() -> None:
     assert all(
         item.version
         == (
-            "1.1.0"
+            "1.2.0"
             if item.registration_id == "planner"
             else "1.0.1"
             if item.registration_id == "cogito_readonly_mcp"
@@ -71,7 +71,7 @@ def test_mcp_policy_is_explicit_and_references_only_catalog_tools() -> None:
 
     policy = load_mcp_binding_policy(_catalog_root(), catalog)
 
-    assert policy.policy_revision == "governed_mcp_initial"
+    assert policy.policy_revision == "governed_mcp_planner_v1_2_0"
     assert policy.bindings[0].role == "developer"
     assert policy.bindings[0].tools == ["catalog_read"]
 
@@ -81,9 +81,9 @@ def test_agent_gateway_policy_selects_a_project_scoped_route_for_each_registered
 
     policy = load_agent_gateway_policy(_catalog_root(), catalog)
 
-    assert policy.policy_revision == "agent_gateway_planner_v1_1_0"
+    assert policy.policy_revision == "agent_gateway_planner_v1_2_0"
     planner = next(binding for binding in policy.bindings if binding.role == "planner")
-    assert planner.registration_version == "1.1.0"
+    assert planner.registration_version == "1.2.0"
     assert planner.toolset == "planning-readonly"
     developer = next(binding for binding in policy.bindings if binding.role == "developer")
     assert developer.registration_id == "developer"
@@ -106,7 +106,7 @@ def test_github_mcp_policy_is_independently_pinned_to_github_tools() -> None:
 
     policy = load_mcp_binding_policy(_catalog_root(), catalog, "github_mcp_policy.json")
 
-    assert policy.policy_revision == "governed_mcp_github_initial"
+    assert policy.policy_revision == "governed_mcp_github_planner_v1_2_0"
     github_binding = next(binding for binding in policy.bindings if binding.server_id == "github_readonly_mcp")
     assert github_binding.tools == ["repository_get", "file_get", "issue_get", "pull_request_get"]
 
@@ -162,7 +162,7 @@ def test_manifest_identity_is_canonical_and_role_reference_is_audit_safe() -> No
     reference = registration_reference("planner", manifest)
 
     assert reference.registration_id == "planner"
-    assert reference.version == "1.1.0"
+    assert reference.version == "1.2.0"
     assert reference.component_id == "planner"
     assert reference.manifest_sha256 == manifest_sha256(manifest)
     require_tool(reference, "planning_model", "plan_generation")
@@ -170,12 +170,12 @@ def test_manifest_identity_is_canonical_and_role_reference_is_audit_safe() -> No
     assert [(grant.tool_id, grant.scope) for grant in reference.grants] == [("planning_model", "plan_generation")]
 
 
-def test_non_mcp_manifest_identity_remains_compatible_with_registered_releases() -> None:
+def test_non_mcp_manifest_identity_is_pinned_for_the_current_release() -> None:
     catalog = load_component_catalog(_catalog_root())
     planner = next(item for item in catalog.components if item.registration_id == "planner")
     planning_model = next(item for item in catalog.components if item.registration_id == "planning_model")
 
-    assert manifest_sha256(planner) == "ac8eab63261d1316eb4f44ff060c2fe656593e4d8c073a2b20f8601bbf0f5417"
+    assert manifest_sha256(planner) == "78325b83dab87959c52d2eba8fce16db0f9ea3b5d799d0c06145ee6614d385a4"
     assert manifest_sha256(planning_model) == "e26a3b427c07ef786885344de24481187b1f2a6a6dd51dffdd4fe196c5245cc6"
 
 
@@ -206,7 +206,7 @@ async def test_run_resolution_pins_the_policy_selected_release() -> None:
     planner = next(item for item in manifests if item.registration_id == "planner")
     store = InMemorySupervisorStore()
 
-    await store.bootstrap_registry(manifests, "phase12_initial", {"planner": "planner@1.1.0"})
+    await store.bootstrap_registry(manifests, "phase12_initial", {"planner": "planner@1.2.0"})
     first = await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
     repeated = await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
 
@@ -256,7 +256,7 @@ async def test_agent_gateway_route_rejects_a_project_without_a_binding() -> None
     planner = next(item for item in manifests if item.registration_id == "planner")
     store = InMemorySupervisorStore()
 
-    await store.bootstrap_registry(manifests, "phase12_initial", {"planner": "planner@1.1.0"})
+    await store.bootstrap_registry(manifests, "phase12_initial", {"planner": "planner@1.2.0"})
     await store.bootstrap_agent_gateway_policy(policy)
     registration = await store.resolve_run_registration("run-1", "planner", "phase12_initial", planner)
 
@@ -349,7 +349,7 @@ async def test_postgres_resolution_converges_when_a_concurrent_insert_wins() -> 
                     }
                 )
             if "FROM registry_policy_revisions" in query:
-                return Result({"assignments": {"planner": "planner@1.1.0"}})
+                return Result({"assignments": {"planner": "planner@1.2.0"}})
             if "FROM registry_registrations" in query:
                 return Result(
                     {

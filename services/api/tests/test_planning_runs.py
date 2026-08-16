@@ -62,6 +62,19 @@ def test_submit_planning_run_persists_immutable_source_artifact_and_run(
     assert record.target_repos == valid_plan["target_repos"]
 
 
+def test_operator_can_cancel_a_pre_plan_run(client: TestClient, valid_plan: dict, supervisor_store: InMemorySupervisorStore) -> None:
+    """Cancellation is a terminal operator choice, distinct from rejecting a plan."""
+
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    response = client.post(f"/api/v1/planning-runs/{run_id}/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert supervisor_store.planning_runs[run_id].status.value == "cancelled"
+    assert any(event.event_type == "planning_cancelled" for event in supervisor_store.coordination_events.values())
+    assert client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").status_code == 409
+
+
 def test_approver_can_auditably_waive_a_failing_specification_evaluation(
     client: TestClient, valid_plan: dict
 ) -> None:
@@ -93,6 +106,105 @@ def test_workbench_projects_evaluation_readiness_after_evaluation(
 
     assert response.status_code == 200
     assert response.json()["specification_evaluation_readiness"] == "ready"
+
+
+def test_accept_product_specification_evaluates_and_selects_a_ready_current_revision(
+    client: TestClient, valid_plan: dict
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+
+    accepted = client.post(
+        f"/api/v1/planning-runs/{run_id}/accept-product-specification",
+        json={
+            "revision": draft["product_specification_revision"],
+            "artifact_sha256": draft["product_specification_artifact"]["sha256"],
+        },
+        headers={"Idempotency-Key": "accept-ready-specification"},
+    )
+
+    assert accepted.status_code == 200
+    body = accepted.json()
+    assert body["outcome"] == "accepted"
+    assert body["specification_evaluation_readiness"] == "ready"
+    assert body["selected_product_specification_revision"] == draft["product_specification_revision"]
+    assert body["selected_specification_evaluation_artifact"] == body["specification_evaluation_artifact"]
+
+
+def test_accept_product_specification_records_evaluation_findings_without_blocking_selection(
+    client: TestClient, valid_plan: dict, valid_product_specification: dict
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+    refinement_needed = copy.deepcopy(valid_product_specification)
+    refinement_needed["unresolved_questions"] = [
+        {
+            "id": "question-retention",
+            "text": "How long must rejected requests be retained?",
+            "kind": "question",
+            "source_segment_ids": [],
+            "requirement_ids": [],
+        }
+    ]
+    revised = client.post(
+        f"/api/v1/planning-runs/{run_id}/revise-product-specification",
+        json={
+            "expected_product_specification_revision": draft["product_specification_revision"],
+            "parent_artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            "specification": refinement_needed,
+        },
+        headers={"Idempotency-Key": "create-refinement-needed-specification"},
+    ).json()
+
+    accepted = client.post(
+        f"/api/v1/planning-runs/{run_id}/accept-product-specification",
+        json={
+            "revision": revised["product_specification_revision"],
+            "artifact_sha256": revised["product_specification_artifact"]["sha256"],
+        },
+        headers={"Idempotency-Key": "accept-refinement-needed-specification"},
+    )
+
+    assert accepted.status_code == 200
+    body = accepted.json()
+    assert body["outcome"] == "accepted"
+    assert body["specification_evaluation_readiness"] == "needs_revision"
+    assert body["specification_evaluation_artifact"] is not None
+    assert body["selected_product_specification_artifact"] is not None
+    workbench = client.get(f"/api/v1/workbench/runs/{run_id}").json()
+    states = {stage["stage_id"]: stage["state"] for stage in workbench["stages"]}
+    assert states["product_specification"] == "completed"
+    assert states["specification_evaluation"] == "completed"
+    assert states["planning"] == "awaiting_operator"
+    assert client.post(f"/api/v1/planning-runs/{run_id}/generate-plan").status_code == 200
+
+
+def test_accept_product_specification_replays_an_accepted_request_without_duplicate_selection(
+    client: TestClient, valid_plan: dict, supervisor_store: InMemorySupervisorStore
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+    request = {
+        "revision": draft["product_specification_revision"],
+        "artifact_sha256": draft["product_specification_artifact"]["sha256"],
+    }
+
+    first = client.post(
+        f"/api/v1/planning-runs/{run_id}/accept-product-specification",
+        json=request,
+        headers={"Idempotency-Key": "replay-accepted-specification"},
+    )
+    replay = client.post(
+        f"/api/v1/planning-runs/{run_id}/accept-product-specification",
+        json=request,
+        headers={"Idempotency-Key": "replay-accepted-specification"},
+    )
+
+    assert first.status_code == replay.status_code == 200
+    assert first.json()["outcome"] == replay.json()["outcome"] == "accepted"
+    assert [event.event_type for event in supervisor_store.coordination_events.values()].count(
+        "product_specification_selected"
+    ) == 1
 
 
 def test_submit_planning_run_requires_a_scoped_approver(
