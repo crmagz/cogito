@@ -1149,6 +1149,7 @@ class WorkbenchStageState(StrEnum):
     """Truthful lifecycle state for one Workbench workflow-map node."""
 
     COMPLETED = "completed"
+    QUEUED = "queued"
     IN_PROGRESS = "in_progress"
     AWAITING_OPERATOR = "awaiting_operator"
     NEEDS_REVISION = "needs_revision"
@@ -1387,6 +1388,11 @@ class WorkbenchRunResponse(BaseModel):
     specification_evaluation_waiver: WorkbenchSpecificationEvaluationWaiverSummary | None = None
     mcp_capabilities: WorkbenchMcpCapabilities | None = None
     execution: WorkbenchExecutionSummary | None = None
+    failure_summary: str | None = Field(
+        default=None,
+        max_length=4096,
+        description="Bounded sanitized reason for a terminal workflow failure when available",
+    )
     external_links: list[WorkbenchExternalLink] = Field(default_factory=list)
 
 

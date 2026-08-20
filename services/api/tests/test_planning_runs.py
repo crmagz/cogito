@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -113,7 +114,6 @@ def test_accept_product_specification_evaluates_and_selects_a_ready_current_revi
 ) -> None:
     run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
     draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
-
     accepted = client.post(
         f"/api/v1/planning-runs/{run_id}/accept-product-specification",
         json={
@@ -129,6 +129,111 @@ def test_accept_product_specification_evaluates_and_selects_a_ready_current_revi
     assert body["specification_evaluation_readiness"] == "ready"
     assert body["selected_product_specification_revision"] == draft["product_specification_revision"]
     assert body["selected_specification_evaluation_artifact"] == body["specification_evaluation_artifact"]
+    assert body["plan_artifact"] is None
+    assert body["status"] == "planning"
+    workbench = client.get(f"/api/v1/workbench/runs/{run_id}")
+    stages = {stage["stage_id"]: stage for stage in workbench.json()["stages"]}
+    assert stages["planning"]["state"] == "queued"
+    assert stages["plan_approval"]["state"] == "unavailable"
+
+
+def test_workbench_projects_only_a_running_planner_as_planning_in_progress(
+    client: TestClient, valid_plan: dict, supervisor_store: InMemorySupervisorStore
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+
+    accepted = client.post(
+        f"/api/v1/planning-runs/{run_id}/accept-product-specification",
+        json={
+            "revision": draft["product_specification_revision"],
+            "artifact_sha256": draft["product_specification_artifact"]["sha256"],
+        },
+        headers={"Idempotency-Key": "planner-start-projection"},
+    )
+    assert accepted.status_code == 200
+
+    queued = client.get(f"/api/v1/workbench/runs/{run_id}").json()
+    assert {stage["stage_id"]: stage for stage in queued["stages"]}["planning"]["state"] == "queued"
+
+    claims = asyncio.run(supervisor_store.claim_planning_generation_deliveries(limit=1, lease_seconds=60))
+    assert len(claims) == 1
+    running = client.get(f"/api/v1/workbench/runs/{run_id}").json()
+    assert {stage["stage_id"]: stage for stage in running["stages"]}["planning"]["state"] == "in_progress"
+
+    asyncio.run(
+        supervisor_store.record_planning_agent_terminal(
+            run_id, claims[0].claim_id, succeeded=False, error_summary="Plan generation failed: duplicate requirement IDs."
+        )
+    )
+    failed = client.get(f"/api/v1/workbench/runs/{run_id}").json()
+    assert failed["status"] == "planning_failed"
+    assert {stage["stage_id"]: stage for stage in failed["stages"]}["planning"]["state"] == "failed"
+
+
+def test_planning_generation_claim_is_singleton_and_recoverable(
+    client: TestClient, valid_plan: dict, supervisor_store: InMemorySupervisorStore
+) -> None:
+    """An accepted specification becomes one durable, retryable planner handoff."""
+
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+    accepted = client.post(
+        f"/api/v1/planning-runs/{run_id}/accept-product-specification",
+        json={
+            "revision": draft["product_specification_revision"],
+            "artifact_sha256": draft["product_specification_artifact"]["sha256"],
+        },
+        headers={"Idempotency-Key": "durable-planner-handoff"},
+    )
+    assert accepted.status_code == 200
+
+    first = asyncio.run(supervisor_store.claim_planning_generation_deliveries(limit=1, lease_seconds=60))
+    assert len(first) == 1
+    assert asyncio.run(supervisor_store.claim_planning_generation_deliveries(limit=1, lease_seconds=60)) == []
+
+    asyncio.run(supervisor_store.release_planning_generation_delivery(run_id, first[0].claim_id, retry_seconds=1))
+    recovered = asyncio.run(supervisor_store.claim_planning_generation_deliveries(limit=1, lease_seconds=60))
+    assert len(recovered) == 1
+    assert recovered[0].claim_id != first[0].claim_id
+
+
+def test_lifespan_dispatcher_generates_an_accepted_plan(
+    store: InMemoryPlanStore,
+    starter: FakeRunStarter,
+    supervisor_store: InMemorySupervisorStore,
+    planner: FakePlanner,
+    valid_plan: dict,
+) -> None:
+    """The durable dispatcher, rather than a request task, performs planning."""
+
+    app = create_app(
+        store=store,
+        settings=make_settings(),
+        starter=starter,
+        supervisor_store=supervisor_store,
+        planner=planner,
+    )
+    with TestClient(app, headers={"Authorization": "Bearer operator-test-token"}) as running_client:
+        run_id = running_client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+        draft = running_client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+        assert running_client.post(
+            f"/api/v1/planning-runs/{run_id}/accept-product-specification",
+            json={
+                "revision": draft["product_specification_revision"],
+                "artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            },
+            headers={"Idempotency-Key": "lifespan-planner-dispatch"},
+        ).status_code == 200
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            current = running_client.get(f"/api/v1/planning-runs/{run_id}").json()
+            if current["status"] == "awaiting_plan_approval":
+                break
+            time.sleep(0.05)
+        assert current["status"] == "awaiting_plan_approval"
+        assert len(starter.started_runs) == 1
 
 
 def test_accept_product_specification_records_evaluation_findings_without_blocking_selection(
@@ -175,8 +280,8 @@ def test_accept_product_specification_records_evaluation_findings_without_blocki
     states = {stage["stage_id"]: stage["state"] for stage in workbench["stages"]}
     assert states["product_specification"] == "completed"
     assert states["specification_evaluation"] == "completed"
-    assert states["planning"] == "awaiting_operator"
-    assert client.post(f"/api/v1/planning-runs/{run_id}/generate-plan").status_code == 200
+    assert states["planning"] == "queued"
+    assert states["plan_approval"] == "unavailable"
 
 
 def test_accept_product_specification_replays_an_accepted_request_without_duplicate_selection(

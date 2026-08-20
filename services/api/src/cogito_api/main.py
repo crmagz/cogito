@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 import asyncio
+import logging
 import secrets
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ from minio import Minio
 from opentelemetry.context import attach, detach
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .auth import ApprovalAuthenticator
+from .auth import ApprovalAuthenticator, Principal
 from .config import Settings, load_settings
 from .dag import validate_constraints, validate_phase_dag, validate_spec_reference, validate_target_repositories
 from .models import (
@@ -92,7 +93,12 @@ from .models import (
     WorkbenchTimelineResponse,
 )
 from .specification_evaluation import evaluate_specification, validate_plan_traceability
-from .outbox import ImplementationApprovalOutboxDispatcher, PlanApprovalOutboxDispatcher, stop_dispatcher
+from .outbox import (
+    ImplementationApprovalOutboxDispatcher,
+    PlanApprovalOutboxDispatcher,
+    PlanningGenerationDispatcher,
+    stop_dispatcher,
+)
 from .notifications import NotificationOutboxDispatcher, notification_sink, stop_notification_dispatcher
 from .observability import Telemetry, TelemetrySettings
 from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext, ProductSpecificationContext
@@ -108,12 +114,16 @@ from .registry import (
 from .supervisor import (
     AgentRunRecord,
     ApprovalConflictError,
+    PlanningGenerationDelivery,
     PlanningRunRecord,
     PostgresSupervisorStore,
     RegistryConflictError,
     SupervisorStore,
 )
 from .temporal import RunStarter, TemporalRunStarter
+
+
+logger = logging.getLogger(__name__)
 
 
 class PlanValidationError(Exception):
@@ -260,6 +270,7 @@ def create_app(
 
     dispatcher = PlanApprovalOutboxDispatcher(supervisor_store, starter)
     implementation_dispatcher = ImplementationApprovalOutboxDispatcher(supervisor_store, starter)
+    internal_planner_authorization = object()
     sink = notification_sink(settings)
     notification_dispatcher = NotificationOutboxDispatcher(supervisor_store, sink) if sink is not None else None
     reconciler = (
@@ -325,6 +336,7 @@ def create_app(
         await bootstrap_registry()
         delivery_task = asyncio.create_task(dispatcher.run())
         implementation_delivery_task = asyncio.create_task(implementation_dispatcher.run())
+        planning_generation_task = asyncio.create_task(planning_generation_dispatcher.run())
         notification_delivery_task = (
             asyncio.create_task(notification_dispatcher.run()) if notification_dispatcher is not None else None
         )
@@ -336,6 +348,7 @@ def create_app(
             readiness.stopped()
             await stop_dispatcher(delivery_task)
             await stop_dispatcher(implementation_delivery_task)
+            await stop_dispatcher(planning_generation_task)
             await stop_notification_dispatcher(notification_delivery_task)
             await stop_reconciler(reconciliation_task)
             telemetry.shutdown()
@@ -551,8 +564,18 @@ def create_app(
         This endpoint becomes worker-internal when the durable workflow gate is added.
         """
 
-        principal = await authenticator.authenticate(authorization)
-        authenticator.require_approver(principal)
+        if authorization is internal_planner_authorization:
+            initial = await supervisor_store.get_planning_run(run_id)
+            if initial is None:
+                raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
+            principal = Principal(
+                subject="durable-planner-dispatcher",
+                projects=frozenset({initial.project_id or settings.workbench_default_project_id}),
+                roles=frozenset({settings.auth_oidc_approval_role}),
+            )
+        else:
+            principal = await authenticator.authenticate(authorization)
+            authenticator.require_approver(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail=f"planning run '{run_id}' not found")
@@ -734,6 +757,39 @@ def create_app(
         finally:
             await supervisor_store.release_specification_evaluation_generation(record.run_id, generation_claim)
 
+    async def generate_plan_after_specification_acceptance(delivery: PlanningGenerationDelivery) -> bool:
+        """Deliver one leased planner handoff to a durable outcome."""
+
+        try:
+            await generate_plan(delivery.run_id, internal_planner_authorization)  # type: ignore[arg-type]
+        except HTTPException as error:
+            detail = error.detail if isinstance(error.detail, str) else "planner request could not be completed"
+            if error.status_code >= 500:
+                logger.warning(
+                    "Automatic plan generation will retry",
+                    extra={"run_id": delivery.run_id, "status_code": error.status_code},
+                )
+                return False
+            await supervisor_store.record_planning_agent_terminal(
+                delivery.run_id, delivery.claim_id, succeeded=False, error_summary=f"Plan generation failed: {detail[:512]}"
+            )
+            logger.warning("Automatic plan generation failed", extra={"run_id": delivery.run_id, "status_code": error.status_code})
+        except Exception:
+            await supervisor_store.record_planning_agent_terminal(
+                delivery.run_id,
+                delivery.claim_id,
+                succeeded=False,
+                error_summary="Plan generation failed before an immutable plan was recorded.",
+            )
+            logger.exception("Automatic plan generation failed unexpectedly", extra={"run_id": delivery.run_id})
+        else:
+            await supervisor_store.record_planning_agent_terminal(delivery.run_id, delivery.claim_id, succeeded=True)
+        return True
+
+    planning_generation_dispatcher = PlanningGenerationDispatcher(
+        supervisor_store, generate_plan_after_specification_acceptance
+    )
+
     @app.post("/api/v1/planning-runs/{run_id}/accept-product-specification")
     async def accept_product_specification(
         run_id: str,
@@ -751,9 +807,19 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
+        if record.status is not PlanningRunStatus.PLANNING:
+            if (
+                record.selected_product_specification_artifact is not None
+                and record.selected_product_specification_revision == request_body.revision
+                and record.selected_product_specification_artifact.sha256 == request_body.artifact_sha256
+            ):
+                response = ProductSpecificationAcceptanceResponse(
+                    **_planning_run_response(record).model_dump(), outcome=ProductSpecificationAcceptanceOutcome.ACCEPTED
+                )
+                return JSONResponse(content=response.model_dump(mode="json"))
+            raise HTTPException(status_code=409, detail="the displayed product specification is stale or ineligible for acceptance")
         if (
-            record.status is not PlanningRunStatus.PLANNING
-            or record.product_specification_artifact is None
+            record.product_specification_artifact is None
             or record.product_specification_revision != request_body.revision
             or record.product_specification_artifact.sha256 != request_body.artifact_sha256
         ):
@@ -796,6 +862,7 @@ def create_app(
             cancelled = await supervisor_store.cancel_planning_run(run_id)
         except ValueError as error:
             raise HTTPException(status_code=409, detail="planning run is not eligible for cancellation") from error
+        planning_generation_dispatcher.cancel(run_id)
         return JSONResponse(content=_planning_run_response(cancelled).model_dump(mode="json"))
 
     @app.post("/api/v1/planning-runs/{run_id}/select-product-specification")
@@ -1211,7 +1278,7 @@ def create_app(
             ),
         )
 
-    def workbench_response(record: PlanningRunRecord, principal) -> WorkbenchRunResponse:
+    async def workbench_response(record: PlanningRunRecord, principal) -> WorkbenchRunResponse:
         require_workbench_scope(record, principal)
         artifacts = [WorkbenchArtifactSummary(kind=WorkbenchArtifactKind.SOURCE, sha256=record.source_artifact.sha256)]
         if record.product_specification_artifact is not None:
@@ -1257,7 +1324,8 @@ def create_app(
             workflow.append("implementation")
         if active_gate is not None:
             workflow.append(f"{active_gate.value}_approval")
-        stages = workbench_stages(record, active_gate)
+        agent_run = await supervisor_store.get_agent_run(record.run_id)
+        stages = workbench_stages(record, active_gate, agent_run.status if agent_run is not None else None)
         return WorkbenchRunResponse(
             run_id=record.run_id,
             project_id=record.project_id,
@@ -1349,17 +1417,17 @@ def create_app(
                 ),
             )
             return actions
-        if record.plan_artifact is None:
-            actions.insert(
-                0,
-                WorkbenchActionSummary(
-                    action_id=WorkbenchActionId.GENERATE_PLAN,
-                    stage_id="planning",
-                    label="Proceed",
-                    description="Create an implementation plan from the accepted specification.",
-                ),
+        # Selection starts asynchronous planning. Keep the sole permitted
+        # pre-plan escape hatch visible until an immutable plan exists.
+        return [
+            WorkbenchActionSummary(
+                action_id=WorkbenchActionId.CANCEL_PLANNING_RUN,
+                stage_id="planning",
+                label="Cancel",
+                description="Stop this run before a plan is generated.",
+                requires_confirmation=True,
             )
-        return actions
+        ] if record.plan_artifact is None else []
 
     def workbench_graph(stages: list[WorkbenchStageSummary]) -> WorkbenchWorkflowGraph:
         """Return the server-owned relay topology for the lifecycle stages it exposes."""
@@ -1386,7 +1454,7 @@ def create_app(
         )
 
     def workbench_stages(
-        record: PlanningRunRecord, active_gate: CoordinationGate | None
+        record: PlanningRunRecord, active_gate: CoordinationGate | None, agent_status: AgentRunStatus | None
     ) -> list[WorkbenchStageSummary]:
         """Project only per-stage facts that the supervisor record can prove."""
 
@@ -1397,10 +1465,17 @@ def create_app(
             else WorkbenchStageState.NEEDS_REVISION
             if record.specification_evaluation_readiness == "needs_revision"
             and record.selected_product_specification_artifact is None
-            else WorkbenchStageState.AWAITING_OPERATOR
-            if record.plan_artifact is None and status is PlanningRunStatus.PLANNING
             else WorkbenchStageState.IN_PROGRESS
-            if status is PlanningRunStatus.PLANNING
+            if status is PlanningRunStatus.PLANNING and record.plan_artifact is None
+            and record.selected_product_specification_artifact is not None
+            and record.selected_specification_evaluation_artifact is not None
+            and agent_status is AgentRunStatus.RUNNING
+            else WorkbenchStageState.QUEUED
+            if status is PlanningRunStatus.PLANNING and record.plan_artifact is None
+            and record.selected_product_specification_artifact is not None
+            and record.selected_specification_evaluation_artifact is not None
+            else WorkbenchStageState.AWAITING_OPERATOR
+            if status is PlanningRunStatus.PLANNING and record.plan_artifact is None
             else WorkbenchStageState.COMPLETED
             if record.plan_artifact is not None
             else WorkbenchStageState.UNAVAILABLE
@@ -1408,13 +1483,12 @@ def create_app(
         planning_reason = (
             "The selected product specification must be revised before planning can begin."
             if planning_state is WorkbenchStageState.NEEDS_REVISION
-            else "Proceed to create an immutable plan from the accepted product specification."
-            if record.selected_product_specification_artifact is not None
-            and record.selected_specification_evaluation_artifact is not None
-            else "A selected product specification and recorded evaluation are required before planning can begin."
-            if planning_state is WorkbenchStageState.AWAITING_OPERATOR
             else "The supervisor records planning in progress."
             if planning_state is WorkbenchStageState.IN_PROGRESS
+            else "The planner agent is queued and has not yet confirmed execution."
+            if planning_state is WorkbenchStageState.QUEUED
+            else "A selected product specification and recorded evaluation are required before planning can begin."
+            if planning_state is WorkbenchStageState.AWAITING_OPERATOR
             else "The supervisor records planning as failed."
             if planning_state is WorkbenchStageState.FAILED
             else "An immutable generated plan is recorded."
@@ -1446,6 +1520,8 @@ def create_app(
         )
         implementation_state = (
             WorkbenchStageState.IN_PROGRESS
+            if status is PlanningRunStatus.IMPLEMENTING and agent_status is AgentRunStatus.RUNNING
+            else WorkbenchStageState.QUEUED
             if status is PlanningRunStatus.IMPLEMENTING
             else WorkbenchStageState.COMPLETED
             if record.implementation_artifact is not None
@@ -1479,10 +1555,6 @@ def create_app(
                 label="Product specification",
                 state=(
                     WorkbenchStageState.COMPLETED
-                    if record.selected_product_specification_artifact is not None
-                    else WorkbenchStageState.NEEDS_REVISION
-                    if record.specification_evaluation_readiness == "needs_revision"
-                    else WorkbenchStageState.AWAITING_OPERATOR
                     if record.product_specification_artifact is not None
                     else WorkbenchStageState.AWAITING_OPERATOR
                 ),
@@ -1490,9 +1562,7 @@ def create_app(
                 reason=(
                     "An operator selected this immutable product specification as the planning input."
                     if record.selected_product_specification_artifact is not None
-                    else "The immutable evaluation recorded findings for operator review."
-                    if record.specification_evaluation_readiness == "needs_revision"
-                    else "A generated immutable product specification is ready for operator evaluation."
+                    else "A generated immutable product specification is complete and ready for evaluation."
                     if record.product_specification_artifact is not None
                     else "No immutable product specification draft is available yet."
                 ),
@@ -1567,6 +1637,8 @@ def create_app(
                 reason=(
                     "The supervisor records implementation in progress."
                     if implementation_state is WorkbenchStageState.IN_PROGRESS
+                    else "Temporal accepted the approval, but the implementation agent has not confirmed execution."
+                    if implementation_state is WorkbenchStageState.QUEUED
                     else "An immutable implementation result is recorded."
                     if implementation_state is WorkbenchStageState.COMPLETED
                     else "No durable implementation result is available."
@@ -1675,7 +1747,7 @@ def create_app(
     async def workbench_detail_response(record: PlanningRunRecord, principal) -> WorkbenchRunResponse:
         """Enrich one already-authorized run with durable audit and evidence facts."""
 
-        base = workbench_response(record, principal)
+        base = await workbench_response(record, principal)
         approvals = await supervisor_store.list_workbench_approvals(record.run_id) if base.approval_history_available else []
         waiver = None
         if (
@@ -1704,6 +1776,20 @@ def create_app(
                 invocation_evidence_available=record.implementation_artifact is not None,
             )
         execution, actual_cost_usd, turns_used = workbench_execution(record)
+        agent_run = await supervisor_store.get_agent_run(record.run_id)
+        failure_summary = (
+            agent_run.error_summary
+            if record.status is PlanningRunStatus.PLANNING_FAILED and agent_run is not None
+            else None
+        )
+        if record.status is PlanningRunStatus.PLANNING_FAILED and failure_summary is None:
+            try:
+                worker_status = store.get_status(record.run_id)
+            except PlanStoreUnavailableError:
+                worker_status = None
+            candidate = worker_status.get("failure_detail") if isinstance(worker_status, dict) else None
+            if isinstance(candidate, str) and candidate.strip():
+                failure_summary = " ".join(candidate.split())[:4096]
         return base.model_copy(
             update={
                 "approval_history": [
@@ -1730,6 +1816,7 @@ def create_app(
                     else None
                 ),
                 "execution": execution,
+                "failure_summary": failure_summary,
                 "mcp_capabilities": mcp_capabilities,
                 "budget": base.budget.model_copy(update={"actual_cost_usd": actual_cost_usd, "turns_used": turns_used}),
             }
@@ -1797,6 +1884,8 @@ def create_app(
         if event_type == "specification_evaluation_waived":
             return ["specification_evaluation"]
         if event_type == "planning_started":
+            return ["planning"]
+        if event_type in {"planning_agent_started", "planning_agent_failed"}:
             return ["planning"]
         if event_type == "plan_approval_requested":
             return ["planning", "plan_approval"]
@@ -1968,7 +2057,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Workbench project not found")
         project_ids = frozenset((project_id,)) if project_id is not None else principal.projects
         records = await supervisor_store.list_workbench_runs(project_ids=project_ids, limit=limit)
-        items = [workbench_response(record, principal) for record in records]
+        items = await asyncio.gather(*(workbench_response(record, principal) for record in records))
         draft = WorkbenchRunListResponse(items=items, revision="")
         revision = workbench_revision(draft)
         if workbench_etag_matches(if_none_match, revision):

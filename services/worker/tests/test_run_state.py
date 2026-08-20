@@ -92,6 +92,31 @@ async def test_failed_workflow_closes_the_supervisor_projection() -> None:
     assert supervisor_parameters["run_id"] == "run-1"
 
 
+async def test_approved_run_persists_a_failure_reason_when_execution_setup_fails() -> None:
+    connection = _Connection(previous_status="WAITING_FOR_APPROVAL")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.report("run-1", "failed", "MCP repository scope does not match its pinned release", None)
+
+    _, agent_update = connection.calls[1]
+    assert agent_update["status"] == "FAILED"
+    assert agent_update["error_summary"] == "MCP repository scope does not match its pinned release"
+
+
+async def test_duplicate_failed_status_hydrates_an_empty_failure_reason_without_a_second_lifecycle_event() -> None:
+    connection = _Connection(previous_status="FAILED")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.report("run-1", "failed", "phase one failed verification", None)
+
+    hydration_statement, hydration_parameters = connection.calls[1]
+    assert "SET error_summary = COALESCE(error_summary" in hydration_statement
+    assert hydration_parameters == {"run_id": "run-1", "error_summary": "phase one failed verification"}
+    assert len(connection.calls) == 2
+
+
 async def test_running_run_can_enter_implementation_approval_and_register_artifact() -> None:
     connection = _Connection(previous_status="RUNNING")
     reporter = object.__new__(PostgresRunStateReporter)

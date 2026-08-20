@@ -39,6 +39,7 @@ from cogito_api.supervisor import (
     ImplementationApprovalRecord,
     NotificationDelivery,
     OutboxDelivery,
+    PlanningGenerationDelivery,
     PlanningRunRecord,
     WorkbenchAgentGatewayRouteRecord,
     WorkbenchAgentInvocationRecord,
@@ -190,12 +191,67 @@ class InMemorySupervisorStore:
         self.leased_notification_event_ids: set[str] = set()
         self.workbench_feedback: dict[tuple[str, str], WorkbenchFeedbackRecord] = {}
         self.workbench_feedback_request_hashes: dict[tuple[str, str], str] = {}
+        self.planning_generation_claims: dict[str, str] = {}
+        self.planning_generation_attempts: dict[str, int] = {}
 
     async def create_agent_run(self, record: AgentRunRecord) -> None:
         self.agent_runs[record.run_id] = record
 
     async def get_agent_run(self, run_id: str) -> AgentRunRecord | None:
         return self.agent_runs.get(run_id)
+
+    async def claim_planning_generation_deliveries(
+        self, *, limit: int, lease_seconds: int
+    ) -> list[PlanningGenerationDelivery]:
+        del lease_seconds
+        deliveries: list[PlanningGenerationDelivery] = []
+        for run in self.planning_runs.values():
+            if len(deliveries) >= limit or run.run_id in self.planning_generation_claims:
+                continue
+            retrying_started_workflow = run.status is PlanningRunStatus.AWAITING_PLAN_APPROVAL
+            pending_plan = run.status is PlanningRunStatus.PLANNING and run.plan_artifact is None
+            if not (pending_plan or retrying_started_workflow) or run.selected_product_specification_artifact is None:
+                continue
+            agent = self.agent_runs.get(run.run_id)
+            if agent is None or agent.status in {AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED, AgentRunStatus.TIMED_OUT}:
+                continue
+            self.planning_generation_attempts[run.run_id] = self.planning_generation_attempts.get(run.run_id, 0) + 1
+            claim_id = f"planning-claim-{run.run_id}-{self.planning_generation_attempts[run.run_id]}"
+            self.planning_generation_claims[run.run_id] = claim_id
+            self.agent_runs[run.run_id] = replace(agent, status=AgentRunStatus.RUNNING, updated_at=datetime.now(timezone.utc).isoformat())
+            self._append_coordination_event(run.run_id, "planning_agent_started")
+            deliveries.append(PlanningGenerationDelivery(run.run_id, claim_id, self.planning_generation_attempts[run.run_id]))
+        return deliveries
+
+    async def release_planning_generation_delivery(
+        self, run_id: str, claim_id: str, *, retry_seconds: int
+    ) -> None:
+        del retry_seconds
+        if self.planning_generation_claims.get(run_id) != claim_id:
+            return
+        self.planning_generation_claims.pop(run_id, None)
+        record = self.agent_runs.get(run_id)
+        if record is not None and record.status is AgentRunStatus.RUNNING:
+            self.agent_runs[run_id] = replace(record, status=AgentRunStatus.QUEUED, updated_at=datetime.now(timezone.utc).isoformat())
+
+    async def record_planning_agent_terminal(
+        self, run_id: str, claim_id: str, *, succeeded: bool, error_summary: str | None = None
+    ) -> None:
+        if self.planning_generation_claims.get(run_id) != claim_id:
+            return
+        self.planning_generation_claims.pop(run_id, None)
+        record = self.agent_runs.get(run_id)
+        if record is None or record.status in {AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED, AgentRunStatus.TIMED_OUT}:
+            return
+        status = AgentRunStatus.WAITING_FOR_APPROVAL if succeeded else AgentRunStatus.FAILED
+        self.agent_runs[run_id] = replace(
+            record, status=status, updated_at=datetime.now(timezone.utc).isoformat(), error_summary=error_summary or record.error_summary
+        )
+        if not succeeded:
+            run = self.planning_runs.get(run_id)
+            if run is not None and run.status in {PlanningRunStatus.PLANNING, PlanningRunStatus.AWAITING_PLAN_APPROVAL}:
+                self.planning_runs[run_id] = replace(run, status=PlanningRunStatus.PLANNING_FAILED)
+            self._append_coordination_event(run_id, "planning_agent_failed", lifecycle_status="FAILED")
 
     async def list_workbench_agents(
         self, *, project_id: str, policy_revision: str, limit: int = 50
@@ -522,6 +578,10 @@ class InMemorySupervisorStore:
             raise ValueError("planning run is not eligible for cancellation")
         updated = replace(record, status=PlanningRunStatus.CANCELLED)
         self.planning_runs[run_id] = updated
+        self.planning_generation_claims.pop(run_id, None)
+        agent = self.agent_runs.get(run_id)
+        if agent is not None:
+            self.agent_runs[run_id] = replace(agent, status=AgentRunStatus.CANCELLED, updated_at=datetime.now(timezone.utc).isoformat())
         self._append_coordination_event(
             run_id, "planning_cancelled", lifecycle_status=PlanningRunStatus.CANCELLED.value
         )
