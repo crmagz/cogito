@@ -168,6 +168,9 @@ def test_workbench_projects_permitted_product_specification_actions(client, vali
     review = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
 
     assert review.status_code == 200
+    review_stages = {item["stage_id"]: item for item in review.json()["stages"]}
+    assert review_stages["product_specification"]["state"] == "completed"
+    assert review_stages["specification_evaluation"]["state"] == "awaiting_operator"
     assert review.json()["available_actions"] == [
         {
             "action_id": "accept_product_specification",
@@ -202,16 +205,54 @@ def test_workbench_projects_permitted_product_specification_actions(client, vali
     )
     assert accepted.status_code == 200
     selected = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
-    assert [action["action_id"] for action in selected.json()["available_actions"]] == [
-        "generate_plan",
-        "refine_product_specification",
-        "cancel_planning_run",
+    assert selected.json()["available_actions"] == [
+        {
+            "action_id": "cancel_planning_run",
+            "stage_id": "planning",
+            "label": "Cancel",
+            "description": "Stop this run before a plan is generated.",
+            "requires_confirmation": True,
+        }
     ]
-    assert [action["label"] for action in selected.json()["available_actions"]] == [
-        "Proceed",
-        "Needs refinement",
-        "Cancel",
-    ]
+    selected_stages = {item["stage_id"]: item for item in selected.json()["stages"]}
+    assert selected_stages["planning"]["state"] == "queued"
+    assert selected_stages["plan_approval"]["state"] == "unavailable"
+
+
+def test_workbench_exposes_a_sanitized_failure_summary_for_a_failed_run(client, valid_plan, supervisor_store) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    supervisor_store.planning_runs[run_id] = replace(
+        supervisor_store.planning_runs[run_id], status=PlanningRunStatus.PLANNING_FAILED
+    )
+    supervisor_store.agent_runs[run_id] = replace(
+        supervisor_store.agent_runs[run_id], status=AgentRunStatus.FAILED, error_summary="MCP repository scope mismatch"
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json()["failure_summary"] == "MCP repository scope mismatch"
+
+
+def test_workbench_recovers_a_terminal_failure_summary_from_durable_worker_status(
+    client, valid_plan, supervisor_store, store
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    supervisor_store.planning_runs[run_id] = replace(
+        supervisor_store.planning_runs[run_id], status=PlanningRunStatus.PLANNING_FAILED
+    )
+    supervisor_store.agent_runs[run_id] = replace(
+        supervisor_store.agent_runs[run_id], status=AgentRunStatus.FAILED, error_summary=None
+    )
+    store.put_status(
+        run_id,
+        {"status": "failed", "failure_detail": "phase one failed: verification command returned 1"},
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json()["failure_summary"] == "phase one failed: verification command returned 1"
 
 
 def test_workbench_approver_can_view_pinned_mcp_capabilities_and_submit_selection(valid_plan: dict) -> None:
@@ -568,7 +609,7 @@ def test_workbench_stage_projection_shows_evaluation_gate_before_planning(client
 
     assert response.status_code == 200
     stages = {item["stage_id"]: item for item in response.json()["stages"]}
-    assert stages["product_specification"]["state"] == "needs_revision"
+    assert stages["product_specification"]["state"] == "completed"
     assert stages["specification_evaluation"]["state"] == "needs_revision"
     assert stages["planning"] == {
         "stage_id": "planning",

@@ -5,12 +5,74 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 
-from .supervisor import SupervisorStore
+from .supervisor import PlanningGenerationDelivery, SupervisorStore
 from .temporal import RunStarter
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class PlanningGenerationDispatcher:
+    """Lease accepted specifications until planning reaches a durable outcome."""
+
+    def __init__(
+        self,
+        store: SupervisorStore,
+        deliver: Callable[[PlanningGenerationDelivery], Awaitable[bool]],
+        poll_seconds: float = 1.0,
+    ) -> None:
+        self._store = store
+        self._deliver = deliver
+        self._poll_seconds = poll_seconds
+        self._active: dict[str, asyncio.Task[bool]] = {}
+        self._cancelled: set[str] = set()
+
+    async def deliver_once(self, *, limit: int = 10) -> int:
+        """Deliver a bounded planning batch and release transient failures."""
+
+        delivered = 0
+        for item in await self._store.claim_planning_generation_deliveries(limit=limit, lease_seconds=60):
+            task = asyncio.create_task(self._deliver(item), name=f"planning-generation:{item.run_id}")
+            self._active[item.run_id] = task
+            try:
+                complete = await task
+            except asyncio.CancelledError:
+                if item.run_id not in self._cancelled:
+                    raise
+                self._cancelled.remove(item.run_id)
+                complete = True
+            except Exception:
+                complete = False
+                _LOGGER.warning("planning generation delivery failed", extra={"run_id": item.run_id}, exc_info=False)
+            finally:
+                self._active.pop(item.run_id, None)
+            if complete:
+                delivered += 1
+            else:
+                await self._store.release_planning_generation_delivery(
+                    item.run_id, item.claim_id, retry_seconds=_retry_delay(item.attempt_count)
+                )
+        return delivered
+
+    def cancel(self, run_id: str) -> None:
+        """Cancel a local planner request after its durable run is cancelled."""
+
+        task = self._active.get(run_id)
+        if task is None:
+            return
+        self._cancelled.add(run_id)
+        task.cancel()
+
+    async def run(self) -> None:
+        """Keep planner handoffs recoverable across API restarts and replicas."""
+
+        while True:
+            try:
+                await self.deliver_once()
+            except Exception:
+                _LOGGER.warning("planning generation dispatcher pass failed", exc_info=False)
+            await asyncio.sleep(self._poll_seconds)
 
 
 class PlanApprovalOutboxDispatcher:

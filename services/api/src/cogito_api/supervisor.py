@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any, Mapping, Protocol
 from urllib.parse import urlparse
@@ -81,6 +81,15 @@ class ApprovalRecord:
     delivered: bool
     plan_revision: int
     mcp_selection: list[McpToolSelection] | None = None
+
+
+@dataclass(frozen=True)
+class PlanningGenerationDelivery:
+    """One leased, durable request to generate or start a plan."""
+
+    run_id: str
+    claim_id: str
+    attempt_count: int
 
 
 @dataclass(frozen=True)
@@ -490,6 +499,18 @@ class SupervisorStore(Protocol):
 
     async def get_agent_run(self, run_id: str) -> AgentRunRecord | None: ...
 
+    async def claim_planning_generation_deliveries(
+        self, *, limit: int, lease_seconds: int
+    ) -> list[PlanningGenerationDelivery]: ...
+
+    async def release_planning_generation_delivery(
+        self, run_id: str, claim_id: str, *, retry_seconds: int
+    ) -> None: ...
+
+    async def record_planning_agent_terminal(
+        self, run_id: str, claim_id: str, *, succeeded: bool, error_summary: str | None = None
+    ) -> None: ...
+
     async def list_workbench_agents(
         self, *, project_id: str, policy_revision: str, limit: int = 50
     ) -> list[WorkbenchAgentRecord]: ...
@@ -696,6 +717,142 @@ class PostgresSupervisorStore:
             )
             row = result.mappings().one_or_none()
         return _agent_run_record(row) if row is not None else None
+
+    async def claim_planning_generation_deliveries(
+        self, *, limit: int, lease_seconds: int
+    ) -> list[PlanningGenerationDelivery]:
+        """Lease accepted planning work so restarts and replicas cannot lose it."""
+
+        if limit < 1:
+            return []
+        now = datetime.now().astimezone()
+        deliveries: list[PlanningGenerationDelivery] = []
+        async with self._engine.begin() as connection:
+            candidates = await connection.execute(
+                text(
+                    """
+                    SELECT s.run_id, a.status, a.planning_generation_attempt_count
+                    FROM supervisor_runs AS s
+                    JOIN agent_runs AS a USING (run_id)
+                    WHERE s.selected_product_specification_artifact_ref IS NOT NULL
+                      AND s.selected_specification_evaluation_artifact_ref IS NOT NULL
+                      AND (
+                        (s.status = 'planning' AND s.plan_artifact_ref IS NULL)
+                        OR (s.status = 'awaiting_plan_approval' AND a.planning_generation_retry_at IS NOT NULL)
+                      )
+                      AND (a.planning_generation_claim IS NULL OR a.planning_generation_claimed_at < :expired_at)
+                      AND a.status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT')
+                      AND (a.planning_generation_retry_at IS NULL OR a.planning_generation_retry_at <= :now)
+                    ORDER BY s.submitted_at
+                    FOR UPDATE OF s, a SKIP LOCKED
+                    LIMIT :limit
+                    """
+                ),
+                {"now": now, "expired_at": now - timedelta(seconds=lease_seconds), "limit": limit},
+            )
+            for row in candidates.mappings():
+                claim_id = str(uuid.uuid4())
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE agent_runs
+                        SET status = 'RUNNING', planning_generation_claim = :claim_id,
+                            planning_generation_claimed_at = :now, planning_generation_retry_at = NULL,
+                            planning_generation_attempt_count = planning_generation_attempt_count + 1,
+                            updated_at = :now, last_heartbeat_at = :now
+                        WHERE run_id = :run_id
+                        """
+                    ),
+                    {"run_id": row["run_id"], "claim_id": claim_id, "now": now},
+                )
+                if row["status"] != AgentRunStatus.RUNNING.value:
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO agent_run_events (event_id, run_id, event_type, from_status, to_status, occurred_at, metadata)
+                            VALUES (:event_id, :run_id, 'planner_started', :from_status, 'RUNNING', :occurred_at, CAST('{}' AS jsonb))
+                            """
+                        ),
+                        {"event_id": str(uuid.uuid4()), "run_id": row["run_id"], "from_status": row["status"], "occurred_at": now},
+                    )
+                    await self._append_coordination_event(connection, run_id=row["run_id"], event_type="planning_agent_started")
+                deliveries.append(
+                    PlanningGenerationDelivery(
+                        run_id=row["run_id"], claim_id=claim_id,
+                        attempt_count=int(row["planning_generation_attempt_count"]) + 1,
+                    )
+                )
+        return deliveries
+
+    async def release_planning_generation_delivery(
+        self, run_id: str, claim_id: str, *, retry_seconds: int
+    ) -> None:
+        """Release a transient planner-start failure for bounded retry."""
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE agent_runs
+                    SET status = 'QUEUED', planning_generation_claim = NULL,
+                        planning_generation_claimed_at = NULL,
+                        planning_generation_retry_at = now() + (:retry_seconds * interval '1 second'),
+                        updated_at = now()
+                    WHERE run_id = :run_id AND planning_generation_claim = :claim_id
+                    """
+                ),
+                {"run_id": run_id, "claim_id": claim_id, "retry_seconds": retry_seconds},
+            )
+
+    async def record_planning_agent_terminal(
+        self, run_id: str, claim_id: str, *, succeeded: bool, error_summary: str | None = None
+    ) -> None:
+        """Persist one terminal planner result and never leave a failed attempt live."""
+
+        # This root agent record becomes the implementation worker's status
+        # carrier after plan approval. A successful planning handoff therefore
+        # waits at the plan gate instead of becoming terminal.
+        target = AgentRunStatus.WAITING_FOR_APPROVAL.value if succeeded else AgentRunStatus.FAILED.value
+        now = datetime.now().astimezone()
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE agent_runs
+                    SET status = :target, updated_at = :now, last_heartbeat_at = :now,
+                        completed_at = CASE WHEN :succeeded THEN completed_at ELSE :now END,
+                        planning_generation_claim = NULL, planning_generation_claimed_at = NULL,
+                        planning_generation_retry_at = NULL,
+                        error_summary = CASE
+                            WHEN CAST(:error_summary AS text) IS NULL THEN error_summary
+                            ELSE CAST(:error_summary AS text)
+                        END
+                    WHERE run_id = :run_id AND planning_generation_claim = :claim_id
+                      AND status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT')
+                    RETURNING status
+                    """
+                ),
+                {"run_id": run_id, "claim_id": claim_id, "target": target, "now": now, "succeeded": succeeded, "error_summary": error_summary},
+            )
+            if result.scalar_one_or_none() is None:
+                return
+            if not succeeded:
+                await connection.execute(
+                    text("UPDATE supervisor_runs SET status = 'planning_failed' WHERE run_id = :run_id AND status IN ('planning', 'awaiting_plan_approval')"),
+                    {"run_id": run_id},
+                )
+                await self._append_coordination_event(
+                    connection, run_id=run_id, event_type="planning_agent_failed", lifecycle_status="FAILED"
+                )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_run_events (event_id, run_id, event_type, from_status, to_status, occurred_at, metadata)
+                    VALUES (:event_id, :run_id, 'planner_terminal', 'RUNNING', :target, :occurred_at, CAST('{}' AS jsonb))
+                    """
+                ),
+                {"event_id": str(uuid.uuid4()), "run_id": run_id, "target": target, "occurred_at": now},
+            )
 
     async def list_workbench_agents(
         self, *, project_id: str, policy_revision: str, limit: int = 50
@@ -1507,6 +1664,18 @@ class PostgresSupervisorStore:
                 {"run_id": run_id},
             )
             if result.scalar_one_or_none() is not None:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE agent_runs
+                        SET status = 'CANCELLED', planning_generation_claim = NULL,
+                            planning_generation_claimed_at = NULL, planning_generation_retry_at = NULL,
+                            updated_at = now(), completed_at = now()
+                        WHERE run_id = :run_id AND status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT')
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
                 await self._append_coordination_event(
                     connection,
                     run_id=run_id,

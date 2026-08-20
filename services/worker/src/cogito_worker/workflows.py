@@ -29,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
     from .registry import require_role, require_tool
 
 _ACTIVITY_TIMEOUT = timedelta(seconds=30)
+_WORKER_START_TIMEOUT = timedelta(seconds=60)
 # Workspace provisioning includes pod scheduling, repository preparation, and
 # the operator-configured execution startup allowance. It cannot share the
 # short status/load activity timeout or Temporal will cancel it first.
@@ -195,6 +196,14 @@ class DeveloperRunWorkflow:
                 "developer",
                 approved_selection,
             )
+            # Report execution before potentially slow workspace provisioning
+            # so the control plane does not label active work as queued.
+            await workflow.execute_activity(
+                WorkerActivities.report_status,
+                args=[envelope.run_id, "implementing"],
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                schedule_to_start_timeout=_WORKER_START_TIMEOUT,
+            )
             workspace = await workflow.execute_activity(
                 WorkerActivities.provision_execution_workspace,
                 args=[
@@ -214,6 +223,7 @@ class DeveloperRunWorkflow:
                     )
                 ],
                 start_to_close_timeout=_PROVISION_ACTIVITY_TIMEOUT,
+                schedule_to_start_timeout=_WORKER_START_TIMEOUT,
                 retry_policy=_PROVISION_RETRY_POLICY,
             )
             completed_phase_ids: list[str] = []
@@ -223,11 +233,6 @@ class DeveloperRunWorkflow:
             implementation_artifact: ImplementationArtifact | None = None
             implementation_evidence: dict | None = None
             try:
-                await workflow.execute_activity(
-                    WorkerActivities.report_status,
-                    args=[envelope.run_id, "implementing"],
-                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
-                )
                 deadline = workflow.now() + run_timeout
                 for phase in phases:
                     remaining = deadline - workflow.now()
@@ -452,6 +457,12 @@ class DeveloperRunWorkflow:
             )
             return RunResult(run_id=envelope.run_id, status="completed")
         except Exception as error:  # noqa: BLE001 - Temporal wraps activity failures variably.
+            # If no worker can consume the first implementation activity, a
+            # status activity cannot repair the projection either. Return the
+            # terminal outcome so the API reconciler records a durable failure
+            # instead of leaving the handoff queued forever.
+            if _is_timeout_error(error):
+                return RunResult(run_id=envelope.run_id, status="failed")
             await workflow.execute_activity(
                 WorkerActivities.report_status,
                 args=[envelope.run_id, "failed", _failure_detail(error)],

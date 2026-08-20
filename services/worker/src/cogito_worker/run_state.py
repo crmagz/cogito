@@ -41,7 +41,7 @@ _ALLOWED_TRANSITIONS = {
         "TIMED_OUT",
     },
     "WAITING_FOR_TOOL": {"RUNNING", "FAILED", "CANCELLED", "TIMED_OUT"},
-    "WAITING_FOR_APPROVAL": {"RUNNING", "PENDING", "CANCELLED", "TIMED_OUT"},
+    "WAITING_FOR_APPROVAL": {"RUNNING", "PENDING", "FAILED", "CANCELLED", "TIMED_OUT"},
 }
 
 
@@ -100,6 +100,22 @@ class PostgresRunStateReporter:
             # commit. Repeating an identical state must not create a second
             # lifecycle event or mutate a terminal projection.
             if previous == target:
+                # A failed phase first records the terminal lifecycle state,
+                # then the enclosing workflow reports its concise cause. Keep
+                # the lifecycle event idempotent while allowing that later
+                # report to hydrate an otherwise-empty audit-safe summary.
+                safe_failure_detail = _safe_error(failure_detail)
+                if target == "FAILED" and safe_failure_detail:
+                    await connection.execute(
+                        text(
+                            """
+                            UPDATE agent_runs
+                            SET error_summary = COALESCE(error_summary, CAST(:error_summary AS text))
+                            WHERE run_id = :run_id
+                            """
+                        ),
+                        {"run_id": run_id, "error_summary": safe_failure_detail},
+                    )
                 return
             if previous in _TERMINAL and previous != target:
                 return
