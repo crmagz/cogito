@@ -64,6 +64,21 @@ Then use the same files with `helm upgrade --install`. See
 [values-production.yaml](charts/values-production.yaml) for the public
 template.
 
+### Execution egress capabilities
+
+Execution Jobs are default-deny for network egress. A developer run that
+checks out a repository needs an explicit `worker.execution.networkPolicy.gitEgress`
+peer list on TCP/443; use the Git provider's maintained CIDRs or an
+environment-owned egress proxy. Do not grant a catch-all Internet CIDR.
+
+`worker.execution.networkPolicy.additionalEgress` provides named, port-scoped
+rules when an enabled agent capability requires direct access to an approved
+service. This is intentionally an operator deployment decision rather than an
+automatic consequence of an agent or MCP toggle. A chart cannot safely turn a
+hostname into a Kubernetes NetworkPolicy peer, and most MCPs should keep their
+network access inside their own service boundary instead of extending execution
+Job egress.
+
 ## Full local Kind E2E
 
 The Phase 13 test creates its own uniquely versioned, immutable spec fixture,

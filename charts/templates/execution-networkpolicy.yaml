@@ -61,4 +61,16 @@ spec:
         - protocol: TCP
           port: 443
     {{- end }}
+    {{- range $rule := .Values.worker.execution.networkPolicy.additionalEgress }}
+    {{- if or (not $rule.name) (not $rule.networkPolicyPeers) (not $rule.ports) }}
+    {{- fail "worker.execution.networkPolicy.additionalEgress entries require name, networkPolicyPeers, and ports" }}
+    {{- end }}
+    - to:
+        {{- toYaml $rule.networkPolicyPeers | nindent 8 }}
+      ports:
+        {{- range $port := $rule.ports }}
+        - protocol: {{ default "TCP" $port.protocol }}
+          port: {{ $port.port | int }}
+        {{- end }}
+    {{- end }}
 {{- end }}

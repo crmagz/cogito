@@ -643,6 +643,13 @@ worker:
       ## Explicit CIDRs for an external object store such as S3. Prefer a VPC endpoint.
       ## Empty keeps the execution namespace restricted to the in-cluster MinIO Service.
       objectStoreEgress: []
+      ## @extra worker.execution.networkPolicy.additionalEgress
+      ## Named, least-privilege egress rules for an enabled execution capability,
+      ## such as an agent's approved service or an MCP backing service. Each rule
+      ## needs NetworkPolicy `to` peers and one or more explicit TCP/UDP ports.
+      ## These rules apply only to run-workspace Jobs; an MCP service retains its
+      ## own ingress and egress policy.
+      additionalEgress: []
     ## The worker reads the repository-scoped Git credential from this Secret in
     ## the release namespace, then creates a labelled, run-private copy in the
     ## execution namespace and deletes it during cleanup. The chart never
