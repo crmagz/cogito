@@ -164,6 +164,14 @@ worker:
     prefix: specs
   execution:
     createNamespace: true
+    networkPolicy:
+      # Private production values must provide the approved Git-provider CIDRs
+      # or an egress-proxy peer on TCP/443 for repository checkout. Do not use
+      # a catch-all Internet CIDR for execution Jobs.
+      gitEgress: []
+      # Add a named rule only when the enabled agent or MCP capability requires
+      # direct network access from the execution Job.
+      additionalEgress: []
     keyManagement:
       existingSecret: cogito-developer-key-manager
       apiKeyKey: api-key
