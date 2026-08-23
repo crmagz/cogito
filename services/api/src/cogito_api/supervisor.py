@@ -61,6 +61,7 @@ class PlanningRunRecord:
     project_id: str | None = None
     product_specification_artifact: ArtifactReference | None = None
     product_specification_revision: int = 0
+    product_specification_generation_claimed_at: datetime | None = None
     selected_product_specification_artifact: ArtifactReference | None = None
     selected_product_specification_revision: int | None = None
     specification_evaluation_artifact: ArtifactReference | None = None
@@ -343,6 +344,7 @@ def _planning_run_record(row: Mapping[str, Any]) -> PlanningRunRecord:
             else None
         ),
         product_specification_revision=int(row.get("product_specification_revision", 0)),
+        product_specification_generation_claimed_at=row.get("product_specification_generation_claimed_at"),
         selected_product_specification_artifact=(
             ArtifactReference(
                 ref=row["selected_product_specification_artifact_ref"],
@@ -1632,7 +1634,8 @@ class PostgresSupervisorStore:
                            plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
                            implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                            product_specification_artifact_ref, product_specification_artifact_sha256,
-                           product_specification_revision, selected_product_specification_artifact_ref,
+                           product_specification_revision, product_specification_generation_claimed_at,
+                           selected_product_specification_artifact_ref,
                            selected_product_specification_artifact_sha256, selected_product_specification_revision,
                            specification_evaluation_artifact_ref, specification_evaluation_artifact_sha256,
                            specification_evaluation_readiness, selected_specification_evaluation_artifact_ref,
@@ -3101,7 +3104,8 @@ class PostgresSupervisorStore:
                            plan_artifact_ref, plan_artifact_sha256, planner_model, active_workflow_id, plan_revision,
                            implementation_artifact_ref, implementation_artifact_sha256, implementation_revision, project_id,
                            product_specification_artifact_ref, product_specification_artifact_sha256,
-                           product_specification_revision, selected_product_specification_artifact_ref,
+                           product_specification_revision, product_specification_generation_claimed_at,
+                           selected_product_specification_artifact_ref,
                            selected_product_specification_artifact_sha256, selected_product_specification_revision,
                            specification_evaluation_artifact_ref, specification_evaluation_artifact_sha256,
                            specification_evaluation_readiness, selected_specification_evaluation_artifact_ref,

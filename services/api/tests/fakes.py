@@ -609,6 +609,7 @@ class InMemorySupervisorStore:
                 **record.__dict__,
                 "product_specification_artifact": artifact,
                 "product_specification_revision": record.product_specification_revision + 1,
+                "product_specification_generation_claimed_at": None,
             }
         )
         self.planning_runs[run_id] = updated
@@ -632,13 +633,18 @@ class InMemorySupervisorStore:
             return None
         claim = f"claim-{run_id}"
         self.product_specification_generation_claims[run_id] = claim
-        self.product_specification_generation_claimed_at[run_id] = datetime.now(timezone.utc)
+        claimed_at = datetime.now(timezone.utc)
+        self.product_specification_generation_claimed_at[run_id] = claimed_at
+        self.planning_runs[run_id] = replace(record, product_specification_generation_claimed_at=claimed_at)
         return claim
 
     async def release_product_specification_generation(self, run_id: str, generation_claim: str) -> None:
         if self.product_specification_generation_claims.get(run_id) == generation_claim:
             self.product_specification_generation_claims.pop(run_id, None)
             self.product_specification_generation_claimed_at.pop(run_id, None)
+            self.planning_runs[run_id] = replace(
+                self.planning_runs[run_id], product_specification_generation_claimed_at=None
+            )
 
     async def record_specification_evaluation(
         self,

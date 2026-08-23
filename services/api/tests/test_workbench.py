@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import json
 
@@ -590,6 +591,27 @@ def test_workbench_stage_projection_is_typed_and_never_copies_terminal_run_state
         ("implementation", "implementation_approval"),
     ]
     assert response.json()["workflow"] == ["specification", "product_specification", "specification_evaluation", "planning"]
+
+
+def test_workbench_product_specification_generation_projects_agent_progress(
+    client, valid_plan, supervisor_store
+) -> None:
+    """Keep later planning unavailable while the product-specification agent works."""
+
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    initial = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    initial_stages = {item["stage_id"]: item for item in initial.json()["stages"]}
+
+    assert initial_stages["product_specification"]["state"] == "awaiting_operator"
+    assert initial_stages["planning"]["state"] == "unavailable"
+
+    assert asyncio.run(supervisor_store.claim_product_specification_generation(run_id))
+    running = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+    running_stages = {item["stage_id"]: item for item in running.json()["stages"]}
+
+    assert running_stages["product_specification"]["state"] == "in_progress"
+    assert running_stages["product_specification"]["reason"] == "The planner agent is generating the product specification."
+    assert running_stages["planning"]["state"] == "unavailable"
 
 
 def test_workbench_stage_projection_shows_evaluation_gate_before_planning(client, valid_plan, supervisor_store) -> None:

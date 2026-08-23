@@ -1474,8 +1474,6 @@ def create_app(
             if status is PlanningRunStatus.PLANNING and record.plan_artifact is None
             and record.selected_product_specification_artifact is not None
             and record.selected_specification_evaluation_artifact is not None
-            else WorkbenchStageState.AWAITING_OPERATOR
-            if status is PlanningRunStatus.PLANNING and record.plan_artifact is None
             else WorkbenchStageState.COMPLETED
             if record.plan_artifact is not None
             else WorkbenchStageState.UNAVAILABLE
@@ -1487,8 +1485,6 @@ def create_app(
             if planning_state is WorkbenchStageState.IN_PROGRESS
             else "The planner agent is queued and has not yet confirmed execution."
             if planning_state is WorkbenchStageState.QUEUED
-            else "A selected product specification and recorded evaluation are required before planning can begin."
-            if planning_state is WorkbenchStageState.AWAITING_OPERATOR
             else "The supervisor records planning as failed."
             if planning_state is WorkbenchStageState.FAILED
             else "An immutable generated plan is recorded."
@@ -1556,6 +1552,8 @@ def create_app(
                 state=(
                     WorkbenchStageState.COMPLETED
                     if record.product_specification_artifact is not None
+                    else WorkbenchStageState.IN_PROGRESS
+                    if record.product_specification_generation_claimed_at is not None
                     else WorkbenchStageState.AWAITING_OPERATOR
                 ),
                 availability=WorkbenchStageAvailability.AUTHORITATIVE,
@@ -1564,6 +1562,8 @@ def create_app(
                     if record.selected_product_specification_artifact is not None
                     else "A generated immutable product specification is complete and ready for evaluation."
                     if record.product_specification_artifact is not None
+                    else "The planner agent is generating the product specification."
+                    if record.product_specification_generation_claimed_at is not None
                     else "No immutable product specification draft is available yet."
                 ),
                 artifact_kind=(
