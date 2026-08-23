@@ -26,6 +26,10 @@ class PlannerError(Exception):
     """Raised when the planner cannot safely produce an executable plan artifact."""
 
 
+class RequirementPartitionError(ValueError):
+    """Raised when phase ownership cannot form the selected requirement partition."""
+
+
 @dataclass(frozen=True)
 class PlanningContext:
     """Trusted envelope paired with the untrusted initial work specification."""
@@ -122,11 +126,11 @@ class LiteLLMPlanner:
                 },
             ],
         }
-        plan = await self._request_plan(payload)
-        _validate_generated_plan(plan, context, self._settings)
         try:
+            plan = await self._request_plan(payload)
+            _validate_generated_plan(plan, context, self._settings)
             _validate_requirement_partition(plan, context.requirement_ids)
-        except ValueError as error:
+        except RequirementPartitionError as error:
             retry_payload = {
                 **payload,
                 "messages": [
@@ -142,11 +146,11 @@ class LiteLLMPlanner:
                     },
                 ],
             }
-            plan = await self._request_plan(retry_payload)
-            _validate_generated_plan(plan, context, self._settings)
             try:
+                plan = await self._request_plan(retry_payload)
+                _validate_generated_plan(plan, context, self._settings)
                 _validate_requirement_partition(plan, context.requirement_ids)
-            except ValueError as retry_error:
+            except RequirementPartitionError as retry_error:
                 raise PlannerError(f"LiteLLM planner output failed requirement traceability: {retry_error}") from retry_error
         return plan
 
@@ -169,7 +173,14 @@ class LiteLLMPlanner:
             if not isinstance(content, str):
                 raise TypeError("response content is not a string")
             plan = AiPlan.model_validate_json(_strip_json_fence(content))
-        except (KeyError, IndexError, TypeError, ValidationError, ValueError) as error:
+        except ValidationError as error:
+            if any(
+                "plan phase requirement IDs must be unique" in str(detail.get("msg", ""))
+                for detail in error.errors()
+            ):
+                raise RequirementPartitionError("plan phase requirement IDs must be unique") from error
+            raise PlannerError("LiteLLM planner returned invalid plan JSON") from error
+        except (KeyError, IndexError, TypeError, ValueError) as error:
             raise PlannerError("LiteLLM planner returned invalid plan JSON") from error
         return plan
 
@@ -293,16 +304,23 @@ def _validate_requirement_partition(plan: AiPlan, requirement_ids: tuple[str, ..
     if not requirement_ids:
         return
     expected = set(requirement_ids)
+    empty_phases = [phase.id for phase in plan.phases if not phase.requirement_ids]
+    if empty_phases:
+        raise RequirementPartitionError(
+            "each plan phase must cover at least one requirement ID: " + ", ".join(empty_phases)
+        )
     referenced = [requirement_id for phase in plan.phases for requirement_id in phase.requirement_ids]
     unknown = set(referenced) - expected
     if unknown:
-        raise ValueError("plan references unknown requirement IDs: " + ", ".join(sorted(unknown)))
+        raise RequirementPartitionError("plan references unknown requirement IDs: " + ", ".join(sorted(unknown)))
     duplicates = {requirement_id for requirement_id, count in Counter(referenced).items() if count > 1}
     if duplicates:
-        raise ValueError("plan references requirement IDs more than once: " + ", ".join(sorted(duplicates)))
+        raise RequirementPartitionError(
+            "plan references requirement IDs more than once: " + ", ".join(sorted(duplicates))
+        )
     missing = expected - set(referenced)
     if missing:
-        raise ValueError("plan does not cover requirement IDs: " + ", ".join(sorted(missing)))
+        raise RequirementPartitionError("plan does not cover requirement IDs: " + ", ".join(sorted(missing)))
 
 
 def _validate_product_specification(
