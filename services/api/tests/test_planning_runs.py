@@ -76,6 +76,18 @@ def test_operator_can_cancel_a_pre_plan_run(client: TestClient, valid_plan: dict
     assert client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").status_code == 409
 
 
+def test_operator_can_replay_a_cancelled_pre_plan_run(client: TestClient, valid_plan: dict) -> None:
+    """An ambiguous cancel response can be retried without converting success to a conflict."""
+
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+
+    first = client.post(f"/api/v1/planning-runs/{run_id}/cancel", headers={"Idempotency-Key": "cancel-replay"})
+    replay = client.post(f"/api/v1/planning-runs/{run_id}/cancel", headers={"Idempotency-Key": "cancel-replay"})
+
+    assert first.status_code == replay.status_code == 200
+    assert first.json()["status"] == replay.json()["status"] == "cancelled"
+
+
 def test_approver_can_auditably_waive_a_failing_specification_evaluation(
     client: TestClient, valid_plan: dict
 ) -> None:
