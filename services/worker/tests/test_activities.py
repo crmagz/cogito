@@ -205,8 +205,6 @@ async def test_execution_workspace_activities_manage_only_the_current_run(
                 litellm_model="complex",
                 litellm_key_secret="cogito-developer-key",
                 litellm_key_secret_key="api-key",
-                git_credentials_secret="cogito-developer-git",
-                git_credentials_secret_key="token",
                 git_author_name="Cogito Agent",
                 git_author_email="cogito@local.invalid",
                 command_output_limit_bytes=262144,

@@ -240,7 +240,13 @@ def _validate_generated_plan(plan: AiPlan, context: PlanningContext, settings: S
         violations.append(Violation(field="constraints", message="planner changed submitted constraints"))
     violations.extend(validate_phase_dag(plan.phases))
     violations.extend(validate_constraints(plan.constraints, settings))
-    violations.extend(validate_target_repositories(plan.target_repos, settings.allowed_git_hosts))
+    violations.extend(
+        validate_target_repositories(
+            plan.target_repos,
+            settings.allowed_git_hosts,
+            settings.execution_github_app_git_host,
+        )
+    )
     violations.extend(validate_spec_reference(plan.spec_set))
     if violations:
         fields = ", ".join(sorted({violation.field for violation in violations}))

@@ -43,6 +43,12 @@ audience, and JWKS values. They must also provision these outside Helm:
 - separate, least-privilege LiteLLM role-key Secrets for planner, developer,
   and reviewers;
 - external database, object-store, and GitHub pull-request credential Secrets;
+- a GitHub App Secret for execution workspaces (`app-id`, `installation-id`, and
+  `private-key`), whose installation has Contents read/write access only to the
+  repositories the implementation agent may clone and push. Existing releases
+  are safely clamped to a 50-minute implementation limit during upgrade because
+  GitHub installation tokens expire after one hour; regenerate any pending plan
+  whose approved duration is longer;
 - when enabling the GitHub read-only MCP connector: a separate GitHub App
   Secret (`app-id`, `installation-id`, and `private-key`), an explicit
   single-repository allow-list, and an egress-proxy NetworkPolicy peer;
@@ -102,9 +108,11 @@ original setting during cleanup.
 
 The test creates its own uniquely versioned, immutable fixture unless
 `COGITO_E2E_SPEC_REF` supplies one. The fixture repository credential must
-already be present in `cogito-github-pull-request`. Set `COGITO_E2E_CONTEXT`,
-`COGITO_E2E_TIMEOUT_SECONDS`, `COGITO_E2E_TARGET_REPO`, or
-`COGITO_E2E_VALUES_FILE` to select a disposable environment; none of those
+already be present in `cogito-github-pull-request`, and the worker needs a
+GitHub App Secret containing `app-id`, `installation-id`, and `private-key`
+in `cogito-github-app` (or `COGITO_E2E_GITHUB_APP_SECRET`). Set
+`COGITO_E2E_CONTEXT`, `COGITO_E2E_TIMEOUT_SECONDS`, `COGITO_E2E_TARGET_REPO`,
+or `COGITO_E2E_VALUES_FILE` to select a disposable environment; none of those
 options source credentials from the local machine.
 
 ### Governed MCP Kind E2E

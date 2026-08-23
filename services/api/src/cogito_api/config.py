@@ -25,6 +25,7 @@ class Settings:
     temporal_namespace: str
     temporal_task_queue: str
     allowed_git_hosts: tuple[str, ...]
+    execution_github_app_git_host: str
     supervisor_database_host: str
     supervisor_database_port: int
     supervisor_database_name: str
@@ -103,7 +104,7 @@ def load_settings() -> Settings:
         plans_bucket=os.environ.get("MINIO_PLANS_BUCKET", "plans"),
         plan_snapshots_bucket=os.environ.get("MINIO_PLAN_SNAPSHOTS_BUCKET", "plan-snapshots"),
         plan_snapshot_retention_days=int(os.environ.get("MINIO_PLAN_SNAPSHOT_RETENTION_DAYS", "30")),
-        max_wall_clock_minutes=int(os.environ.get("COGITO_MAX_WALL_CLOCK_MINUTES", "240")),
+        max_wall_clock_minutes=int(os.environ.get("COGITO_MAX_WALL_CLOCK_MINUTES", "50")),
         max_cost_usd=float(os.environ.get("COGITO_MAX_COST_USD", "50")),
         max_review_rounds=int(os.environ.get("COGITO_MAX_REVIEW_ROUNDS", "10")),
         max_turns_per_phase=int(os.environ.get("COGITO_MAX_TURNS_PER_PHASE", "500")),
@@ -111,6 +112,7 @@ def load_settings() -> Settings:
         temporal_namespace=os.environ.get("COGITO_TEMPORAL_NAMESPACE", "default"),
         temporal_task_queue=os.environ.get("COGITO_TEMPORAL_TASK_QUEUE", "developer-tasks"),
         allowed_git_hosts=tuple(allowed_hosts),
+        execution_github_app_git_host=os.environ.get("COGITO_EXECUTION_GITHUB_APP_GIT_HOST", "github.com"),
         supervisor_database_host=os.environ.get("COGITO_SUPERVISOR_DATABASE_HOST", "cogito-postgresql"),
         supervisor_database_port=int(os.environ.get("COGITO_SUPERVISOR_DATABASE_PORT", "5432")),
         supervisor_database_name=os.environ.get("COGITO_SUPERVISOR_DATABASE_NAME", "cogito"),

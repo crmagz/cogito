@@ -76,10 +76,14 @@ _SPEC_REF_PATTERN = re.compile(
 )
 
 
-def validate_target_repositories(target_repos: list[str], allowed_hosts: tuple[str, ...]) -> list[Violation]:
-    """Require pinned, credential-free HTTPS repository references from approved hosts."""
+def validate_target_repositories(
+    target_repos: list[str], allowed_hosts: tuple[str, ...], github_app_git_host: str = "github.com"
+) -> list[Violation]:
+    """Require one GitHub App account's pinned, credential-free HTTPS repository references."""
 
     violations: list[Violation] = []
+    owner: str | None = None
+    repositories: set[str] = set()
     for index, repository in enumerate(target_repos):
         try:
             parsed = urlsplit(repository)
@@ -107,6 +111,40 @@ def validate_target_repositories(target_repos: list[str], allowed_hosts: tuple[s
                     message="must be a credential-free HTTPS URL from an approved host, pinned with a 40- or 64-character commit SHA fragment",
                 )
             )
+            continue
+        parts = [part for part in parsed.path.split("/") if part]
+        if (
+            host.lower().rstrip(".") != github_app_git_host.lower().rstrip(".")
+            or len(parts) != 2
+            or not parts[1].endswith(".git")
+        ):
+            violations.append(
+                Violation(
+                    field=f"target_repos[{index}]",
+                    message="must target the configured GitHub App host as an owner/repository.git URL",
+                )
+            )
+            continue
+        if owner is None:
+            owner = parts[0]
+        elif owner.lower() != parts[0].lower():
+            violations.append(
+                Violation(
+                    field=f"target_repos[{index}]",
+                    message="must belong to the same GitHub App installation account as the other target repositories",
+                )
+            )
+            continue
+        repository = parts[1].removesuffix(".git")
+        if not repository or repository.casefold() in repositories:
+            violations.append(
+                Violation(
+                    field=f"target_repos[{index}]",
+                    message="must identify a unique non-empty repository within the GitHub App installation account",
+                )
+            )
+            continue
+        repositories.add(repository.casefold())
     return violations
 
 

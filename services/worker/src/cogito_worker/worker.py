@@ -9,7 +9,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from .activities import WorkerActivities
-from .budgets import KubernetesLiteLLMRunKeyManager, KubernetesRunGitCredentialManager
+from .budgets import KubernetesGitHubAppRunCredentialManager, KubernetesLiteLLMRunKeyManager
 from .config import load_settings
 from .execution import ExecutionJobSettings, ExecutionWorkspaceService, KubernetesExecutionJobClient
 from .github import GitHubPullRequestPublisher
@@ -88,8 +88,6 @@ async def main() -> None:
         litellm_model=settings.execution_litellm_model,
         litellm_key_secret=settings.execution_litellm_key_secret,
         litellm_key_secret_key=settings.execution_litellm_key_secret_key,
-        git_credentials_secret=settings.execution_git_credentials_secret,
-        git_credentials_secret_key=settings.execution_git_credentials_secret_key,
         git_author_name=settings.execution_git_author_name,
         git_author_email=settings.execution_git_author_email,
         command_output_limit_bytes=settings.execution_command_output_limit_bytes,
@@ -103,9 +101,14 @@ async def main() -> None:
             settings.execution_litellm_endpoint,
             settings.execution_litellm_management_key,
         ),
-        KubernetesRunGitCredentialManager(
+        KubernetesGitHubAppRunCredentialManager(
             settings.execution_namespace,
-            settings.execution_git_https_token,
+            settings.execution_github_app_id,
+            settings.execution_github_app_installation_id,
+            settings.execution_github_app_private_key,
+            settings.execution_github_app_api_url,
+            settings.execution_github_app_api_version,
+            settings.execution_github_app_git_host,
         ),
     )
     harness = ClaudeCodeHarness(execution_workspaces)

@@ -480,7 +480,7 @@ api:
   ## @param api.constraints.maxTurnsPerPhase System-configured maximum for plan.constraints.max_turns_per_phase
   ##
   constraints:
-    maxWallClockMinutes: 240
+    maxWallClockMinutes: 50
     maxCostUsd: 50
     maxReviewRounds: 10
     maxTurnsPerPhase: 500
@@ -603,12 +603,13 @@ worker:
     namespace: cogito-executions
     createNamespace: true
     workspaceRoot: /workspace
-    # Must cover api.constraints.maxWallClockMinutes plus the worker's 120-second backup allowance.
-    idleSeconds: 14700
+    # Must cover api.constraints.maxWallClockMinutes plus the worker's 120-second backup allowance,
+    # while remaining below the one-hour GitHub App installation-token lifetime.
+    idleSeconds: 3300
     startupTimeoutSeconds: 30
     cleanupTimeoutSeconds: 90
     # Operator ceiling for an approved run budget plus its 120-second backup allowance.
-    activeDeadlineSeconds: 14700
+    activeDeadlineSeconds: 3300
     ttlSecondsAfterFinished: 300
     keyManagement:
       # An existing LiteLLM management virtual key restricted to run-key create/delete.
@@ -650,21 +651,24 @@ worker:
       ## These rules apply only to run-workspace Jobs; an MCP service retains its
       ## own ingress and egress policy.
       additionalEgress: []
-    ## The worker reads the repository-scoped Git credential from this Secret in
-    ## the release namespace, then creates a labelled, run-private copy in the
-    ## execution namespace and deletes it during cleanup. The chart never
-    ## creates either Secret; supply them through external secret management.
     harness:
       ## Empty uses the release-local LiteLLM Service.
       litellmEndpoint: ""
       model: complex
       existingSecret: cogito-developer-key
       apiKeyKey: api-key
-      gitCredentialsSecret: cogito-developer-git
-      gitCredentialsKey: token
       gitAuthorName: Cogito Agent
       gitAuthorEmail: cogito@local.invalid
       commandOutputLimitBytes: 262144
+    ## @param worker.execution.githubApp GitHub App credentials used to mint a short-lived, run-private installation token for exact target repositories. The Secret must be provided by external secret management and needs Contents read/write permission for those repositories.
+    githubApp:
+      existingSecret: cogito-github-app
+      appIdKey: app-id
+      installationIdKey: installation-id
+      privateKeyKey: private-key
+      apiUrl: https://api.github.com
+      apiVersion: "2022-11-28"
+      gitHost: github.com
   ## @param worker.reviewer Dedicated read-only LiteLLM reviewer configuration. Both aliases must be distinct and each Secret is supplied by external secret management; the chart never creates or copies either key.
   ##
   reviewer:

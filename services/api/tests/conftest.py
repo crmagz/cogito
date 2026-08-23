@@ -29,6 +29,7 @@ def make_settings(**overrides) -> Settings:
         temporal_namespace="default",
         temporal_task_queue="developer-tasks",
         allowed_git_hosts=("github.com",),
+        execution_github_app_git_host="github.com",
         supervisor_database_host="localhost",
         supervisor_database_port=5432,
         supervisor_database_name="cogito",

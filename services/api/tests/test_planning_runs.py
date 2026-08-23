@@ -845,6 +845,50 @@ def test_revision_reopens_planning_with_a_new_artifact_and_workflow(
     assert stale.status_code == 409
 
 
+def test_plan_approval_rejects_a_pre_upgrade_duration_above_the_github_app_limit(
+    client: TestClient,
+    valid_plan: dict,
+    planner: FakePlanner,
+    starter: FakeRunStarter,
+    store: InMemoryPlanStore,
+    supervisor_store: InMemorySupervisorStore,
+) -> None:
+    legacy_plan = copy.deepcopy(valid_plan)
+    legacy_plan["constraints"]["max_wall_clock_minutes"] = 60
+    planner.plan = AiPlan.model_validate(legacy_plan)
+    submitted = client.post("/api/v1/planning-runs", json=_planning_request(legacy_plan))
+    run_id = submitted.json()["run_id"]
+    _select_product_specification(client, run_id)
+    generated = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+    digest = generated.json()["plan_artifact"]["sha256"]
+    restricted_client = TestClient(
+        create_app(
+            store=store,
+            settings=make_settings(max_wall_clock_minutes=50),
+            starter=starter,
+            supervisor_store=supervisor_store,
+            planner=planner,
+        ),
+        headers={"Authorization": "Bearer operator-test-token"},
+    )
+
+    response = restricted_client.post(
+        f"/api/v1/runs/{run_id}/approvals/plan",
+        json={"decision": "approve", "artifact_sha256": digest},
+        headers={"Idempotency-Key": "reject-legacy-duration"},
+    )
+
+    assert response.status_code == 409
+    assert "GitHub App workspace credential limit" in response.json()["detail"]
+    coordination_response = restricted_client.post(
+        f"/api/v1/coordination/runs/{run_id}/actions/plan",
+        json={"decision": "approve", "artifact_sha256": digest},
+        headers={"Idempotency-Key": "reject-legacy-duration-coordination"},
+    )
+    assert coordination_response.status_code == 409
+    assert supervisor_store.planning_runs[run_id].status.value == "awaiting_plan_approval"
+
+
 def test_revision_scopes_workflow_and_idempotency_when_plan_content_is_identical(
     client: TestClient, valid_plan: dict, starter: FakeRunStarter
 ) -> None:

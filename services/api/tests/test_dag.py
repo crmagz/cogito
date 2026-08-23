@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cogito_api.dag import validate_constraints, validate_phase_dag
+from cogito_api.dag import validate_constraints, validate_phase_dag, validate_target_repositories
 from cogito_api.models import PlanConstraints, PlanPhase
 
 from .conftest import make_settings
@@ -56,3 +56,30 @@ def test_constraints_exceeding_bounds_are_reported():
     violations = validate_constraints(constraints, settings)
     assert len(violations) == 1
     assert violations[0].field == "constraints.max_cost_usd"
+
+
+def test_target_repositories_must_share_the_configured_github_app_host_and_account():
+    repositories = [
+        "https://github.com/acme/api.git#" + "a" * 40,
+        "https://github.com/acme/web.git#" + "b" * 40,
+    ]
+    assert validate_target_repositories(repositories, ("github.com",), "github.com") == []
+
+    cross_account = validate_target_repositories(
+        [repositories[0], "https://github.com/other/web.git#" + "c" * 40],
+        ("github.com",),
+        "github.com",
+    )
+    assert cross_account[0].field == "target_repos[1]"
+    assert "same GitHub App installation account" in cross_account[0].message
+
+    enterprise = "https://github.example.test/acme/api.git#" + "d" * 40
+    assert validate_target_repositories([enterprise], ("github.example.test",), "github.example.test") == []
+
+    duplicate = validate_target_repositories(
+        [repositories[0], "https://github.com/acme/API.git#" + "e" * 40],
+        ("github.com",),
+        "github.com",
+    )
+    assert duplicate[0].field == "target_repos[1]"
+    assert "unique non-empty repository" in duplicate[0].message

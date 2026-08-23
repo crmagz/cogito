@@ -430,7 +430,11 @@ def create_app(
             raise HTTPException(status_code=403, detail="operator is not authorized for the configured default project")
         violations = (
             validate_constraints(submission.constraints, settings)
-            + validate_target_repositories(submission.target_repos, settings.allowed_git_hosts)
+            + validate_target_repositories(
+                submission.target_repos,
+                settings.allowed_git_hosts,
+                settings.execution_github_app_git_host,
+            )
             + validate_spec_reference(submission.spec_set)
         )
         if violations:
@@ -981,6 +985,17 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
+        if (
+            request_body.decision is PlanApprovalDecision.APPROVE
+            and record.constraints.max_wall_clock_minutes > settings.max_wall_clock_minutes
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "plan must be cancelled and resubmitted: its approved execution duration exceeds "
+                    "the current GitHub App workspace credential limit"
+                ),
+            )
         request_sha256 = sha256(
             json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -2301,6 +2316,17 @@ def create_app(
         ).hexdigest()
         try:
             if gate is CoordinationGate.PLAN:
+                if (
+                    request_body.decision is PlanApprovalDecision.APPROVE
+                    and record.constraints.max_wall_clock_minutes > settings.max_wall_clock_minutes
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "plan must be cancelled and resubmitted: its approved execution duration exceeds "
+                            "the current GitHub App workspace credential limit"
+                        ),
+                    )
                 recorded = await supervisor_store.record_plan_approval(
                     run_id=run_id,
                     artifact_sha256=request_body.artifact_sha256,

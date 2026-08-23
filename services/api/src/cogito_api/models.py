@@ -59,7 +59,7 @@ class PlanPhase(BaseModel):
 class PlanConstraints(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    max_wall_clock_minutes: int = Field(default=60)
+    max_wall_clock_minutes: int = Field(default=50)
     max_cost_usd: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     max_review_rounds: int = Field(default=3)
     max_turns_per_phase: int = Field(default=200)

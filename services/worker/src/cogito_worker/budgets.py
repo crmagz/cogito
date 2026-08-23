@@ -4,20 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from datetime import datetime, timezone
 import hashlib
 import json
 from math import isfinite
 import secrets
+import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
+
+import httpx
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 from .models import McpToolGrant
 
 _MCP_INVOCATION_EVIDENCE_POLL_ATTEMPTS = 12
+_GITHUB_INSTALLATION_TOKEN_REFRESH_MARGIN_SECONDS = 300
 _MCP_INVOCATION_EVIDENCE_REQUEST_TIMEOUT_SECONDS = 1
 _MCP_INVOCATION_EVIDENCE_MAX_GRANTS = 64
 _MCP_INVOCATION_EVIDENCE_MAX_RESPONSE_BYTES = 1_000_000
@@ -47,9 +54,19 @@ class RunKeyManager(Protocol):
 class RunGitCredentialManager(Protocol):
     """Creates and removes the repository credential Secret for one execution."""
 
-    async def provision(self, run_id: str) -> str: ...
+    async def provision(
+        self, run_id: str, target_repositories: Sequence[str], minimum_validity_seconds: int
+    ) -> "RunGitCredential": ...
 
     async def cleanup(self, run_id: str, secret_name: str) -> None: ...
+
+
+@dataclass(frozen=True)
+class RunGitCredential:
+    """Reference to one run credential and whether it replaced a stale prior Secret."""
+
+    secret_name: str
+    replaced_existing: bool = False
 
 
 class KubernetesLiteLLMRunKeyManager:
@@ -197,12 +214,16 @@ class KubernetesLiteLLMRunKeyManager:
             return json.loads(payload)
 
 
-class KubernetesRunGitCredentialManager:
-    """Copies a worker-mounted repository credential into one run-private Secret."""
+class KubernetesGitHubAppRunCredentialManager:
+    """Mints one GitHub App installation token per run and stores it only in that run's Secret."""
 
-    def __init__(self, namespace: str, token: str) -> None:
-        if not token:
-            raise ValueError("execution Git credential is not configured")
+    def __init__(self, namespace: str, app_id: str, installation_id: str, private_key: str, api_url: str, api_version: str, git_host: str) -> None:
+        if not app_id.isdecimal() or not installation_id.isdecimal() or not private_key.strip():
+            raise ValueError("GitHub App credentials are required for execution repository access")
+        if urlsplit(api_url).scheme != "https" or not urlsplit(api_url).netloc:
+            raise ValueError("GitHub App API URL must be an absolute HTTPS URL")
+        if not git_host or "/" in git_host or ":" in git_host:
+            raise ValueError("GitHub App Git host must be a hostname")
         try:
             from kubernetes import client, config
             from kubernetes.client.exceptions import ApiException
@@ -210,31 +231,56 @@ class KubernetesRunGitCredentialManager:
             raise RuntimeError("run Git credential provisioning requires the kubernetes dependency") from error
         config.load_incluster_config()
         self._namespace = namespace
-        self._token = token
+        self._app_id = app_id
+        self._installation_id = installation_id
+        self._private_key = private_key
+        self._api_url = api_url.rstrip("/")
+        self._api_version = api_version
+        self._git_host = git_host.lower().rstrip(".")
         self._core_api = client.CoreV1Api()
         self._client = client
         self._api_exception: type[Exception] = ApiException
 
-    async def provision(self, run_id: str) -> str:
+    async def provision(
+        self, run_id: str, target_repositories: Sequence[str], minimum_validity_seconds: int
+    ) -> RunGitCredential:
+        """Mint a repository-narrowed installation token for the exact execution targets."""
+
+        if minimum_validity_seconds < 1:
+            raise ValueError("GitHub App token minimum validity must be positive")
         secret_name = run_git_secret_name(run_id)
+        legacy_secret_name = _legacy_run_git_secret_name(run_id)
+        legacy_secret = await self._read_secret(legacy_secret_name)
         existing = await self._read_secret(secret_name)
         if existing is not None:
-            if _secret_token(existing, key="token"):
-                return secret_name
+            if _github_installation_token_is_fresh(existing, minimum_validity_seconds):
+                if legacy_secret is None:
+                    return RunGitCredential(secret_name)
+                await self._delete_secret(legacy_secret_name)
+                return RunGitCredential(secret_name, replaced_existing=True)
             await self._delete_secret(secret_name)
+            replaced_existing = True
+        else:
+            replaced_existing = legacy_secret is not None
+        if legacy_secret is not None:
+            await self._delete_secret(legacy_secret_name)
+        token, expires_at = await asyncio.to_thread(
+            self._mint_installation_token, _github_repository_names(target_repositories, self._git_host)
+        )
         body = self._client.V1Secret(
             metadata=self._client.V1ObjectMeta(
                 name=secret_name,
                 labels={"cogito.dev/run-hash": _run_hash(run_id)},
+                annotations={"cogito.dev/github-app-token-expires-at": str(expires_at)},
             ),
             type="Opaque",
-            data={"token": base64.b64encode(self._token.encode()).decode()},
+            data={"token": base64.b64encode(token.encode()).decode()},
         )
         await asyncio.to_thread(self._core_api.create_namespaced_secret, self._namespace, body)
-        return secret_name
+        return RunGitCredential(secret_name, replaced_existing=replaced_existing)
 
     async def cleanup(self, run_id: str, secret_name: str) -> None:
-        if secret_name != run_git_secret_name(run_id):
+        if secret_name not in {run_git_secret_name(run_id), _legacy_run_git_secret_name(run_id)}:
             raise ValueError("run Git Secret does not match the execution run")
         await self._delete_secret(secret_name)
 
@@ -253,6 +299,52 @@ class KubernetesRunGitCredentialManager:
             if error.status != 404:
                 raise
 
+    def _mint_installation_token(self, repositories: list[str]) -> tuple[str, int]:
+        """Request a write-capable token scoped to this installation's exact repository names."""
+
+        response = httpx.post(
+            f"{self._api_url}/app/installations/{self._installation_id}/access_tokens",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {self._github_app_jwt()}",
+                "X-GitHub-Api-Version": self._api_version,
+            },
+            json={"repositories": repositories, "permissions": {"contents": "write"}},
+            timeout=30,
+        )
+        if response.status_code != 201:
+            raise RuntimeError("GitHub App installation token request was rejected")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("GitHub App installation token response was not an object")
+        token = payload.get("token")
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("GitHub App installation token response did not contain a token")
+        permissions = payload.get("permissions")
+        if not isinstance(permissions, dict) or permissions.get("contents") != "write":
+            raise RuntimeError("GitHub App installation token lacks Contents write permission")
+        repositories_response = payload.get("repositories")
+        if not isinstance(repositories_response, list):
+            raise RuntimeError("GitHub App installation token response did not confirm repository scope")
+        granted_repositories = {
+            repository.get("name").casefold()
+            for repository in repositories_response
+            if isinstance(repository, dict) and isinstance(repository.get("name"), str)
+        }
+        if granted_repositories != {repository.casefold() for repository in repositories} or len(repositories_response) != len(repositories):
+            raise RuntimeError("GitHub App installation token scope does not match execution repositories")
+        expires_at = _github_installation_token_expiry(payload.get("expires_at"))
+        return token, expires_at
+
+    def _github_app_jwt(self) -> str:
+        now = int(time.time())
+        header = _base64url(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode())
+        claims = _base64url(json.dumps({"iat": now - 60, "exp": now + 540, "iss": self._app_id}, separators=(",", ":")).encode())
+        signing_input = f"{header}.{claims}".encode()
+        private_key = serialization.load_pem_private_key(self._private_key.encode(), password=None)
+        signature = private_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+        return f"{header}.{claims}.{_base64url(signature)}"
+
 
 def run_key_secret_name(run_id: str) -> str:
     """Return a deterministic name that reveals no raw run identifier."""
@@ -261,13 +353,55 @@ def run_key_secret_name(run_id: str) -> str:
 
 
 def run_git_secret_name(run_id: str) -> str:
-    """Return a deterministic name for the run-private Git credential Secret."""
+    """Return a versioned deterministic name for the run-private GitHub App credential Secret."""
+
+    return f"cogito-run-git-v2-{_run_hash(run_id)}"
+
+
+def _legacy_run_git_secret_name(run_id: str) -> str:
+    """Return the v1 name accepted only to clean up credentials from a rolling upgrade."""
 
     return f"cogito-run-git-{_run_hash(run_id)}"
 
 
 def _run_hash(run_id: str) -> str:
     return hashlib.sha256(run_id.encode()).hexdigest()[:20]
+
+
+def _github_repository_names(target_repositories: Sequence[str], git_host: str = "github.com") -> list[str]:
+    """Return repository names scoped to exactly one GitHub App installation account."""
+
+    owner: str | None = None
+    names: list[str] = []
+    for target in target_repositories:
+        parsed = urlsplit(target)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.hostname.lower().rstrip(".") != git_host.lower().rstrip(".")
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError(f"execution repositories must be unauthenticated https://{git_host}/owner/repository URLs")
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) != 2 or not parts[0] or not parts[1].endswith(".git"):
+            raise ValueError(f"execution repositories must be https://{git_host}/owner/repository.git URLs")
+        repository_owner, repository = parts[0], parts[1][:-4]
+        if owner is None:
+            owner = repository_owner
+        elif owner.lower() != repository_owner.lower():
+            raise ValueError("execution repositories must belong to the same GitHub App installation account")
+        normalized_repository = repository.casefold()
+        if not repository or normalized_repository in names:
+            raise ValueError("execution repositories must be unique")
+        names.append(normalized_repository)
+    if not names or len(names) > 500:
+        raise ValueError("GitHub App tokens must be scoped to between one and 500 repositories")
+    return names
+
+
+def _base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode().rstrip("=")
 
 
 def run_audit_user_id(run_id: str) -> str:
@@ -285,6 +419,39 @@ def _secret_token(secret: object, key: str = "api-key") -> str | None:
         return base64.b64decode(encoded, validate=True).decode()
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+def _github_installation_token_is_fresh(secret: object, minimum_validity_seconds: int) -> bool:
+    """Return whether a run Secret contains an unexpired GitHub App token with required metadata."""
+
+    if not _secret_token(secret, key="token"):
+        return False
+    metadata = getattr(secret, "metadata", None)
+    annotations = getattr(metadata, "annotations", None) or {}
+    expires_at = annotations.get("cogito.dev/github-app-token-expires-at")
+    if not isinstance(expires_at, str):
+        return False
+    try:
+        return int(expires_at) > (
+            int(time.time()) + minimum_validity_seconds + _GITHUB_INSTALLATION_TOKEN_REFRESH_MARGIN_SECONDS
+        )
+    except ValueError:
+        return False
+
+
+def _github_installation_token_expiry(value: object) -> int:
+    if not isinstance(value, str):
+        raise RuntimeError("GitHub App installation token response did not contain an expiry")
+    try:
+        expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RuntimeError("GitHub App installation token expiry was invalid") from error
+    if expires_at.tzinfo is None:
+        raise RuntimeError("GitHub App installation token expiry must include a timezone")
+    expiry_seconds = int(expires_at.astimezone(timezone.utc).timestamp())
+    if expiry_seconds <= int(time.time()) + _GITHUB_INSTALLATION_TOKEN_REFRESH_MARGIN_SECONDS:
+        raise RuntimeError("GitHub App installation token expires too soon")
+    return expiry_seconds
 
 
 def _validate_budget(budget: RunBudget) -> None:

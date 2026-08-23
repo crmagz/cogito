@@ -53,8 +53,6 @@ class ExecutionJobSettings:
     litellm_model: str
     litellm_key_secret: str
     litellm_key_secret_key: str
-    git_credentials_secret: str
-    git_credentials_secret_key: str
     git_author_name: str
     git_author_email: str
     command_output_limit_bytes: int
@@ -185,15 +183,7 @@ def build_execution_job(
                                         }
                                     },
                                 },
-                                {
-                                    "name": "COGITO_GIT_HTTPS_TOKEN",
-                                    "valueFrom": {
-                                        "secretKeyRef": {
-                                            "name": request.run_git_secret or settings.git_credentials_secret,
-                                            "key": settings.git_credentials_secret_key,
-                                        }
-                                    },
-                                },
+                                *_git_token_env(request.run_git_secret),
                             ],
                             "securityContext": {
                                 "allowPrivilegeEscalation": False,
@@ -243,15 +233,7 @@ def build_execution_job(
                                         }
                                     },
                                 },
-                                {
-                                    "name": "COGITO_GIT_HTTPS_TOKEN",
-                                    "valueFrom": {
-                                        "secretKeyRef": {
-                                            "name": request.run_git_secret or settings.git_credentials_secret,
-                                            "key": settings.git_credentials_secret_key,
-                                        }
-                                    },
-                                },
+                                *_git_token_env(request.run_git_secret),
                             ],
                             "volumeMounts": [
                                 {"name": "workspace", "mountPath": settings.workspace_root}
@@ -268,6 +250,15 @@ def build_execution_job(
             },
         },
     }
+
+
+def _git_token_env(run_git_secret: str) -> list[dict[str, object]]:
+    if not run_git_secret:
+        return []
+    return [{
+        "name": "COGITO_GIT_HTTPS_TOKEN",
+        "valueFrom": {"secretKeyRef": {"name": run_git_secret, "key": "token"}},
+    }]
 
 
 class KubernetesExecutionJobClient:
@@ -555,7 +546,14 @@ class ExecutionWorkspaceService:
             agent_manifest_sha256 = request.gateway.manifest_sha256
         try:
             if self._run_git_credentials is not None:
-                run_git_secret = await self._run_git_credentials.provision(request.run_id)
+                git_credential = await self._run_git_credentials.provision(
+                    request.run_id,
+                    request.target_repos,
+                    request.execution_timeout_seconds or self._settings.active_deadline_seconds,
+                )
+                run_git_secret = git_credential.secret_name
+                if git_credential.replaced_existing:
+                    await self._jobs.delete_job(job_name)
             if self._run_keys is not None:
                 run_key_secret = await self._run_keys.provision(
                     RunBudget(

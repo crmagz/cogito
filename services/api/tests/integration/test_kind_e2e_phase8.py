@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 
@@ -26,10 +27,18 @@ def test_phase8_execution_e2e() -> None:
     harness.kubectl("-n", harness.namespace, "rollout", "status", f"deployment/{harness.release}-worker", "--timeout=120s")
     for verb, resource in (("get", "pods"), ("create", "secrets")):
         assert harness.kubectl("auth", "can-i", verb, resource, "--as", f"system:serviceaccount:{harness.namespace}:{harness.release}-worker", "-n", harness.execution_namespace).strip() == "yes"
-    source_secret = harness.kubectl("-n", harness.namespace, "get", "configmap", f"{harness.release}-worker-config", "-o", "jsonpath={.data.COGITO_EXECUTION_GIT_CREDENTIALS_SECRET}").strip()
-    assert source_secret
+    worker = json.loads(
+        harness.kubectl("-n", harness.namespace, "get", "deployment", f"{harness.release}-worker", "-o", "json")
+    )
+    worker_env = {
+        item["name"]: item.get("valueFrom", {})
+        for item in worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    source_secret = worker_env["COGITO_EXECUTION_GITHUB_APP_ID"]["secretKeyRef"]["name"]
+    assert source_secret == worker_env["COGITO_EXECUTION_GITHUB_APP_INSTALLATION_ID"]["secretKeyRef"]["name"]
+    assert source_secret == worker_env["COGITO_EXECUTION_GITHUB_APP_PRIVATE_KEY"]["secretKeyRef"]["name"]
     execution_secret = harness.kubectl("-n", harness.execution_namespace, "get", "secret", source_secret, "-o", "name", check=False)
-    assert not execution_secret.strip(), "long-lived Git credential leaked into execution namespace"
+    assert not execution_secret.strip(), "GitHub App credential leaked into execution namespace"
     marker = f".cogito-kind-e2e-{secrets.token_hex(6)}"
     plan = {
         "title": "Kind Phase 8 E2E", "summary": "Validate ordered execution and cleanup.",

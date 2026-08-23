@@ -35,6 +35,7 @@ _WORKER_START_TIMEOUT = timedelta(seconds=60)
 # short status/load activity timeout or Temporal will cancel it first.
 _PROVISION_ACTIVITY_TIMEOUT = timedelta(seconds=180)
 _CLEANUP_ACTIVITY_TIMEOUT = timedelta(seconds=120)
+_MAX_GITHUB_APP_EXECUTION_SECONDS = 3300
 _RETRY_INITIAL_INTERVAL = timedelta(seconds=1)
 _RETRY_MAXIMUM_INTERVAL = timedelta(seconds=30)
 _IDEMPOTENT_RETRY_POLICY = RetryPolicy(
@@ -185,6 +186,11 @@ class DeveloperRunWorkflow:
                     return RunResult(
                         run_id=envelope.run_id, status="revision_requested"
                     )
+            execution_timeout_seconds = int(run_timeout.total_seconds()) + int(_BACKUP_ACTIVITY_TIMEOUT.total_seconds())
+            if execution_timeout_seconds > _MAX_GITHUB_APP_EXECUTION_SECONDS:
+                raise ValueError(
+                    "approved plan exceeds the GitHub App workspace credential limit; cancel and resubmit it"
+                )
             # A resolved registry run must authorize the developer before it
             # creates a workspace or receives a developer-tool capability.
             # Legacy envelopes remain supported while migration is active.
@@ -213,10 +219,7 @@ class DeveloperRunWorkflow:
                         run_id=envelope.run_id,
                         spec_ref=envelope.spec_ref,
                         target_repos=envelope.target_repos,
-                        execution_timeout_seconds=(
-                            int(run_timeout.total_seconds())
-                            + int(_BACKUP_ACTIVITY_TIMEOUT.total_seconds())
-                        ),
+                        execution_timeout_seconds=execution_timeout_seconds,
                         max_cost_usd=max_cost_usd,
                         registration=developer_registration,
                         gateway=developer_registration.gateway if developer_registration is not None else None,

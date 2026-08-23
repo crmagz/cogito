@@ -11,6 +11,7 @@
 {{- $mcp := default (dict) .Values.mcp }}
 {{- $githubMcp := default (dict) $mcp.github }}
 {{- $githubApp := default (dict) $githubMcp.app }}
+{{- $executionGithubApp := default (dict) .Values.worker.execution.githubApp }}
 {{- $githubRepositoryScope := "" }}
 {{- if and $mcp.enabled $githubMcp.enabled }}
 {{- $githubRepositoryScope = required "mcp.github.app.allowedRepositories must contain exactly one repository when the GitHub connector is enabled" (first $githubApp.allowedRepositories) | lower }}
@@ -41,7 +42,7 @@ data:
   MINIO_PLANS_BUCKET: {{ .Values.api.objectStore.bucket | quote }}
   MINIO_PLAN_SNAPSHOTS_BUCKET: {{ .Values.api.objectStore.planSnapshotsBucket | quote }}
   MINIO_PLAN_SNAPSHOT_RETENTION_DAYS: {{ .Values.api.objectStore.planSnapshotRetentionDays | quote }}
-  COGITO_MAX_WALL_CLOCK_MINUTES: {{ .Values.api.constraints.maxWallClockMinutes | quote }}
+  COGITO_MAX_WALL_CLOCK_MINUTES: {{ min 50 (.Values.api.constraints.maxWallClockMinutes | int) | quote }}
   COGITO_MAX_COST_USD: {{ .Values.api.constraints.maxCostUsd | quote }}
   COGITO_MAX_REVIEW_ROUNDS: {{ .Values.api.constraints.maxReviewRounds | quote }}
   COGITO_MAX_TURNS_PER_PHASE: {{ .Values.api.constraints.maxTurnsPerPhase | quote }}
@@ -49,6 +50,7 @@ data:
   COGITO_TEMPORAL_NAMESPACE: {{ .Values.api.temporal.namespace | quote }}
   COGITO_TEMPORAL_TASK_QUEUE: {{ .Values.api.temporal.taskQueue | quote }}
   COGITO_ALLOWED_GIT_HOSTS: {{ toJson .Values.repositoryPolicy.allowedGitHosts | quote }}
+  COGITO_EXECUTION_GITHUB_APP_GIT_HOST: {{ default "github.com" $executionGithubApp.gitHost | quote }}
   COGITO_SUPERVISOR_DATABASE_HOST: {{ default (printf "%s-postgresql" .Release.Name) $supervisorDatabase.host | quote }}
   COGITO_SUPERVISOR_DATABASE_PORT: {{ default 5432 $supervisorDatabase.port | quote }}
   COGITO_SUPERVISOR_DATABASE_NAME: {{ default "cogito" $supervisorDatabase.name | quote }}
