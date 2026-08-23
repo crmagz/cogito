@@ -5,7 +5,24 @@ import math
 from dataclasses import replace
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
+import cogito_worker.budgets as budgets
+from cogito_worker.budgets import (
+    KubernetesGitHubAppRunCredentialManager,
+    KubernetesLiteLLMRunKeyManager,
+    RunGitCredential,
+    RunBudget,
+    _expected_mcp_tools,
+    _github_repository_names,
+    _legacy_run_git_secret_name,
+    _mcp_invocation_evidence,
+    _run_key_payload,
+    _validate_budget,
+    run_git_secret_name,
+    run_key_secret_name,
+)
 from cogito_worker.execution import (
     ExecutionJobSettings,
     ExecutionWorkspaceService,
@@ -15,16 +32,6 @@ from cogito_worker.execution import (
     build_execution_job,
     execution_job_name,
     _sanitize_diagnostics,
-)
-import cogito_worker.budgets as budgets
-from cogito_worker.budgets import (
-    KubernetesLiteLLMRunKeyManager,
-    RunBudget,
-    _expected_mcp_tools,
-    _mcp_invocation_evidence,
-    _run_key_payload,
-    _validate_budget,
-    run_key_secret_name,
 )
 from cogito_worker.config import McpGatewayServer
 from cogito_worker.models import (
@@ -68,8 +75,6 @@ def execution_settings() -> ExecutionJobSettings:
         litellm_model="complex",
         litellm_key_secret="cogito-developer-key",
         litellm_key_secret_key="api-key",
-        git_credentials_secret="cogito-developer-git",
-        git_credentials_secret_key="token",
         git_author_name="Cogito Agent",
         git_author_email="cogito@local.invalid",
         command_output_limit_bytes=262144,
@@ -85,6 +90,7 @@ def test_execution_job_template_uses_an_isolated_emptydir_workspace() -> None:
             run_id="run-1",
             spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
             target_repos=["https://github.com/acme/api-gateway.git#0123456789abcdef0123456789abcdef01234567"],
+            run_git_secret="cogito-run-git-abc",
         ),
         job_name=job_name,
         settings=execution_settings(),
@@ -107,10 +113,10 @@ def test_execution_job_template_uses_an_isolated_emptydir_workspace() -> None:
     assert all(env["name"] not in {"MINIO_ACCESS_KEY", "MINIO_SECRET_KEY"} for env in container["env"])
     secret_env = {env["name"]: env["valueFrom"] for env in init_container["env"] if "valueFrom" in env}
     assert secret_env["MINIO_ACCESS_KEY"]["secretKeyRef"]["name"] == "cogito-minio"
-    assert secret_env["COGITO_GIT_HTTPS_TOKEN"]["secretKeyRef"]["name"] == "cogito-developer-git"
+    assert secret_env["COGITO_GIT_HTTPS_TOKEN"]["secretKeyRef"]["name"] == "cogito-run-git-abc"
     execution_secret_env = {env["name"]: env["valueFrom"] for env in container["env"] if "valueFrom" in env}
     assert execution_secret_env["ANTHROPIC_AUTH_TOKEN"]["secretKeyRef"]["name"] == "cogito-developer-key"
-    assert execution_secret_env["COGITO_GIT_HTTPS_TOKEN"]["secretKeyRef"]["name"] == "cogito-developer-git"
+    assert execution_secret_env["COGITO_GIT_HTTPS_TOKEN"]["secretKeyRef"]["name"] == "cogito-run-git-abc"
     assert (
         next(env["value"] for env in container["env"] if env["name"] == "ANTHROPIC_BASE_URL")
         == "http://cogito-litellm:4000"
@@ -161,6 +167,125 @@ def test_execution_job_uses_the_approved_budget_without_exceeding_operator_ceili
             job_name=execution_job_name("run-1"),
             settings=settings,
         )
+
+
+def test_github_app_token_scope_is_limited_to_one_installation_account() -> None:
+    assert _github_repository_names([
+        "https://github.com/acme/api.git#0123456789abcdef0123456789abcdef01234567",
+        "https://github.com/acme/web.git#0123456789abcdef0123456789abcdef01234567",
+    ]) == ["api", "web"]
+
+    with pytest.raises(ValueError, match="same GitHub App installation account"):
+        _github_repository_names([
+            "https://github.com/acme/api.git",
+            "https://github.com/other/web.git",
+        ])
+    with pytest.raises(ValueError, match="unauthenticated"):
+        _github_repository_names(["https://token@github.com/acme/api.git"])
+    assert _github_repository_names(["https://github.example.test/acme/api.git"], "github.example.test") == ["api"]
+    assert _github_repository_names(["https://github.com/acme/Api.git"]) == ["api"]
+    with pytest.raises(ValueError, match="unique"):
+        _github_repository_names([
+            "https://github.com/acme/api.git",
+            "https://github.com/acme/API.git",
+        ])
+    assert run_git_secret_name("run-1").startswith("cogito-run-git-v2-")
+
+
+async def test_github_app_manager_cleans_up_a_legacy_run_secret_after_an_upgrade() -> None:
+    manager = object.__new__(KubernetesGitHubAppRunCredentialManager)
+    deleted: list[str] = []
+
+    async def delete_secret(name: str) -> None:
+        deleted.append(name)
+
+    manager._delete_secret = delete_secret
+    legacy_secret = _legacy_run_git_secret_name("run-1")
+
+    await manager.cleanup("run-1", legacy_secret)
+
+    assert deleted == [legacy_secret]
+
+
+async def test_replacing_a_stale_git_token_deletes_the_existing_job_before_recreation() -> None:
+    class ReplacingRunGitCredentials:
+        async def provision(
+            self, run_id: str, target_repositories: list[str], minimum_validity_seconds: int
+        ) -> RunGitCredential:
+            return RunGitCredential("cogito-run-git-abc", replaced_existing=True)
+
+        async def cleanup(self, run_id: str, secret_name: str) -> None:
+            return None
+
+    jobs = InMemoryExecutionJobClient()
+    service = ExecutionWorkspaceService(
+        execution_settings(), jobs, run_git_credentials=ReplacingRunGitCredentials()
+    )
+
+    await service.provision(
+        ExecutionRequest(
+            run_id="run-1",
+            spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+            target_repos=[],
+            execution_timeout_seconds=120,
+        )
+    )
+
+    assert jobs.deleted == [execution_job_name("run-1")]
+
+
+def test_github_app_credential_manager_mints_repository_narrowed_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    manager = object.__new__(KubernetesGitHubAppRunCredentialManager)
+    manager._api_url = "https://api.github.com"
+    manager._installation_id = "123"
+    manager._api_version = "2022-11-28"
+    manager._app_id = "456"
+    manager._private_key = pem
+    captured: dict[str, object] = {}
+
+    class Response:
+        status_code = 201
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {
+                "token": "installation-token",
+                "permissions": {"contents": "write"},
+                "repositories": [{"name": "api"}, {"name": "web"}],
+                "expires_at": "2999-01-01T00:00:00Z",
+            }
+
+    def post(url: str, **kwargs: object) -> Response:
+        captured["url"] = url
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(budgets.httpx, "post", post)
+
+    assert manager._mint_installation_token(["api", "web"])[0] == "installation-token"
+    assert captured["url"] == "https://api.github.com/app/installations/123/access_tokens"
+    assert captured["json"] == {"repositories": ["api", "web"], "permissions": {"contents": "write"}}
+    assert captured["headers"]["Authorization"].startswith("Bearer ey")
+
+    class WiderResponse(Response):
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {
+                "token": "installation-token",
+                "permissions": {"contents": "write"},
+                "repositories": [{"name": "api"}, {"name": "other"}],
+                "expires_at": "2999-01-01T00:00:00Z",
+            }
+
+    monkeypatch.setattr(budgets.httpx, "post", lambda *_args, **_kwargs: WiderResponse())
+    with pytest.raises(RuntimeError, match="scope does not match"):
+        manager._mint_installation_token(["api", "web"])
 
 
 def test_run_key_payload_scopes_mcp_access_to_explicit_gateway_tools() -> None:
@@ -484,12 +609,14 @@ async def test_provisioned_run_key_is_scoped_to_one_budget_and_execution_pod() -
 
     class RecordingRunGitCredentials:
         def __init__(self) -> None:
-            self.provisioned: list[str] = []
+            self.provisioned: list[tuple[str, list[str], int]] = []
             self.cleaned: list[tuple[str, str]] = []
 
-        async def provision(self, run_id: str) -> str:
-            self.provisioned.append(run_id)
-            return "cogito-run-git-abc"
+        async def provision(
+            self, run_id: str, target_repositories: list[str], minimum_validity_seconds: int
+        ) -> RunGitCredential:
+            self.provisioned.append((run_id, target_repositories, minimum_validity_seconds))
+            return RunGitCredential("cogito-run-git-abc")
 
         async def cleanup(self, run_id: str, secret_name: str) -> None:
             self.cleaned.append((run_id, secret_name))
@@ -518,7 +645,7 @@ async def test_provisioned_run_key_is_scoped_to_one_budget_and_execution_pod() -
     git_ref = next(env["valueFrom"] for env in pod_container["env"] if env["name"] == "COGITO_GIT_HTTPS_TOKEN")
     assert git_ref["secretKeyRef"]["name"] == "cogito-run-git-abc"
     assert run_keys.cleaned == [("run-1", "cogito-run-key-abc")]
-    assert run_git_credentials.provisioned == ["run-1"]
+    assert run_git_credentials.provisioned == [("run-1", [], 120)]
     assert run_git_credentials.cleaned == [("run-1", "cogito-run-git-abc")]
 
 
@@ -774,8 +901,10 @@ async def test_cleanup_revokes_run_credentials_when_job_deletion_fails() -> None
         def __init__(self) -> None:
             self.cleaned: list[tuple[str, str]] = []
 
-        async def provision(self, run_id: str) -> str:
-            return "cogito-run-git-abc"
+        async def provision(
+            self, run_id: str, target_repositories: list[str], minimum_validity_seconds: int
+        ) -> RunGitCredential:
+            return RunGitCredential("cogito-run-git-abc")
 
         async def cleanup(self, run_id: str, secret_name: str) -> None:
             self.cleaned.append((run_id, secret_name))

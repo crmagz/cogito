@@ -59,3 +59,12 @@ def test_load_settings_rejects_incomplete_mcp_release_mapping(monkeypatch: pytes
 
     with pytest.raises(ValueError, match="complete immutable gateway mapping"):
         load_settings()
+
+
+def test_load_settings_rejects_execution_deadline_beyond_github_app_token_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COGITO_EXECUTION_ACTIVE_DEADLINE_SECONDS", "3301")
+
+    with pytest.raises(ValueError, match="GitHub App token refresh margin"):
+        load_settings()

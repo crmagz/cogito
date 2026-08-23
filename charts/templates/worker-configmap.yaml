@@ -1,5 +1,6 @@
 {{- if .Values.worker.enabled }}
 {{- $supervisorDatabase := default (dict) .Values.worker.supervisorDatabase }}
+{{- $executionGithubApp := default (dict) .Values.worker.execution.githubApp }}
 {{- $mcp := default (dict) .Values.mcp }}
 {{- $mcpService := default (dict) $mcp.service }}
 {{- $mcpPort := default 8000 $mcpService.port }}
@@ -51,11 +52,11 @@ data:
   COGITO_EXECUTION_IMAGE: {{ include "cogito.image" (dict "root" . "image" .Values.worker.image) | quote }}
   COGITO_EXECUTION_IMAGE_PULL_POLICY: {{ .Values.worker.image.pullPolicy | quote }}
   COGITO_EXECUTION_WORKSPACE_ROOT: {{ .Values.worker.execution.workspaceRoot | quote }}
-  COGITO_EXECUTION_IDLE_SECONDS: {{ .Values.worker.execution.idleSeconds | quote }}
+  COGITO_EXECUTION_IDLE_SECONDS: {{ min 3300 (.Values.worker.execution.idleSeconds | int) | quote }}
   COGITO_EXECUTION_STARTUP_TIMEOUT_SECONDS: {{ .Values.worker.execution.startupTimeoutSeconds | quote }}
   COGITO_EXECUTION_NAMESPACE: {{ .Values.worker.execution.namespace | quote }}
   COGITO_EXECUTION_CLEANUP_TIMEOUT_SECONDS: {{ .Values.worker.execution.cleanupTimeoutSeconds | quote }}
-  COGITO_EXECUTION_ACTIVE_DEADLINE_SECONDS: {{ .Values.worker.execution.activeDeadlineSeconds | quote }}
+  COGITO_EXECUTION_ACTIVE_DEADLINE_SECONDS: {{ min 3300 (.Values.worker.execution.activeDeadlineSeconds | int) | quote }}
   COGITO_EXECUTION_TTL_SECONDS_AFTER_FINISHED: {{ .Values.worker.execution.ttlSecondsAfterFinished | quote }}
   COGITO_EXECUTION_TERMINATION_GRACE_PERIOD_SECONDS: {{ .Values.worker.execution.terminationGracePeriodSeconds | quote }}
   COGITO_EXECUTION_WORKSPACE_SIZE_LIMIT: {{ .Values.worker.execution.workspaceSizeLimit | quote }}
@@ -70,8 +71,9 @@ data:
   COGITO_EXECUTION_LITELLM_KEY_SECRET: {{ .Values.worker.execution.harness.existingSecret | quote }}
   COGITO_EXECUTION_LITELLM_KEY_SECRET_KEY: {{ .Values.worker.execution.harness.apiKeyKey | quote }}
   COGITO_EXECUTION_MCP_GATEWAY_SERVERS: {{ toJson $mcpGatewayServers | quote }}
-  COGITO_EXECUTION_GIT_CREDENTIALS_SECRET: {{ .Values.worker.execution.harness.gitCredentialsSecret | quote }}
-  COGITO_EXECUTION_GIT_CREDENTIALS_SECRET_KEY: {{ .Values.worker.execution.harness.gitCredentialsKey | quote }}
+  COGITO_EXECUTION_GITHUB_APP_API_URL: {{ default "https://api.github.com" $executionGithubApp.apiUrl | quote }}
+  COGITO_EXECUTION_GITHUB_APP_API_VERSION: {{ default "2022-11-28" $executionGithubApp.apiVersion | quote }}
+  COGITO_EXECUTION_GITHUB_APP_GIT_HOST: {{ default "github.com" $executionGithubApp.gitHost | quote }}
   COGITO_EXECUTION_GIT_AUTHOR_NAME: {{ .Values.worker.execution.harness.gitAuthorName | quote }}
   COGITO_EXECUTION_GIT_AUTHOR_EMAIL: {{ .Values.worker.execution.harness.gitAuthorEmail | quote }}
   COGITO_EXECUTION_COMMAND_OUTPUT_LIMIT_BYTES: {{ .Values.worker.execution.harness.commandOutputLimitBytes | quote }}

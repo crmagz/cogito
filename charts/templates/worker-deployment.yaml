@@ -1,5 +1,6 @@
 {{- if .Values.worker.enabled }}
 {{- $supervisorDatabase := default (dict) .Values.worker.supervisorDatabase }}
+{{- $executionGithubApp := default (dict) .Values.worker.execution.githubApp }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -60,11 +61,21 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.worker.execution.keyManagement.existingSecret }}
                   key: {{ .Values.worker.execution.keyManagement.apiKeyKey }}
-            - name: COGITO_EXECUTION_GIT_HTTPS_TOKEN
+            - name: COGITO_EXECUTION_GITHUB_APP_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.worker.execution.harness.gitCredentialsSecret }}
-                  key: {{ .Values.worker.execution.harness.gitCredentialsKey }}
+                  name: {{ default "cogito-github-app" $executionGithubApp.existingSecret }}
+                  key: {{ default "app-id" $executionGithubApp.appIdKey }}
+            - name: COGITO_EXECUTION_GITHUB_APP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default "cogito-github-app" $executionGithubApp.existingSecret }}
+                  key: {{ default "installation-id" $executionGithubApp.installationIdKey }}
+            - name: COGITO_EXECUTION_GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default "cogito-github-app" $executionGithubApp.existingSecret }}
+                  key: {{ default "private-key" $executionGithubApp.privateKeyKey }}
             - name: COGITO_REVIEWER_PRIMARY_LITELLM_API_KEY
               valueFrom:
                 secretKeyRef:

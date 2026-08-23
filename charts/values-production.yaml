@@ -175,6 +175,14 @@ worker:
     keyManagement:
       existingSecret: cogito-developer-key-manager
       apiKeyKey: api-key
+    githubApp:
+      # GitHub App with Contents read/write permission on the implementation repositories.
+      # The private values file must provide this Secret; the chart never creates it.
+      existingSecret: cogito-github-app
+      appIdKey: app-id
+      installationIdKey: installation-id
+      privateKeyKey: private-key
+      gitHost: github.com
     specStore:
       endpoint: "s3.us-east-1.amazonaws.com"
       secure: true

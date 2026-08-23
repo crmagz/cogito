@@ -305,6 +305,22 @@ except urllib.error.HTTPError as error:
                 f"(HTTP {status or 'no response'}); refresh cogito-github-pull-request/token"
             )
 
+    def assert_github_app_workspace_credentials(self) -> None:
+        """Require the non-secret GitHub App keys before upgrading the worker deployment."""
+
+        secret_name = os.environ.get("COGITO_E2E_GITHUB_APP_SECRET", "cogito-github-app")
+        missing_keys = [
+            key
+            for key in ("app-id", "installation-id", "private-key")
+            if not self.secret_key_present(secret_name, key)
+        ]
+        if missing_keys:
+            pytest.fail(
+                "full Kind E2E requires non-empty "
+                f"{', '.join(missing_keys)} in GitHub App Secret {secret_name}; "
+                "set COGITO_E2E_GITHUB_APP_SECRET when the Helm value uses another Secret"
+            )
+
     def restart_worker(self) -> None:
         selector = f"app.kubernetes.io/instance={self.config.release},app.kubernetes.io/name=worker"
         previous_pods = self.kubectl(
@@ -377,6 +393,7 @@ except urllib.error.HTTPError as error:
             pytest.skip(f"Kind context unavailable: {self.config.context}")
         image_overrides = self.workload_image_overrides()
         litellm_overrides = self.litellm_overrides()
+        self.assert_github_app_workspace_credentials()
         self.ensure_immutable_spec_fixture()
         secret = self.kubectl(
             "-n", self.config.namespace, "create", "secret", "generic", self.receiver_secret,

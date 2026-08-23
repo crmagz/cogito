@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
+_MAX_GITHUB_APP_INSTALLATION_TOKEN_JOB_SECONDS = 3300
+
 
 @dataclass(frozen=True)
 class McpGatewayServer:
@@ -56,9 +58,12 @@ class Settings:
     execution_litellm_key_secret: str
     execution_litellm_key_secret_key: str
     execution_litellm_management_key: str
-    execution_git_credentials_secret: str
-    execution_git_credentials_secret_key: str
-    execution_git_https_token: str
+    execution_github_app_id: str
+    execution_github_app_installation_id: str
+    execution_github_app_private_key: str
+    execution_github_app_api_url: str
+    execution_github_app_api_version: str
+    execution_github_app_git_host: str
     execution_git_author_name: str
     execution_git_author_email: str
     execution_command_output_limit_bytes: int
@@ -104,6 +109,9 @@ def load_settings() -> Settings:
     if not isinstance(execution_resources, dict):
         raise ValueError("COGITO_EXECUTION_RESOURCES must be a JSON object")
     execution_mcp_gateway_servers = _mcp_gateway_servers("COGITO_EXECUTION_MCP_GATEWAY_SERVERS", "{}")
+    execution_active_deadline_seconds = int(os.environ.get("COGITO_EXECUTION_ACTIVE_DEADLINE_SECONDS", "3300"))
+    if execution_active_deadline_seconds > _MAX_GITHUB_APP_INSTALLATION_TOKEN_JOB_SECONDS:
+        raise ValueError("COGITO_EXECUTION_ACTIVE_DEADLINE_SECONDS must leave a GitHub App token refresh margin")
     return Settings(
         temporal_host=os.environ.get("COGITO_TEMPORAL_HOST", "localhost:7233"),
         temporal_namespace=os.environ.get("COGITO_TEMPORAL_NAMESPACE", "default"),
@@ -125,10 +133,10 @@ def load_settings() -> Settings:
         execution_image=os.environ.get("COGITO_EXECUTION_IMAGE", "cogito-worker:local"),
         execution_image_pull_policy=os.environ.get("COGITO_EXECUTION_IMAGE_PULL_POLICY", "IfNotPresent"),
         execution_workspace_root=os.environ.get("COGITO_EXECUTION_WORKSPACE_ROOT", "/workspace"),
-        execution_idle_seconds=int(os.environ.get("COGITO_EXECUTION_IDLE_SECONDS", "14700")),
+        execution_idle_seconds=int(os.environ.get("COGITO_EXECUTION_IDLE_SECONDS", "3300")),
         execution_startup_timeout_seconds=int(os.environ.get("COGITO_EXECUTION_STARTUP_TIMEOUT_SECONDS", "30")),
         execution_cleanup_timeout_seconds=int(os.environ.get("COGITO_EXECUTION_CLEANUP_TIMEOUT_SECONDS", "90")),
-        execution_active_deadline_seconds=int(os.environ.get("COGITO_EXECUTION_ACTIVE_DEADLINE_SECONDS", "14700")),
+        execution_active_deadline_seconds=execution_active_deadline_seconds,
         execution_ttl_seconds_after_finished=int(
             os.environ.get("COGITO_EXECUTION_TTL_SECONDS_AFTER_FINISHED", "300")
         ),
@@ -158,13 +166,12 @@ def load_settings() -> Settings:
             "COGITO_EXECUTION_LITELLM_KEY_SECRET_KEY", "api-key"
         ),
         execution_litellm_management_key=os.environ.get("COGITO_EXECUTION_LITELLM_MANAGEMENT_KEY", ""),
-        execution_git_credentials_secret=os.environ.get(
-            "COGITO_EXECUTION_GIT_CREDENTIALS_SECRET", "cogito-developer-git"
-        ),
-        execution_git_credentials_secret_key=os.environ.get(
-            "COGITO_EXECUTION_GIT_CREDENTIALS_SECRET_KEY", "token"
-        ),
-        execution_git_https_token=os.environ.get("COGITO_EXECUTION_GIT_HTTPS_TOKEN", ""),
+        execution_github_app_id=os.environ.get("COGITO_EXECUTION_GITHUB_APP_ID", ""),
+        execution_github_app_installation_id=os.environ.get("COGITO_EXECUTION_GITHUB_APP_INSTALLATION_ID", ""),
+        execution_github_app_private_key=os.environ.get("COGITO_EXECUTION_GITHUB_APP_PRIVATE_KEY", ""),
+        execution_github_app_api_url=os.environ.get("COGITO_EXECUTION_GITHUB_APP_API_URL", "https://api.github.com"),
+        execution_github_app_api_version=os.environ.get("COGITO_EXECUTION_GITHUB_APP_API_VERSION", "2022-11-28"),
+        execution_github_app_git_host=os.environ.get("COGITO_EXECUTION_GITHUB_APP_GIT_HOST", "github.com"),
         execution_git_author_name=os.environ.get("COGITO_EXECUTION_GIT_AUTHOR_NAME", "Cogito Agent"),
         execution_git_author_email=os.environ.get("COGITO_EXECUTION_GIT_AUTHOR_EMAIL", "cogito@local.invalid"),
         execution_command_output_limit_bytes=int(
