@@ -678,6 +678,34 @@ class WorkflowGateDefinition(BaseModel):
         return self
 
 
+class WorkflowGateDecisionRequest(BaseModel):
+    """A schema-gate decision bound to one immutable artifact.
+
+    The public contract intentionally does not expose a worker, model, or
+    policy selector.  ``gate_id`` comes from the URL and is checked against
+    the run's immutable resolved workflow before a transition is attempted.
+    ``artifact_revision`` is used only by the product-specification gate,
+    whose artifact family is revisioned before planning begins.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    artifact_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    artifact_revision: int | None = Field(default=None, ge=1)
+    comment: str | None = Field(default=None, max_length=10_000)
+    mcp_selection: list["McpToolSelection"] | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_comment_and_mcp_selection(self) -> "WorkflowGateDecisionRequest":
+        if self.decision != "approve" and not (self.comment and self.comment.strip()):
+            raise ValueError("comment is required when rejecting or requesting revision")
+        if self.decision != "approve" and self.mcp_selection is not None:
+            raise ValueError("MCP selection is allowed only when approving a gate")
+        self.mcp_selection = _canonical_mcp_selection(self.mcp_selection)
+        return self
+
+
 class WorkflowPhaseActivation(BaseModel):
     """A deliberately small, non-executable condition for an optional phase."""
 
@@ -888,6 +916,32 @@ class ResolvedWorkflow(BaseModel):
             raise ValueError("resolved workflow gate IDs must be unique")
         if len({phase.id for phase in self.phases}) != len(self.phases):
             raise ValueError("resolved workflow phase IDs must be unique")
+        return self
+
+
+class WorkflowAdmissionSnapshot(BaseModel):
+    """Immutable pre-execution authority used while product review is active.
+
+    A full ``ResolvedWorkflow`` cannot exist until product, evaluation, and
+    plan artifacts have been created. This smaller snapshot pins the template
+    and policy at submission time so the first mandatory gate is governed by
+    the same authority as the later worker contract.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1, le=1)
+    run_id: str = Field(min_length=1, max_length=64)
+    project_id: str = Field(min_length=1, max_length=128)
+    template_ref: str = Field(min_length=1, max_length=192)
+    policy_ref: str = Field(min_length=1, max_length=192)
+    gates: list[WorkflowGateDefinition] = Field(min_length=3, max_length=32)
+    effective_constraints: PlanConstraints
+
+    @model_validator(mode="after")
+    def validate_snapshot_gates(self) -> "WorkflowAdmissionSnapshot":
+        if len({gate.id for gate in self.gates}) != len(self.gates):
+            raise ValueError("workflow admission gate IDs must be unique")
         return self
 
 
@@ -2029,6 +2083,11 @@ class RunEnvelope(BaseModel):
         default=None,
         max_length=192,
         description="Pinned platform workflow policy selected at run admission",
+    )
+    workflow_resolution_ref: str | None = Field(
+        default=None,
+        max_length=1024,
+        description="Immutable object-store reference for the resolved workflow",
     )
     workflow_resolution_sha256: str | None = Field(
         default=None,

@@ -13,6 +13,7 @@ from cogito_api.models import (
     PlanApprovalDecision,
     PlanningRunStatus,
     ProductSpecification,
+    ResolvedWorkflow,
     SpecificationEvaluation,
     McpBindingPolicy,
     McpToolGrant,
@@ -28,6 +29,7 @@ from cogito_api.storage import (
     PlanSnapshot,
     plan_snapshot_bytes,
     product_specification_bytes,
+    resolved_workflow_bytes,
     specification_evaluation_bytes,
     source_specification_bytes,
 )
@@ -121,6 +123,15 @@ class InMemoryPlanStore:
             ref=f"s3://plan-snapshots/runs/{run_id}/specification-evaluations/{specification_revision}/{digest}/evaluation.json",
             sha256=digest,
         )
+
+    def put_resolved_workflow(self, run_id: str, resolution: ResolvedWorkflow) -> ArtifactReference:
+        from hashlib import sha256
+
+        data = resolved_workflow_bytes(resolution)
+        digest = sha256(data).hexdigest()
+        ref = f"s3://plan-snapshots/runs/{run_id}/resolved-workflows/{digest}/resolved-workflow.json"
+        self.artifacts[ref] = data
+        return ArtifactReference(ref=ref, sha256=digest)
 
     def put_artifact(self, ref: str, content: bytes) -> ArtifactReference:
         """Store a test-only immutable artifact with its matching digest."""
@@ -1392,6 +1403,8 @@ class FakeRunStarter:
         self.started_runs: list[RunEnvelope] = []
         self.plan_approvals: list[tuple[str, dict[str, object]]] = []
         self.implementation_approvals: list[tuple[str, dict[str, str]]] = []
+        self.workflow_gates: list[tuple[str, str, dict[str, object]]] = []
+        self.workflow_gate_result = False
         self.approval_error: Exception | None = None
         self.approval_result = True
         self.start_error: Exception | None = None
@@ -1414,3 +1427,9 @@ class FakeRunStarter:
         if self.approval_error is not None:
             raise self.approval_error
         return self.approval_result
+
+    async def submit_workflow_gate(self, workflow_id: str, gate_id: str, decision: dict[str, object]) -> bool:
+        self.workflow_gates.append((workflow_id, gate_id, decision))
+        if self.approval_error is not None:
+            raise self.approval_error
+        return self.workflow_gate_result

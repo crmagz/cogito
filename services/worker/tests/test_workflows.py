@@ -27,6 +27,7 @@ from cogito_worker.workflows import (
     _is_timeout_error,
     _redact_failure_message,
     _validate_plan_snapshot,
+    _validate_resolved_workflow,
 )
 from temporalio.exceptions import TimeoutError
 from temporalio.testing import WorkflowEnvironment
@@ -47,6 +48,26 @@ async def _wait_for_status(store: InMemoryRunStore, run_id: str, expected: str) 
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"run {run_id} did not reach {expected}")
+
+
+@pytest.mark.asyncio
+async def test_resolved_gate_update_rejects_unknown_or_disallowed_gate_decisions() -> None:
+    workflow_instance = DeveloperRunWorkflow()
+    workflow_instance._resolved_gates = {
+        "plan_scope_review": {"id": "plan_scope_review", "permitted_decisions": ["approve"]}
+    }
+    workflow_instance._awaiting_plan_approval = True
+    workflow_instance._plan_sha256 = "a" * 64
+
+    assert await workflow_instance.submit_workflow_gate(
+        "unknown", {"decision_id": "decision-1", "decision": "approve", "artifact_sha256": "a" * 64}
+    ) is False
+    assert await workflow_instance.submit_workflow_gate(
+        "plan_scope_review", {"decision_id": "decision-2", "decision": "reject", "artifact_sha256": "a" * 64}
+    ) is False
+    assert await workflow_instance.submit_workflow_gate(
+        "plan_scope_review", {"decision_id": "decision-3", "decision": "approve", "artifact_sha256": "a" * 64}
+    ) is True
 
 
 def _single_phase_plan(spec_ref: str, target_repos: list[str]) -> dict:
@@ -1260,3 +1281,35 @@ def test_timeout_detection_requires_a_temporal_timeout_in_the_cause_chain() -> N
 
     assert _is_timeout_error(outer) is True
     assert _is_timeout_error(RuntimeError("ordinary activity failure")) is False
+
+
+def test_resolved_workflow_must_match_the_envelope_identity_and_digest() -> None:
+    resolution = {
+        "run_id": "run-resolved",
+        "template_ref": "software_delivery@1.0.0",
+        "policy_ref": "platform_standard@1.0.0",
+        "plan_artifact": {"ref": "s3://plans/plans/run-resolved/plan.json", "sha256": "a" * 64},
+        "gates": [
+            {"id": "product_specification_review"},
+            {"id": "plan_scope_review"},
+            {"id": "delivery_review"},
+        ],
+        "phases": [{"id": "implementation", "active": True}],
+    }
+    digest = hashlib.sha256(json.dumps(resolution, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    envelope = RunEnvelope(
+        run_id="run-resolved",
+        plan_ref="s3://plans/plans/run-resolved/plan.json",
+        plan_sha256="a" * 64,
+        spec_ref="typescript-backend@v2.1#sha256=" + "b" * 64,
+        workflow_template_ref="software_delivery@1.0.0",
+        workflow_policy_ref="platform_standard@1.0.0",
+        workflow_resolution_ref="s3://plan-snapshots/runs/run-resolved/resolved-workflows/digest/resolved-workflow.json",
+        workflow_resolution_sha256=digest,
+        workflow_required_gate_ids=["product_specification_review", "plan_scope_review", "delivery_review"],
+    )
+
+    _validate_resolved_workflow(resolution, envelope)
+
+    with pytest.raises(ValueError, match="digest"):
+        _validate_resolved_workflow(resolution, RunEnvelope(**{**envelope.__dict__, "workflow_resolution_sha256": "0" * 64}))

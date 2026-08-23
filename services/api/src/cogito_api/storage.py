@@ -12,7 +12,7 @@ from minio import Minio
 from minio.error import S3Error
 from minio.retention import COMPLIANCE, Retention
 
-from .models import AiPlan, ArtifactReference, ProductSpecification, SpecificationEvaluation
+from .models import AiPlan, ArtifactReference, ProductSpecification, ResolvedWorkflow, SpecificationEvaluation
 
 
 class PlanStoreUnavailableError(RuntimeError):
@@ -37,6 +37,8 @@ class PlanStore(Protocol):
     def put_specification_evaluation(
         self, run_id: str, specification_revision: int, evaluation: SpecificationEvaluation
     ) -> ArtifactReference: ...
+
+    def put_resolved_workflow(self, run_id: str, resolution: ResolvedWorkflow) -> ArtifactReference: ...
 
     def get_source_specification(self, source_artifact_ref: str) -> str: ...
 
@@ -83,6 +85,14 @@ def specification_evaluation_bytes(evaluation: SpecificationEvaluation) -> bytes
 
     return json.dumps(
         evaluation.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+
+
+def resolved_workflow_bytes(resolution: ResolvedWorkflow) -> bytes:
+    """Serialize the worker-executable resolution as a verified immutable artifact."""
+
+    return json.dumps(
+        resolution.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode()
 
 
@@ -149,6 +159,17 @@ class MinioPlanStore:
         data = specification_evaluation_bytes(evaluation)
         digest = sha256(data).hexdigest()
         object_name = f"runs/{run_id}/specification-evaluations/{specification_revision}/{digest}/evaluation.json"
+        self._put_snapshot(object_name, data)
+        return ArtifactReference(ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=digest)
+
+    def put_resolved_workflow(self, run_id: str, resolution: ResolvedWorkflow) -> ArtifactReference:
+        """Persist the exact compiled contract before Temporal can start execution."""
+
+        if resolution.run_id != run_id:
+            raise ValueError("resolved workflow run ID does not match the storage target")
+        data = resolved_workflow_bytes(resolution)
+        digest = sha256(data).hexdigest()
+        object_name = f"runs/{run_id}/resolved-workflows/{digest}/resolved-workflow.json"
         self._put_snapshot(object_name, data)
         return ArtifactReference(ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=digest)
 
