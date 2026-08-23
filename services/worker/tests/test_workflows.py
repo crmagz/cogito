@@ -175,11 +175,15 @@ async def test_workflow_runs_activities_and_reports_completion(
         "policy_ref": "platform_standard@1.0.0",
         "plan_artifact": {"ref": "s3://plans/plans/run-1/plan.json", "sha256": plan_sha256},
         "gates": [
-            {"id": "product_specification_review"},
-            {"id": "plan_scope_review"},
-            {"id": "delivery_review"},
+                {"id": "product_specification_review", "required_artifacts": [{"schema_id": "product_specification", "version": "2"}]},
+                {"id": "plan_scope_review", "required_artifacts": [{"schema_id": "ai_plan", "version": "1"}]},
+                {"id": "delivery_review", "required_artifacts": [{"schema_id": "implementation", "version": "1"}]},
         ],
-        "phases": [{"id": "implementation", "active": True}],
+        "phases": [
+            {"id": "product_specification", "active": True, "agent_role": "planner"},
+            {"id": "implementation_plan", "active": True, "agent_role": "planner"},
+            {"id": "implementation", "active": True, "agent_role": "developer"},
+        ],
     }
     store.plans[workflow_ref] = resolution
     workflow_digest = hashlib.sha256(
@@ -1317,11 +1321,15 @@ def test_resolved_workflow_must_match_the_envelope_identity_and_digest() -> None
         "policy_ref": "platform_standard@1.0.0",
         "plan_artifact": {"ref": "s3://plans/plans/run-resolved/plan.json", "sha256": "a" * 64},
         "gates": [
-            {"id": "product_specification_review"},
-            {"id": "plan_scope_review"},
-            {"id": "delivery_review"},
+            {"id": "product_specification_review", "required_artifacts": [{"schema_id": "product_specification", "version": "2"}]},
+            {"id": "plan_scope_review", "required_artifacts": [{"schema_id": "ai_plan", "version": "1"}]},
+            {"id": "delivery_review", "required_artifacts": [{"schema_id": "implementation", "version": "1"}]},
         ],
-        "phases": [{"id": "implementation", "active": True}],
+        "phases": [
+            {"id": "product_specification", "active": True, "agent_role": "planner"},
+            {"id": "implementation_plan", "active": True, "agent_role": "planner"},
+            {"id": "implementation", "active": True, "agent_role": "developer"},
+        ],
     }
     digest = hashlib.sha256(json.dumps(resolution, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     envelope = RunEnvelope(
@@ -1340,3 +1348,23 @@ def test_resolved_workflow_must_match_the_envelope_identity_and_digest() -> None
 
     with pytest.raises(ValueError, match="digest"):
         _validate_resolved_workflow(resolution, RunEnvelope(**{**envelope.__dict__, "workflow_resolution_sha256": "0" * 64}))
+
+    unsupported = {**resolution, "phases": [{"id": "implementation", "active": True}]}
+    unsupported_digest = hashlib.sha256(
+        json.dumps(unsupported, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    with pytest.raises(ValueError, match="phase topology"):
+        _validate_resolved_workflow(
+            unsupported,
+            RunEnvelope(**{**envelope.__dict__, "workflow_resolution_sha256": unsupported_digest}),
+        )
+
+    malformed_gates = {**resolution, "gates": [*resolution["gates"], "unexpected"]}
+    malformed_gates_digest = hashlib.sha256(
+        json.dumps(malformed_gates, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    with pytest.raises(ValueError, match="gates"):
+        _validate_resolved_workflow(
+            malformed_gates,
+            RunEnvelope(**{**envelope.__dict__, "workflow_resolution_sha256": malformed_gates_digest}),
+        )

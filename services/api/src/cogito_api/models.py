@@ -516,6 +516,7 @@ class PlanningRunStatus(StrEnum):
     FINALIZING = "finalizing"
     COMPLETED = "completed"
     PLANNING_FAILED = "planning_failed"
+    IMPLEMENTATION_FAILED = "implementation_failed"
     REJECTED = "rejected"
     REVISION_REQUESTED = "revision_requested"
     CANCELLED = "cancelled"
@@ -876,6 +877,34 @@ class WorkflowTemplate(BaseModel):
         required = {"product_specification_review", "plan_scope_review", "delivery_review"}
         if not required.issubset({gate.id for gate in self.required_gates}):
             raise ValueError("workflow template must define product, plan, and delivery review gates")
+        runtime_phase_ids = {"product_specification", "implementation_plan", "implementation"}
+        runtime_gate_ids = {"product_specification_review", "plan_scope_review", "delivery_review"}
+        runtime_phase_roles = {
+            "product_specification": "planner",
+            "implementation_plan": "planner",
+            "implementation": "developer",
+        }
+        runtime_gate_artifacts = {
+            "product_specification_review": [ArtifactSchema(schema_id="product_specification", version="2")],
+            "plan_scope_review": [ArtifactSchema(schema_id="ai_plan", version="1")],
+            "delivery_review": [ArtifactSchema(schema_id="implementation", version="1")],
+        }
+        runtime_gate_decisions = {
+            "product_specification_review": ["approve"],
+            "plan_scope_review": ["approve", "request_revision", "reject"],
+            "delivery_review": ["approve", "request_revision", "reject"],
+        }
+        if {phase.id for phase in self.phases} != runtime_phase_ids:
+            raise ValueError("workflow template phases are not supported by the released runtime")
+        if {gate.id for gate in self.required_gates} != runtime_gate_ids:
+            raise ValueError("workflow template gates are not supported by the released runtime")
+        if any(phase.agent_role != runtime_phase_roles[phase.id] for phase in self.phases):
+            raise ValueError("workflow template phase roles are not supported by the released runtime")
+        for gate in self.required_gates:
+            if gate.required_artifacts != runtime_gate_artifacts[gate.id]:
+                raise ValueError("workflow gate artifacts are not supported by the released runtime")
+            if gate.permitted_decisions != runtime_gate_decisions[gate.id]:
+                raise ValueError("workflow gate decisions are not supported by the released runtime")
         profile_refs = {f"{profile.id}@{profile.version}": profile for profile in self.capability_profiles}
         if len(profile_refs) != len(self.capability_profiles):
             raise ValueError("workflow template capability profile references must be unique")
@@ -1013,6 +1042,7 @@ class ResolvedWorkflow(BaseModel):
     gates: list[WorkflowGateDefinition] = Field(min_length=3)
     phases: list[ResolvedWorkflowPhase] = Field(min_length=1)
     effective_constraints: PlanConstraints
+    enforce_separation_of_duties: bool = True
 
     @model_validator(mode="after")
     def validate_resolution_shape(self) -> "ResolvedWorkflow":
@@ -1041,6 +1071,7 @@ class WorkflowAdmissionSnapshot(BaseModel):
     policy_ref: str = Field(min_length=1, max_length=192)
     gates: list[WorkflowGateDefinition] = Field(min_length=3, max_length=32)
     effective_constraints: PlanConstraints
+    enforce_separation_of_duties: bool = True
 
     @model_validator(mode="after")
     def validate_snapshot_gates(self) -> "WorkflowAdmissionSnapshot":

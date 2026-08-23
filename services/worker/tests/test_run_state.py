@@ -88,7 +88,7 @@ async def test_failed_workflow_closes_the_supervisor_projection() -> None:
     await reporter.report("run-1", "failed", "execution unavailable", None)
 
     supervisor_statement, supervisor_parameters = connection.calls[2]
-    assert "SET status = 'planning_failed'" in supervisor_statement
+    assert "SET status = 'implementation_failed'" in supervisor_statement
     assert supervisor_parameters["run_id"] == "run-1"
 
 

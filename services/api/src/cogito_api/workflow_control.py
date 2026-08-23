@@ -162,6 +162,23 @@ def default_policy(project_id: str, constraints: PlanConstraints) -> WorkflowPol
     )
 
 
+def validate_template_policy(template: WorkflowTemplate, policy: WorkflowPolicy) -> None:
+    """Reject a published template/policy pair the runtime cannot admit."""
+
+    phase_ids = {phase.id for phase in template.phases}
+    gate_ids = {gate.id for gate in template.required_gates}
+    missing_phases = set(policy.mandatory_phase_ids) - phase_ids
+    missing_gates = set(policy.required_gate_ids) - gate_ids
+    if missing_phases or missing_gates:
+        raise WorkflowConfigurationError("workflow template does not satisfy mandatory policy phases and gates")
+    tier_profiles = {profile.tier for profile in policy.model_tier_profiles}
+    for phase in template.phases:
+        if not set(phase.permitted_tiers).issubset(tier_profiles):
+            raise WorkflowConfigurationError(
+                f"workflow template phase '{phase.id}' references a model tier unavailable in its policy"
+            )
+
+
 def validate_admission(binding: ProjectWorkflowBinding, template: WorkflowTemplate, policy: WorkflowPolicy) -> WorkflowAdmission:
     if binding.policy_ref is not None and binding.policy_ref != configuration_ref(policy.id, policy.version):
         raise WorkflowConfigurationError("project binding policy does not match its resolved policy")
@@ -169,12 +186,7 @@ def validate_admission(binding: ProjectWorkflowBinding, template: WorkflowTempla
         raise WorkflowConfigurationError("workflow template default policy is not available")
     if binding.project_id not in policy.project_ids:
         raise WorkflowConfigurationError("workflow policy is not authorized for this project")
-    phase_ids = {phase.id for phase in template.phases}
-    gate_ids = {gate.id for gate in template.required_gates}
-    missing_phases = set(policy.mandatory_phase_ids) - phase_ids
-    missing_gates = set(policy.required_gate_ids) - gate_ids
-    if missing_phases or missing_gates:
-        raise WorkflowConfigurationError("workflow template does not satisfy mandatory policy phases and gates")
+    validate_template_policy(template, policy)
     tier_profiles = {profile.tier: profile for profile in policy.model_tier_profiles}
     for phase in template.phases:
         if phase.id not in policy.mandatory_phase_ids:
@@ -203,8 +215,10 @@ class InMemoryWorkflowConfigurationStore:
         self.lifecycle_events: list[tuple[str, str, WorkflowConfigurationState, WorkflowConfigurationState, str]] = []
 
     async def bootstrap_defaults(self, *, project_id: str, constraints: PlanConstraints) -> None:
-        await self.put_policy(default_policy(project_id, constraints), actor="bootstrap")
-        await self.put_template(default_template(), actor="bootstrap")
+        if await self.get_policy_configuration("platform_standard@1.0.0") is None:
+            await self.put_policy(default_policy(project_id, constraints), actor="bootstrap")
+        if await self.get_template_configuration("software_delivery@1.0.0") is None:
+            await self.put_template(default_template(), actor="bootstrap")
 
     async def put_template(self, template: WorkflowTemplate, *, actor: str) -> None:
         reference = configuration_ref(template.id, template.version)
@@ -332,8 +346,10 @@ class PostgresWorkflowConfigurationStore:
         self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
 
     async def bootstrap_defaults(self, *, project_id: str, constraints: PlanConstraints) -> None:
-        await self.put_policy(default_policy(project_id, constraints), actor="bootstrap")
-        await self.put_template(default_template(), actor="bootstrap")
+        if await self.get_policy_configuration("platform_standard@1.0.0") is None:
+            await self.put_policy(default_policy(project_id, constraints), actor="bootstrap")
+        if await self.get_template_configuration("software_delivery@1.0.0") is None:
+            await self.put_template(default_template(), actor="bootstrap")
 
     async def _put(
         self,

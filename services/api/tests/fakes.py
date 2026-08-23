@@ -1315,14 +1315,13 @@ class InMemorySupervisorStore:
         agent = self.agent_runs.get(run_id)
         targets = {
             "completed": (PlanningRunStatus.COMPLETED, AgentRunStatus.SUCCEEDED),
-            "failed": (PlanningRunStatus.PLANNING_FAILED, AgentRunStatus.FAILED),
-            "stopped_with_backup": (PlanningRunStatus.PLANNING_FAILED, AgentRunStatus.TIMED_OUT),
+            "stopped_with_backup": (PlanningRunStatus.IMPLEMENTATION_FAILED, AgentRunStatus.TIMED_OUT),
         }
         target = targets.get(outcome)
         if (
             record is None
             or agent is None
-            or target is None
+            or (target is None and outcome != "failed")
             or record.workflow_id != workflow_id
             or record.status not in {
                 PlanningRunStatus.AWAITING_PLAN_APPROVAL,
@@ -1331,6 +1330,14 @@ class InMemorySupervisorStore:
             }
         ):
             return False
+        if outcome == "failed":
+            target = (
+                PlanningRunStatus.PLANNING_FAILED
+                if record.status is PlanningRunStatus.AWAITING_PLAN_APPROVAL
+                else PlanningRunStatus.IMPLEMENTATION_FAILED,
+                AgentRunStatus.FAILED,
+            )
+        assert target is not None
         terminal = {AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED, AgentRunStatus.TIMED_OUT}
         if agent.status in terminal and agent.status is not target[1]:
             return False

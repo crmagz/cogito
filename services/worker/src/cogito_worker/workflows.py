@@ -797,6 +797,22 @@ def _validate_plan_snapshot(plan: dict, envelope: RunEnvelope) -> None:
 def _validate_resolved_workflow(resolution: dict, envelope: RunEnvelope) -> None:
     """Verify the API-compiled workflow before the worker can provision state."""
 
+    # The worker currently ships adapters for this control-plane topology only.
+    # Do not treat a schema declaration as executable behavior: a future phase
+    # or gate must arrive with a corresponding worker adapter and validation.
+    runtime_phase_ids = {"product_specification", "implementation_plan", "implementation"}
+    runtime_gate_ids = {"product_specification_review", "plan_scope_review", "delivery_review"}
+    runtime_phase_roles = {
+        "product_specification": "planner",
+        "implementation_plan": "planner",
+        "implementation": "developer",
+    }
+    runtime_gate_artifacts = {
+        "product_specification_review": [{"schema_id": "product_specification", "version": "2"}],
+        "plan_scope_review": [{"schema_id": "ai_plan", "version": "1"}],
+        "delivery_review": [{"schema_id": "implementation", "version": "1"}],
+    }
+
     digest = hashlib.sha256(
         json.dumps(resolution, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     ).hexdigest()
@@ -814,15 +830,22 @@ def _validate_resolved_workflow(resolution: dict, envelope: RunEnvelope) -> None
     ):
         raise ValueError("resolved workflow plan artifact does not match the submitted envelope")
     gates = resolution.get("gates")
-    if not isinstance(gates, list) or {gate.get("id") for gate in gates if isinstance(gate, dict)} != set(
-        envelope.workflow_required_gate_ids
+    if (
+        not isinstance(gates, list)
+        or not all(isinstance(gate, dict) for gate in gates)
+        or {gate.get("id") for gate in gates} != runtime_gate_ids
+        or set(envelope.workflow_required_gate_ids) != runtime_gate_ids
+        or any(gate.get("required_artifacts") != runtime_gate_artifacts[gate["id"]] for gate in gates)
     ):
         raise ValueError("resolved workflow gates do not match the submitted envelope")
     phases = resolution.get("phases")
-    if not isinstance(phases, list) or not any(
-        isinstance(phase, dict) and phase.get("active") is True for phase in phases
+    if (
+        not isinstance(phases, list)
+        or {phase.get("id") for phase in phases if isinstance(phase, dict)} != runtime_phase_ids
+        or not all(isinstance(phase, dict) and phase.get("active") is True for phase in phases)
+        or any(phase.get("agent_role") != runtime_phase_roles[phase["id"]] for phase in phases)
     ):
-        raise ValueError("resolved workflow has no active execution phases")
+        raise ValueError("resolved workflow phase topology is unsupported by the released runtime")
 
 
 async def _backup_phase(phase: PlanPhase, workspace, ceiling: str):

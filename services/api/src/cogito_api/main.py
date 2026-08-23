@@ -152,6 +152,7 @@ from .workflow_control import (
     WorkflowConfigurationStore,
     configuration_ref,
     validate_admission,
+    validate_template_policy,
 )
 
 
@@ -415,7 +416,11 @@ def create_app(
         gate = next((item for item in (resolution or admission).gates if item.id == gate_id), None)
         if gate is None:
             raise HTTPException(status_code=409, detail="resolved workflow does not authorize this gate")
-        if gate.separation_of_duties and record.submitted_by == principal.subject:
+        if (
+            (resolution or admission).enforce_separation_of_duties
+            and gate.separation_of_duties
+            and record.submitted_by == principal.subject
+        ):
             raise HTTPException(status_code=403, detail="workflow policy requires a different actor for this gate")
 
     async def require_resolved_gate(
@@ -432,6 +437,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="workflow gate is not defined for this run")
         role_aliases = {"workflow_approver": settings.auth_oidc_workflow_approver_role}
         authorized_roles = {role_aliases.get(role, role) for role in gate.approver_roles}
+        authorized_roles.add(settings.auth_oidc_admin_role)
         if not authorized_roles.intersection(principal.roles):
             raise HTTPException(status_code=403, detail="operator does not hold a role authorized for this workflow gate")
         if decision not in gate.permitted_decisions:
@@ -661,10 +667,11 @@ def create_app(
                 if current is None:
                     raise WorkflowConfigurationError("workflow template version does not exist")
                 payload, _ = current
-                if target is WorkflowConfigurationState.PUBLISHED and await workflow_configuration_store.get_policy(
-                    payload.default_policy_ref
-                ) is None:
-                    raise WorkflowConfigurationError("workflow template default policy is not published")
+                if target is WorkflowConfigurationState.PUBLISHED:
+                    policy = await workflow_configuration_store.get_policy(payload.default_policy_ref)
+                    if policy is None:
+                        raise WorkflowConfigurationError("workflow template default policy is not published")
+                    validate_template_policy(payload, policy)
                 state = await workflow_configuration_store.transition_template(reference, target, actor=principal.subject)
             else:
                 current = await workflow_configuration_store.get_policy_configuration(reference)
@@ -876,6 +883,7 @@ def create_app(
                     policy_ref=admission.binding.policy_ref or admission.template.default_policy_ref,
                     gates=admission.template.required_gates,
                     effective_constraints=constraints,
+                    enforce_separation_of_duties=admission.policy.enforce_separation_of_duties,
                 )
             )
         except WorkflowConfigurationError as error:
@@ -1232,28 +1240,39 @@ def create_app(
             )
             resolved_workflow = None
             resolved_workflow_artifact = None
-            try:
-                admission = await resolve_workflow_admission(updated.project_id or settings.workbench_default_project_id)
-            except WorkflowConfigurationError:
-                # The legacy planning endpoint remains usable during migration.
-                # New product-manager submissions cannot reach this point without
-                # a project binding, so they always receive a resolved contract.
-                admission = None
             pinned_admission = await workflow_configuration_store.get_run_admission(updated.run_id)
             if pinned_admission is not None:
-                if admission is None:
+                template_configuration = await workflow_configuration_store.get_template_configuration(
+                    pinned_admission.template_ref
+                )
+                policy_configuration = await workflow_configuration_store.get_policy_configuration(
+                    pinned_admission.policy_ref
+                )
+                if template_configuration is None or policy_configuration is None:
                     raise HTTPException(status_code=409, detail="the run's pinned workflow admission is no longer available")
-                actual_policy_ref = admission.binding.policy_ref or admission.template.default_policy_ref
-                if (
-                    admission.binding.template_ref != pinned_admission.template_ref
-                    or actual_policy_ref != pinned_admission.policy_ref
-                    or admission.template.required_gates != pinned_admission.gates
-                    or updated.constraints != pinned_admission.effective_constraints
-                ):
-                    raise HTTPException(
-                        status_code=409,
-                        detail="project workflow configuration changed after submission; resubmit to use the new policy",
+                template, _ = template_configuration
+                policy, _ = policy_configuration
+                try:
+                    admission = validate_admission(
+                        ProjectWorkflowBinding(
+                            project_id=pinned_admission.project_id,
+                            template_ref=pinned_admission.template_ref,
+                            policy_ref=pinned_admission.policy_ref,
+                            target_repos=updated.target_repos,
+                            spec_set=updated.spec_set,
+                            constraints=pinned_admission.effective_constraints,
+                        ),
+                        template,
+                        policy,
                     )
+                except WorkflowConfigurationError as error:
+                    raise HTTPException(status_code=409, detail="the run's pinned workflow admission is invalid") from error
+            else:
+                try:
+                    admission = await resolve_workflow_admission(updated.project_id or settings.workbench_default_project_id)
+                except WorkflowConfigurationError:
+                    # The legacy planning endpoint remains usable during migration.
+                    admission = None
             if admission is not None:
                 active_phases = []
                 tier_profiles = {profile.tier: profile for profile in admission.policy.model_tier_profiles}
@@ -1351,6 +1370,7 @@ def create_app(
                     gates=admission.template.required_gates,
                     phases=active_phases,
                     effective_constraints=updated.constraints,
+                    enforce_separation_of_duties=admission.policy.enforce_separation_of_duties,
                 )
                 try:
                     resolved_workflow_artifact = store.put_resolved_workflow(updated.run_id, resolved_workflow)
@@ -1566,6 +1586,11 @@ def create_app(
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
         if (
+            await workflow_configuration_store.get_run_resolution(record.run_id) is not None
+            or await workflow_configuration_store.get_run_admission(record.run_id) is not None
+        ):
+            await require_resolved_gate(record, principal, "product_specification_review", "approve")
+        if (
             record.specification_evaluation_artifact is None
             or record.product_specification_artifact is None
             or record.product_specification_artifact.sha256 != request_body.artifact_sha256
@@ -1708,6 +1733,11 @@ def create_app(
         await require_resolved_gate(record, principal, gate_id, request_body.decision)
 
         if gate_id == "product_specification_review":
+            if request_body.decision != "approve":
+                raise HTTPException(
+                    status_code=409,
+                    detail="the product specification adapter supports only approve",
+                )
             if request_body.artifact_revision is None:
                 raise HTTPException(status_code=422, detail="artifact_revision is required for the product specification gate")
             return await accept_product_specification(
@@ -1720,11 +1750,18 @@ def create_app(
                 idempotency_key,
             )
         if gate_id == "plan_scope_review":
+            try:
+                decision = PlanApprovalDecision(request_body.decision)
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="the plan review adapter does not support this decision",
+                ) from error
             response = await submit_resolved_plan_gate(
                 record,
                 principal,
                 PlanApprovalRequest(
-                    decision=PlanApprovalDecision(request_body.decision),
+                    decision=decision,
                     artifact_sha256=request_body.artifact_sha256,
                     comment=request_body.comment,
                     mcp_selection=request_body.mcp_selection,
@@ -1735,11 +1772,18 @@ def create_app(
             body["gate_id"] = gate_id
             return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=body)
         if gate_id == "delivery_review":
+            try:
+                decision = ImplementationApprovalDecision(request_body.decision)
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="the delivery review adapter does not support this decision",
+                ) from error
             response = await submit_resolved_delivery_gate(
                 record,
                 principal,
                 ImplementationApprovalRequest(
-                    decision=ImplementationApprovalDecision(request_body.decision),
+                    decision=decision,
                     artifact_sha256=request_body.artifact_sha256,
                     comment=request_body.comment,
                 ),
@@ -1829,6 +1873,11 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
+        if (
+            await workflow_configuration_store.get_run_resolution(record.run_id) is not None
+            or await workflow_configuration_store.get_run_admission(record.run_id) is not None
+        ):
+            await require_resolved_gate(record, principal, "product_specification_review", "approve")
         if record.status is not PlanningRunStatus.PLANNING:
             raise HTTPException(status_code=409, detail="planning run is not eligible for product specification revision")
         try:
@@ -2247,13 +2296,16 @@ def create_app(
                     PlanningRunStatus.IMPLEMENTING,
                     PlanningRunStatus.AWAITING_IMPLEMENTATION_APPROVAL,
                     PlanningRunStatus.FINALIZING,
+                    PlanningRunStatus.IMPLEMENTATION_FAILED,
                     PlanningRunStatus.COMPLETED,
                 }
             )
             else WorkbenchStageState.UNAVAILABLE
         )
         implementation_state = (
-            WorkbenchStageState.IN_PROGRESS
+            WorkbenchStageState.FAILED
+            if status is PlanningRunStatus.IMPLEMENTATION_FAILED
+            else WorkbenchStageState.IN_PROGRESS
             if status is PlanningRunStatus.IMPLEMENTING and agent_status is AgentRunStatus.RUNNING
             else WorkbenchStageState.QUEUED
             if status is PlanningRunStatus.IMPLEMENTING
@@ -2379,6 +2431,8 @@ def create_app(
                     if implementation_state is WorkbenchStageState.QUEUED
                     else "An immutable implementation result is recorded."
                     if implementation_state is WorkbenchStageState.COMPLETED
+                    else "The approved implementation phase failed; review the workflow audit for the recorded reason."
+                    if implementation_state is WorkbenchStageState.FAILED
                     else "No durable implementation result is available."
                 ),
                 artifact_kind=WorkbenchArtifactKind.IMPLEMENTATION if record.implementation_artifact is not None else None,
@@ -2517,10 +2571,11 @@ def create_app(
         agent_run = await supervisor_store.get_agent_run(record.run_id)
         failure_summary = (
             agent_run.error_summary
-            if record.status is PlanningRunStatus.PLANNING_FAILED and agent_run is not None
+            if record.status in {PlanningRunStatus.PLANNING_FAILED, PlanningRunStatus.IMPLEMENTATION_FAILED}
+            and agent_run is not None
             else None
         )
-        if record.status is PlanningRunStatus.PLANNING_FAILED and failure_summary is None:
+        if record.status in {PlanningRunStatus.PLANNING_FAILED, PlanningRunStatus.IMPLEMENTATION_FAILED} and failure_summary is None:
             try:
                 worker_status = store.get_status(record.run_id)
             except PlanStoreUnavailableError:
