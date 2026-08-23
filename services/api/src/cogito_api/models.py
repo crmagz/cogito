@@ -46,6 +46,10 @@ class PlanPhase(BaseModel):
     )
     risk_notes: list[str] = Field(default_factory=list, description="Bounded delivery risks for this phase")
     rollback_notes: list[str] = Field(default_factory=list, description="Bounded rollback considerations for this phase")
+    requirement_assignments: list["RequirementAssignment"] = Field(
+        default_factory=list,
+        description="Owner, support, and verification relationships for selected requirements",
+    )
 
     @model_validator(mode="after")
     def validate_requirement_traceability_shape(self) -> "PlanPhase":
@@ -53,6 +57,9 @@ class PlanPhase(BaseModel):
             raise ValueError("plan phase requirement IDs must be unique")
         if len(set(self.verification_references)) != len(self.verification_references):
             raise ValueError("plan phase verification references must be unique")
+        assignment_keys = [(item.requirement_id, item.relationship) for item in self.requirement_assignments]
+        if len(set(assignment_keys)) != len(assignment_keys):
+            raise ValueError("plan phase requirement assignments must be unique by requirement and relationship")
         return self
 
 
@@ -79,6 +86,37 @@ class PlanConstraints(BaseModel):
 
         if self.max_turns_per_phase <= self.backup_reserve_turns:
             raise ValueError("max_turns_per_phase must exceed backup_reserve_turns")
+        return self
+
+
+class SpecificationIntake(BaseModel):
+    """The only product-manager authored input to a governed workflow run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1, le=1)
+    objective: str = Field(min_length=1, max_length=10_000)
+    actors: list[str] = Field(min_length=1, max_length=64)
+    desired_outcomes: list[str] = Field(min_length=1, max_length=128)
+    scope_in: list[str] = Field(min_length=1, max_length=256)
+    scope_out: list[str] = Field(default_factory=list, max_length=256)
+    acceptance_expectations: list[str] = Field(min_length=1, max_length=256)
+    constraints: list[str] = Field(default_factory=list, max_length=256)
+    unknowns: list[str] = Field(default_factory=list, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_non_blank_values(self) -> "SpecificationIntake":
+        fields = (
+            self.actors,
+            self.desired_outcomes,
+            self.scope_in,
+            self.scope_out,
+            self.acceptance_expectations,
+            self.constraints,
+            self.unknowns,
+        )
+        if not self.objective.strip() or any(not value.strip() for field in fields for value in field):
+            raise ValueError("specification intake values must be non-blank")
         return self
 
 
@@ -506,6 +544,20 @@ class PlanningRunSubmission(BaseModel):
     )
 
 
+class WorkflowRunSubmission(BaseModel):
+    """The deliberately small product-manager request for a governed run.
+
+    Repository, specification-set, policy, model tier, MCP grants, and hard
+    execution ceilings are selected by the platform-owned project binding.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    specification: SpecificationIntake
+    priority: str = Field(default="normal", min_length=1, max_length=32)
+    dry_run: bool = False
+
+
 class ArtifactReference(BaseModel):
     """Immutable object-store identity for a supervisor artifact."""
 
@@ -562,6 +614,281 @@ class ArtifactSchema(BaseModel):
         pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$",
         description="Compatible artifact schema version",
     )
+
+
+class WorkflowConfigurationState(StrEnum):
+    """Lifecycle for an immutable platform-controlled configuration version."""
+
+    DRAFT = "draft"
+    VALIDATED = "validated"
+    PUBLISHED = "published"
+    DEPRECATED = "deprecated"
+    REVOKED = "revoked"
+
+
+class ModelTier(StrEnum):
+    """Logical model tier selected by workflow policy, never by product intake."""
+
+    FAST = "fast"
+    BALANCED = "balanced"
+    COMPLEX = "complex"
+
+
+class WorkflowRequirementRelationship(StrEnum):
+    """A phase's bounded relationship to one accepted requirement."""
+
+    OWNS = "owns"
+    SUPPORTS = "supports"
+    VERIFIES = "verifies"
+
+
+class RequirementAssignment(BaseModel):
+    """Traceable requirement work without conflating delivery and verification."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requirement_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    relationship: WorkflowRequirementRelationship
+    acceptance_criterion_ids: list[str] = Field(default_factory=list, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_unique_criteria(self) -> "RequirementAssignment":
+        if len(set(self.acceptance_criterion_ids)) != len(self.acceptance_criterion_ids):
+            raise ValueError("requirement assignment acceptance criterion IDs must be unique")
+        return self
+
+
+class WorkflowGateDefinition(BaseModel):
+    """A mandatory, artifact-bound human decision in a template."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    approver_roles: list[str] = Field(min_length=1, max_length=16)
+    required_artifacts: list[ArtifactSchema] = Field(min_length=1, max_length=16)
+    permitted_decisions: list[str] = Field(min_length=1, max_length=8)
+    separation_of_duties: bool = True
+
+    @model_validator(mode="after")
+    def validate_gate_shape(self) -> "WorkflowGateDefinition":
+        if len(set(self.approver_roles)) != len(self.approver_roles):
+            raise ValueError("workflow gate approver roles must be unique")
+        if len(set(self.permitted_decisions)) != len(self.permitted_decisions):
+            raise ValueError("workflow gate decisions must be unique")
+        return self
+
+
+class WorkflowPhaseActivation(BaseModel):
+    """A deliberately small, non-executable condition for an optional phase."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = Field(pattern=r"^(always|intake_constraint)$")
+    value: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_activation_shape(self) -> "WorkflowPhaseActivation":
+        if (self.kind == "intake_constraint") != (self.value is not None):
+            raise ValueError("intake_constraint activation requires a value; always activation does not")
+        return self
+
+
+class WorkflowPhaseDefinition(BaseModel):
+    """A declarative phase that can be selected only by a resolved workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    kind: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    agent_role: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    depends_on: list[str] = Field(default_factory=list, max_length=64)
+    permitted_tiers: list[ModelTier] = Field(min_length=1, max_length=3)
+    input_schemas: list[ArtifactSchema] = Field(default_factory=list, max_length=32)
+    output_schemas: list[ArtifactSchema] = Field(default_factory=list, max_length=32)
+    capability_profile_refs: list[str] = Field(default_factory=list, max_length=16)
+    activation: WorkflowPhaseActivation | None = None
+    opt_in: bool = False
+
+    @model_validator(mode="after")
+    def validate_phase_shape(self) -> "WorkflowPhaseDefinition":
+        if self.id in self.depends_on or len(set(self.depends_on)) != len(self.depends_on):
+            raise ValueError("workflow phase dependencies must be unique and cannot include the phase itself")
+        if len(set(self.permitted_tiers)) != len(self.permitted_tiers):
+            raise ValueError("workflow phase model tiers must be unique")
+        if len(set(self.capability_profile_refs)) != len(self.capability_profile_refs):
+            raise ValueError("workflow phase capability profile references must be unique")
+        if self.opt_in and self.activation is None:
+            raise ValueError("optional workflow phases require a typed activation condition")
+        return self
+
+
+class WorkflowTemplate(BaseModel):
+    """Published workflow graph with a required immutable default policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1, le=1)
+    id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    version: str = Field(min_length=1, max_length=32, pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$")
+    default_policy_ref: str = Field(min_length=1, max_length=192)
+    phases: list[WorkflowPhaseDefinition] = Field(min_length=1, max_length=128)
+    required_gates: list[WorkflowGateDefinition] = Field(min_length=3, max_length=32)
+    capability_profiles: list["CapabilityProfile"] = Field(default_factory=list, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_template_shape(self) -> "WorkflowTemplate":
+        if len({phase.id for phase in self.phases}) != len(self.phases):
+            raise ValueError("workflow template phase IDs must be unique")
+        if len({gate.id for gate in self.required_gates}) != len(self.required_gates):
+            raise ValueError("workflow template gate IDs must be unique")
+        required = {"product_specification_review", "plan_scope_review", "delivery_review"}
+        if not required.issubset({gate.id for gate in self.required_gates}):
+            raise ValueError("workflow template must define product, plan, and delivery review gates")
+        profile_refs = {f"{profile.id}@{profile.version}": profile for profile in self.capability_profiles}
+        if len(profile_refs) != len(self.capability_profiles):
+            raise ValueError("workflow template capability profile references must be unique")
+        for phase in self.phases:
+            for reference in phase.capability_profile_refs:
+                profile = profile_refs.get(reference)
+                if profile is None or profile.role != phase.agent_role:
+                    raise ValueError("workflow phase must reference a compatible capability profile")
+        return self
+
+
+class WorkflowPolicy(BaseModel):
+    """Platform-controlled limits and mandatory phase/gate rules for a template."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1, le=1)
+    id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    version: str = Field(min_length=1, max_length=32, pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$")
+    project_ids: list[str] = Field(min_length=1, max_length=32)
+    max_constraints: PlanConstraints
+    model_tier_profiles: list["ModelTierProfile"] = Field(
+        min_length=3,
+        max_length=3,
+        description="Published fast, balanced, and complex model ceilings for this policy",
+    )
+    mandatory_phase_ids: list[str] = Field(default_factory=list, max_length=128)
+    required_gate_ids: list[str] = Field(default_factory=list, max_length=32)
+    enforce_separation_of_duties: bool = True
+
+    @model_validator(mode="after")
+    def validate_policy_shape(self) -> "WorkflowPolicy":
+        if len(set(self.project_ids)) != len(self.project_ids):
+            raise ValueError("workflow policy project IDs must be unique")
+        if len(set(self.mandatory_phase_ids)) != len(self.mandatory_phase_ids):
+            raise ValueError("workflow policy mandatory phase IDs must be unique")
+        if len(set(self.required_gate_ids)) != len(self.required_gate_ids):
+            raise ValueError("workflow policy required gate IDs must be unique")
+        if {profile.tier for profile in self.model_tier_profiles} != set(ModelTier):
+            raise ValueError("workflow policy must define fast, balanced, and complex model tier profiles")
+        if any(
+            profile.max_budget_usd > self.max_constraints.max_cost_usd
+            or profile.max_turns_per_phase > self.max_constraints.max_turns_per_phase
+            for profile in self.model_tier_profiles
+        ):
+            raise ValueError("workflow model tier profile exceeds policy constraints")
+        return self
+
+
+class ModelTierProfile(BaseModel):
+    """Non-secret platform mapping from a logical tier to permitted model ceilings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    version: str = Field(min_length=1, max_length=32, pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$")
+    tier: ModelTier
+    model_alias: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    max_budget_usd: float = Field(gt=0)
+    max_turns_per_phase: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_finite_budget(self) -> "ModelTierProfile":
+        if not isfinite(self.max_budget_usd):
+            raise ValueError("model tier profile budget must be finite")
+        return self
+
+
+class CapabilityProfile(BaseModel):
+    """A named narrowing profile over registered agent/MCP authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    version: str = Field(min_length=1, max_length=32, pattern=r"^[0-9]+(?:\.[0-9]+){0,2}$")
+    role: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_-]{0,127}$")
+    allowed_mcp_tools: list[str] = Field(default_factory=list, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_explicit_tools(self) -> "CapabilityProfile":
+        if any(not tool or tool == "*" for tool in self.allowed_mcp_tools) or len(set(self.allowed_mcp_tools)) != len(
+            self.allowed_mcp_tools
+        ):
+            raise ValueError("capability profile tools must be unique explicit names")
+        return self
+
+
+class ProjectWorkflowBinding(BaseModel):
+    """Platform-owned selection of the only template a project may use by default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=128)
+    template_ref: str = Field(min_length=1, max_length=192)
+    policy_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=192,
+        description="Optional platform override; otherwise the template default is mandatory",
+    )
+    target_repos: list[str] = Field(min_length=1, max_length=10)
+    spec_set: str = Field(min_length=1, max_length=256)
+    constraints: PlanConstraints = Field(default_factory=PlanConstraints)
+
+
+class ResolvedWorkflowPhase(BaseModel):
+    """One active or skipped phase with the effective platform-selected tier."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    active: bool
+    activation_reason: str = Field(min_length=1, max_length=1_000)
+    agent_role: str
+    model_tier: ModelTier
+    capability_profile_refs: list[str] = Field(default_factory=list)
+
+
+class ResolvedWorkflow(BaseModel):
+    """Immutable execution contract compiled from policy, template, and run artifacts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1, le=1)
+    run_id: str = Field(min_length=1, max_length=64)
+    project_id: str = Field(min_length=1, max_length=128)
+    template_ref: str = Field(min_length=1, max_length=192)
+    policy_ref: str = Field(min_length=1, max_length=192)
+    model_tier_profile_refs: list[str] = Field(default_factory=list)
+    capability_profile_refs: list[str] = Field(default_factory=list)
+    source_artifact: ArtifactReference
+    product_specification_artifact: ArtifactReference
+    specification_evaluation_artifact: ArtifactReference
+    plan_artifact: ArtifactReference
+    gates: list[WorkflowGateDefinition] = Field(min_length=3)
+    phases: list[ResolvedWorkflowPhase] = Field(min_length=1)
+    effective_constraints: PlanConstraints
+
+    @model_validator(mode="after")
+    def validate_resolution_shape(self) -> "ResolvedWorkflow":
+        if len({gate.id for gate in self.gates}) != len(self.gates):
+            raise ValueError("resolved workflow gate IDs must be unique")
+        if len({phase.id for phase in self.phases}) != len(self.phases):
+            raise ValueError("resolved workflow phase IDs must be unique")
+        return self
 
 
 class ToolGrant(BaseModel):
@@ -1692,6 +2019,25 @@ class RunEnvelope(BaseModel):
     registry_resolutions: list[RegistrationReference] = Field(
         default_factory=list,
         description="Pinned non-secret registry releases selected for this run",
+    )
+    workflow_template_ref: str | None = Field(
+        default=None,
+        max_length=192,
+        description="Pinned platform workflow template selected at run admission",
+    )
+    workflow_policy_ref: str | None = Field(
+        default=None,
+        max_length=192,
+        description="Pinned platform workflow policy selected at run admission",
+    )
+    workflow_resolution_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Digest of the immutable resolved workflow persisted by the API control plane",
+    )
+    workflow_required_gate_ids: list[str] = Field(
+        default_factory=list,
+        description="Mandatory gate identities copied from the immutable resolved workflow",
     )
     traceparent: str | None = Field(default=None, max_length=512)
     tracestate: str | None = Field(default=None, max_length=4096)

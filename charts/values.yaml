@@ -533,7 +533,11 @@ api:
   ## @param api.auth.oidc.audience Expected production OIDC audience
   ## @param api.auth.oidc.jwksUrl JWKS endpoint used to validate production bearer tokens
   ## @param api.auth.oidc.roleClaim Claim containing operator roles
-  ## @param api.auth.oidc.approvalRole Required role for plan approval
+  ## @param api.auth.oidc.productManagerRole Required role for submitting the single structured product specification
+  ## @param api.auth.oidc.approvalRole Backward-compatible role for legacy approval operations
+  ## @param api.auth.oidc.workflowApproverRole Required role for workflow gate approvals
+  ## @param api.auth.oidc.policyEditorRole Required role for project workflow binding changes
+  ## @param api.auth.oidc.policyPublisherRole Required role for immutable template and policy publication
   ## @param api.auth.oidc.projectClaim Claim containing authorized project IDs
   ## @param api.auth.oidc.viewerRole Required role for Workbench reads
   ## @param api.auth.oidc.adminRole Role that may read and approve within its claimed projects
@@ -546,13 +550,17 @@ api:
       tokenKey: token
       subject: local-operator
       projects: [default]
-      roles: [cogito-viewer, cogito-approver]
+      roles: [cogito-viewer, cogito-approver, cogito-product-manager, cogito-workflow-approver, cogito-policy-editor, cogito-policy-publisher]
     oidc:
       issuer: ""
       audience: ""
       jwksUrl: ""
       roleClaim: roles
+      productManagerRole: cogito-product-manager
       approvalRole: cogito-approver
+      workflowApproverRole: cogito-workflow-approver
+      policyEditorRole: cogito-policy-editor
+      policyPublisherRole: cogito-policy-publisher
       projectClaim: cogito_projects
       viewerRole: cogito-viewer
       adminRole: cogito-admin
