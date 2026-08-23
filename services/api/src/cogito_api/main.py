@@ -621,6 +621,7 @@ def create_app(
                         target_repos=record.target_repos,
                         spec_set=record.spec_set,
                         constraints=record.constraints,
+                        requirement_ids=tuple(selected_specification.requirement_ids),
                     ),
                     planner_resolution.gateway,
                 )
