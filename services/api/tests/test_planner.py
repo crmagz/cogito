@@ -84,6 +84,36 @@ async def test_litellm_planner_retries_an_invalid_requirement_partition(valid_pl
     assert "prior candidate was rejected" in requests[1]["messages"][2]["content"]  # type: ignore[index]
 
 
+@pytest.mark.parametrize("invalid_phase_ids", [["functional-1", "functional-1"], []])
+async def test_litellm_planner_retries_requirement_partition_errors_rejected_by_the_schema(
+    valid_plan: dict, invalid_phase_ids: list[str]
+) -> None:
+    invalid = json.loads(json.dumps(valid_plan))
+    invalid["phases"][0]["requirement_ids"] = invalid_phase_ids
+    requests = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        candidate = invalid if requests == 1 else valid_plan
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(candidate)}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
+    plan = await planner.generate(
+        PlanningContext(
+            initial_specification="Add a rate limiter.",
+            target_repos=valid_plan["target_repos"],
+            spec_set=valid_plan["spec_set"],
+            constraints=AiPlan.model_validate(valid_plan).constraints,
+            requirement_ids=("functional-1", "functional-2"),
+        ),
+        planner_gateway(),
+    )
+
+    assert plan == AiPlan.model_validate(valid_plan)
+    assert requests == 2
+
+
 async def test_litellm_planner_stops_after_one_requirement_partition_retry(valid_plan: dict) -> None:
     duplicate = json.loads(json.dumps(valid_plan))
     duplicate["phases"][1]["requirement_ids"] = ["functional-1"]
