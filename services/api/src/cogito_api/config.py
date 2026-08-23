@@ -8,6 +8,9 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 
+_MAX_GITHUB_APP_INSTALLATION_TOKEN_WALL_CLOCK_MINUTES = 50
+
+
 @dataclass(frozen=True)
 class Settings:
     minio_endpoint: str
@@ -93,6 +96,11 @@ def load_settings() -> Settings:
         or not all(isinstance(host, str) and host.strip() for host in allowed_hosts)
     ):
         raise ValueError("COGITO_ALLOWED_GIT_HOSTS must be a non-empty JSON string array")
+    max_wall_clock_minutes = int(os.environ.get("COGITO_MAX_WALL_CLOCK_MINUTES", "50"))
+    if max_wall_clock_minutes > _MAX_GITHUB_APP_INSTALLATION_TOKEN_WALL_CLOCK_MINUTES:
+        raise ValueError(
+            "COGITO_MAX_WALL_CLOCK_MINUTES must not exceed 50 minutes when GitHub App workspace credentials are used"
+        )
     static_projects = _json_string_array("COGITO_AUTH_STATIC_PROJECTS", '["default"]')
     static_roles = _json_string_array("COGITO_AUTH_STATIC_ROLES", '["cogito-viewer", "cogito-approver"]')
     mcp_target_repository_scopes = _mcp_target_repository_scopes("COGITO_MCP_TARGET_REPOSITORY_SCOPES")
@@ -104,7 +112,7 @@ def load_settings() -> Settings:
         plans_bucket=os.environ.get("MINIO_PLANS_BUCKET", "plans"),
         plan_snapshots_bucket=os.environ.get("MINIO_PLAN_SNAPSHOTS_BUCKET", "plan-snapshots"),
         plan_snapshot_retention_days=int(os.environ.get("MINIO_PLAN_SNAPSHOT_RETENTION_DAYS", "30")),
-        max_wall_clock_minutes=int(os.environ.get("COGITO_MAX_WALL_CLOCK_MINUTES", "50")),
+        max_wall_clock_minutes=max_wall_clock_minutes,
         max_cost_usd=float(os.environ.get("COGITO_MAX_COST_USD", "50")),
         max_review_rounds=int(os.environ.get("COGITO_MAX_REVIEW_ROUNDS", "10")),
         max_turns_per_phase=int(os.environ.get("COGITO_MAX_TURNS_PER_PHASE", "500")),
