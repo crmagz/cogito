@@ -5,6 +5,15 @@ import pytest
 from cogito_api.config import load_settings
 
 
+def test_github_app_execution_limit_rejects_unsafe_wall_clock_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COGITO_MAX_WALL_CLOCK_MINUTES", "240")
+
+    with pytest.raises(ValueError, match="must not exceed 50 minutes"):
+        load_settings()
+
+
 def test_production_rejects_static_operator_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COGITO_DEPLOYMENT_MODE", "production")
     monkeypatch.setenv("COGITO_AUTH_MODE", "static")
