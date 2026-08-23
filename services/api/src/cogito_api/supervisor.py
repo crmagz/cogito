@@ -509,6 +509,8 @@ class SupervisorStore(Protocol):
         self, run_id: str, claim_id: str, *, retry_seconds: int
     ) -> None: ...
 
+    async def renew_planning_generation_delivery(self, run_id: str, claim_id: str) -> bool: ...
+
     async def record_planning_agent_terminal(
         self, run_id: str, claim_id: str, *, succeeded: bool, error_summary: str | None = None
     ) -> None: ...
@@ -805,6 +807,23 @@ class PostgresSupervisorStore:
                 ),
                 {"run_id": run_id, "claim_id": claim_id, "retry_seconds": retry_seconds},
             )
+
+    async def renew_planning_generation_delivery(self, run_id: str, claim_id: str) -> bool:
+        """Extend an active planner lease while its bounded attempt is still running."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE agent_runs
+                    SET planning_generation_claimed_at = now(), updated_at = now(), last_heartbeat_at = now()
+                    WHERE run_id = :run_id AND planning_generation_claim = :claim_id AND status = 'RUNNING'
+                    RETURNING run_id
+                    """
+                ),
+                {"run_id": run_id, "claim_id": claim_id},
+            )
+            return result.scalar_one_or_none() is not None
 
     async def record_planning_agent_terminal(
         self, run_id: str, claim_id: str, *, succeeded: bool, error_summary: str | None = None
@@ -1974,6 +1993,7 @@ class PostgresSupervisorStore:
                       AND run.product_specification_revision = :revision
                       AND run.product_specification_artifact_sha256 = :artifact_sha256
                       AND run.specification_evaluation_artifact_sha256 IS NOT NULL
+                      AND run.specification_evaluation_readiness IN ('ready', 'waived')
                     RETURNING run.run_id, run.status, run.source_artifact_ref, run.source_artifact_sha256,
                               run.target_repos, run.spec_set, run.constraints, run.priority, run.submitted_at, run.submitted_by,
                               run.plan_artifact_ref, run.plan_artifact_sha256, run.planner_model, run.active_workflow_id, run.plan_revision,
@@ -3137,7 +3157,8 @@ class PostgresSupervisorStore:
                            specification_evaluation_readiness, selected_specification_evaluation_artifact_ref,
                            selected_specification_evaluation_artifact_sha256
                     FROM supervisor_runs
-                    WHERE status IN ('implementing', 'finalizing') AND active_workflow_id IS NOT NULL
+                    WHERE status IN ('awaiting_plan_approval', 'implementing', 'finalizing')
+                      AND active_workflow_id IS NOT NULL
                     ORDER BY submitted_at
                     LIMIT :limit
                     """
@@ -3179,6 +3200,7 @@ class PostgresSupervisorStore:
             )
             row = result.mappings().one_or_none()
             if row is None or row["planning_status"] not in {
+                PlanningRunStatus.AWAITING_PLAN_APPROVAL.value,
                 PlanningRunStatus.IMPLEMENTING.value,
                 PlanningRunStatus.FINALIZING.value,
             }:

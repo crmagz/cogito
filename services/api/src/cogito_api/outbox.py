@@ -21,10 +21,14 @@ class PlanningGenerationDispatcher:
         store: SupervisorStore,
         deliver: Callable[[PlanningGenerationDelivery], Awaitable[bool]],
         poll_seconds: float = 1.0,
+        lease_seconds: int = 90,
+        lease_renewal_seconds: float = 20.0,
     ) -> None:
         self._store = store
         self._deliver = deliver
         self._poll_seconds = poll_seconds
+        self._lease_seconds = lease_seconds
+        self._lease_renewal_seconds = lease_renewal_seconds
         self._active: dict[str, asyncio.Task[bool]] = {}
         self._cancelled: set[str] = set()
 
@@ -32,8 +36,13 @@ class PlanningGenerationDispatcher:
         """Deliver a bounded planning batch and release transient failures."""
 
         delivered = 0
-        for item in await self._store.claim_planning_generation_deliveries(limit=limit, lease_seconds=60):
+        for item in await self._store.claim_planning_generation_deliveries(
+            limit=limit, lease_seconds=self._lease_seconds
+        ):
             task = asyncio.create_task(self._deliver(item), name=f"planning-generation:{item.run_id}")
+            lease_renewer = asyncio.create_task(
+                self._renew_lease(item), name=f"planning-generation-lease:{item.run_id}"
+            )
             self._active[item.run_id] = task
             try:
                 complete = await task
@@ -47,6 +56,9 @@ class PlanningGenerationDispatcher:
                 _LOGGER.warning("planning generation delivery failed", extra={"run_id": item.run_id}, exc_info=False)
             finally:
                 self._active.pop(item.run_id, None)
+                lease_renewer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await lease_renewer
             if complete:
                 delivered += 1
             else:
@@ -54,6 +66,19 @@ class PlanningGenerationDispatcher:
                     item.run_id, item.claim_id, retry_seconds=_retry_delay(item.attempt_count)
                 )
         return delivered
+
+    async def _renew_lease(self, item: PlanningGenerationDelivery) -> None:
+        """Keep an owned planner attempt exclusive through model and persistence latency."""
+
+        while True:
+            await asyncio.sleep(self._lease_renewal_seconds)
+            try:
+                renewed = await self._store.renew_planning_generation_delivery(item.run_id, item.claim_id)
+            except Exception:
+                _LOGGER.warning("planning generation lease renewal failed", extra={"run_id": item.run_id}, exc_info=False)
+                continue
+            if not renewed:
+                return
 
     def cancel(self, run_id: str) -> None:
         """Cancel a local planner request after its durable run is cancelled."""
