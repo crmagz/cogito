@@ -60,6 +60,9 @@ from .models import (
     RunSubmission,
     Violation,
     WorkflowPolicy,
+    WorkflowConfigurationState,
+    WorkflowGateDecisionRequest,
+    WorkflowAdmissionSnapshot,
     WorkflowRunSubmission,
     WorkflowTemplate,
     WorkbenchArtifactKind,
@@ -136,7 +139,6 @@ from .workflow_control import (
     WorkflowConfigurationError,
     WorkflowConfigurationStore,
     configuration_ref,
-    canonical_configuration_bytes,
     validate_admission,
 )
 
@@ -346,6 +348,134 @@ def create_app(
             raise WorkflowConfigurationError("workflow policy is not published")
         return validate_admission(binding, template, policy)
 
+    async def enforce_resolved_gate_separation(
+        record: PlanningRunRecord, principal: Principal, gate_id: str
+    ) -> None:
+        """Apply the template's actor-separation rule to governed runs only."""
+
+        resolution = await workflow_configuration_store.get_run_resolution(record.run_id)
+        admission = await workflow_configuration_store.get_run_admission(record.run_id) if resolution is None else None
+        if resolution is None and admission is None:
+            return  # Legacy planning runs retain their historic approval semantics.
+        gate = next((item for item in (resolution or admission).gates if item.id == gate_id), None)
+        if gate is None:
+            raise HTTPException(status_code=409, detail="resolved workflow does not authorize this gate")
+        if gate.separation_of_duties and record.submitted_by == principal.subject:
+            raise HTTPException(status_code=403, detail="workflow policy requires a different actor for this gate")
+
+    async def require_resolved_gate(
+        record: PlanningRunRecord, principal: Principal, gate_id: str, decision: str
+    ) -> None:
+        """Authorize a decision against the immutable gate, not a route name."""
+
+        resolution = await workflow_configuration_store.get_run_resolution(record.run_id)
+        admission = await workflow_configuration_store.get_run_admission(record.run_id) if resolution is None else None
+        if resolution is None and admission is None:
+            raise HTTPException(status_code=409, detail="resolved workflow is not available for this run")
+        gate = next((item for item in (resolution or admission).gates if item.id == gate_id), None)
+        if gate is None:
+            raise HTTPException(status_code=404, detail="workflow gate is not defined for this run")
+        role_aliases = {"workflow_approver": settings.auth_oidc_workflow_approver_role}
+        authorized_roles = {role_aliases.get(role, role) for role in gate.approver_roles}
+        if not authorized_roles.intersection(principal.roles):
+            raise HTTPException(status_code=403, detail="operator does not hold a role authorized for this workflow gate")
+        if decision not in gate.permitted_decisions:
+            raise HTTPException(status_code=409, detail="decision is not permitted by this workflow gate")
+        await enforce_resolved_gate_separation(record, principal, gate_id)
+
+    async def submit_resolved_plan_gate(
+        record: PlanningRunRecord,
+        principal: Principal,
+        request_body: PlanApprovalRequest,
+        idempotency_key: str,
+    ) -> PlanApprovalResponse:
+        """Record the plan adapter behind a resolved schema gate."""
+
+        if await workflow_configuration_store.get_run_resolution(record.run_id) is not None:
+            await require_resolved_gate(record, principal, "plan_scope_review", request_body.decision.value)
+        else:
+            await enforce_resolved_gate_separation(record, principal, "plan_scope_review")
+        if (
+            request_body.decision is PlanApprovalDecision.APPROVE
+            and record.constraints.max_wall_clock_minutes > settings.max_wall_clock_minutes
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "plan must be cancelled and resubmitted: its approved execution duration exceeds "
+                    "the current GitHub App workspace credential limit"
+                ),
+            )
+        request_sha256 = sha256(
+            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        try:
+            recorded = await supervisor_store.record_plan_approval(
+                run_id=record.run_id,
+                artifact_sha256=request_body.artifact_sha256,
+                decision=request_body.decision,
+                actor_id=principal.subject,
+                comment=request_body.comment,
+                idempotency_key=idempotency_key,
+                request_sha256=request_sha256,
+                mcp_selection=request_body.mcp_selection,
+            )
+        except ApprovalConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        delivered = recorded.delivered or recorded.decision_id in await dispatcher.deliver_once(
+            decision_id=recorded.decision_id, limit=1
+        )
+        return PlanApprovalResponse(
+            decision_id=recorded.decision_id,
+            run_id=recorded.run_id,
+            decision=recorded.decision,
+            artifact_sha256=recorded.artifact_sha256,
+            actor_id=recorded.actor_id,
+            delivered=delivered,
+            created_at=recorded.created_at,
+            mcp_selection=recorded.mcp_selection,
+        )
+
+    async def submit_resolved_delivery_gate(
+        record: PlanningRunRecord,
+        principal: Principal,
+        request_body: ImplementationApprovalRequest,
+        idempotency_key: str,
+    ) -> ImplementationApprovalResponse:
+        """Record the delivery adapter behind a resolved schema gate."""
+
+        if await workflow_configuration_store.get_run_resolution(record.run_id) is not None:
+            await require_resolved_gate(record, principal, "delivery_review", request_body.decision.value)
+        else:
+            await enforce_resolved_gate_separation(record, principal, "delivery_review")
+        request_sha256 = sha256(
+            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        try:
+            recorded = await supervisor_store.record_implementation_approval(
+                run_id=record.run_id,
+                artifact_sha256=request_body.artifact_sha256,
+                decision=request_body.decision,
+                actor_id=principal.subject,
+                comment=request_body.comment,
+                idempotency_key=idempotency_key,
+                request_sha256=request_sha256,
+            )
+        except ApprovalConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        delivered = recorded.delivered or recorded.decision_id in await implementation_dispatcher.deliver_once(
+            decision_id=recorded.decision_id, limit=1
+        )
+        return ImplementationApprovalResponse(
+            decision_id=recorded.decision_id,
+            run_id=recorded.run_id,
+            decision=recorded.decision,
+            artifact_sha256=recorded.artifact_sha256,
+            actor_id=recorded.actor_id,
+            delivered=delivered,
+            created_at=recorded.created_at,
+        )
+
     async def resolve_roles(run_id: str, roles: list[str], project_id: str, target_repositories: list[str] | None = None):
         await bootstrap_registry()
         try:
@@ -462,6 +592,106 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(error)) from error
         return JSONResponse(status_code=status.HTTP_201_CREATED, content=policy.model_dump(mode="json"))
 
+    async def transition_workflow_configuration(
+        kind: str,
+        reference: str,
+        target: WorkflowConfigurationState,
+        principal: Principal,
+    ) -> JSONResponse:
+        """Advance an immutable config version through a small audited lifecycle."""
+
+        try:
+            if kind == "template":
+                current = await workflow_configuration_store.get_template_configuration(reference)
+                if current is None:
+                    raise WorkflowConfigurationError("workflow template version does not exist")
+                payload, _ = current
+                if target is WorkflowConfigurationState.PUBLISHED and await workflow_configuration_store.get_policy(
+                    payload.default_policy_ref
+                ) is None:
+                    raise WorkflowConfigurationError("workflow template default policy is not published")
+                state = await workflow_configuration_store.transition_template(reference, target, actor=principal.subject)
+            else:
+                current = await workflow_configuration_store.get_policy_configuration(reference)
+                if current is None:
+                    raise WorkflowConfigurationError("workflow policy version does not exist")
+                state = await workflow_configuration_store.transition_policy(reference, target, actor=principal.subject)
+        except WorkflowConfigurationError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return JSONResponse(content={"reference": reference, "kind": kind, "state": state.value})
+
+    @app.post("/api/v1/workflow-templates/drafts")
+    async def create_workflow_template_draft(
+        template: WorkflowTemplate, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_policy_editor(principal)
+        try:
+            await workflow_configuration_store.create_template_draft(template, actor=principal.subject)
+        except WorkflowConfigurationError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return JSONResponse(status_code=status.HTTP_201_CREATED, content={"reference": f"{template.id}@{template.version}", "state": "draft"})
+
+    @app.post("/api/v1/workflow-policies/drafts")
+    async def create_workflow_policy_draft(
+        policy: WorkflowPolicy, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_policy_editor(principal)
+        try:
+            await workflow_configuration_store.create_policy_draft(policy, actor=principal.subject)
+        except WorkflowConfigurationError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return JSONResponse(status_code=status.HTTP_201_CREATED, content={"reference": f"{policy.id}@{policy.version}", "state": "draft"})
+
+    @app.post("/api/v1/workflow-templates/{reference}/validate")
+    async def validate_workflow_template(
+        reference: str, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_policy_editor(principal)
+        return await transition_workflow_configuration("template", reference, WorkflowConfigurationState.VALIDATED, principal)
+
+    @app.post("/api/v1/workflow-policies/{reference}/validate")
+    async def validate_workflow_policy(
+        reference: str, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_policy_editor(principal)
+        return await transition_workflow_configuration("policy", reference, WorkflowConfigurationState.VALIDATED, principal)
+
+    @app.post("/api/v1/workflow-templates/{reference}/publish")
+    async def publish_workflow_template_draft(
+        reference: str, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_policy_publisher(principal)
+        return await transition_workflow_configuration("template", reference, WorkflowConfigurationState.PUBLISHED, principal)
+
+    @app.post("/api/v1/workflow-policies/{reference}/publish")
+    async def publish_workflow_policy_draft(
+        reference: str, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_policy_publisher(principal)
+        return await transition_workflow_configuration("policy", reference, WorkflowConfigurationState.PUBLISHED, principal)
+
+    @app.post("/api/v1/workflow-{kind}s/{reference}/{target}")
+    async def retire_workflow_configuration(
+        kind: str,
+        reference: str,
+        target: WorkflowConfigurationState,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        if kind not in {"template", "policy"} or target not in {
+            WorkflowConfigurationState.DEPRECATED,
+            WorkflowConfigurationState.REVOKED,
+        }:
+            raise HTTPException(status_code=404, detail="workflow configuration lifecycle action is not available")
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_policy_publisher(principal)
+        return await transition_workflow_configuration(kind, reference, target, principal)
+
     @app.put("/api/v1/project-workflow-bindings/{project_id}")
     async def set_project_workflow_binding(
         project_id: str,
@@ -571,6 +801,19 @@ def create_app(
             submitted_by=principal.subject, project_id=project_id,
         )
         await supervisor_store.create_planning_run(record)
+        try:
+            await workflow_configuration_store.put_run_admission(
+                WorkflowAdmissionSnapshot(
+                    run_id=run_id,
+                    project_id=project_id,
+                    template_ref=admission.binding.template_ref,
+                    policy_ref=admission.binding.policy_ref or admission.template.default_policy_ref,
+                    gates=admission.template.required_gates,
+                    effective_constraints=constraints,
+                )
+            )
+        except WorkflowConfigurationError as error:
+            raise HTTPException(status_code=503, detail="workflow admission storage is temporarily unavailable") from error
         telemetry.transition(AgentRunStatus.QUEUED.value, "planner")
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=_planning_run_response(record).model_dump(mode="json"))
 
@@ -888,6 +1131,7 @@ def create_app(
                 updated.target_repos,
             )
             resolved_workflow = None
+            resolved_workflow_artifact = None
             try:
                 admission = await resolve_workflow_admission(updated.project_id or settings.workbench_default_project_id)
             except WorkflowConfigurationError:
@@ -895,6 +1139,21 @@ def create_app(
                 # New product-manager submissions cannot reach this point without
                 # a project binding, so they always receive a resolved contract.
                 admission = None
+            pinned_admission = await workflow_configuration_store.get_run_admission(updated.run_id)
+            if pinned_admission is not None:
+                if admission is None:
+                    raise HTTPException(status_code=409, detail="the run's pinned workflow admission is no longer available")
+                actual_policy_ref = admission.binding.policy_ref or admission.template.default_policy_ref
+                if (
+                    admission.binding.template_ref != pinned_admission.template_ref
+                    or actual_policy_ref != pinned_admission.policy_ref
+                    or admission.template.required_gates != pinned_admission.gates
+                    or updated.constraints != pinned_admission.effective_constraints
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="project workflow configuration changed after submission; resubmit to use the new policy",
+                    )
             if admission is not None:
                 active_phases = []
                 tier_profiles = {profile.tier: profile for profile in admission.policy.model_tier_profiles}
@@ -908,17 +1167,28 @@ def create_app(
                     for statement in selected_specification.constraints + selected_specification.risks
                 ).casefold()
                 for phase in admission.template.phases:
+                    gateway = gateway_by_role.get(phase.agent_role)
                     tier = next(
                         (
                             candidate
                             for candidate in (ModelTier.COMPLEX, ModelTier.BALANCED, ModelTier.FAST)
                             if candidate in phase.permitted_tiers
+                            and (
+                                gateway is None
+                                or (
+                                    gateway.model_alias == tier_profiles[candidate].model_alias
+                                    and gateway.max_budget_usd <= tier_profiles[candidate].max_budget_usd
+                                )
+                            )
                         ),
                         None,
                     )
-                    assert tier is not None
+                    if tier is None:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=f"no permitted model tier is compatible with the {phase.agent_role} gateway route",
+                        )
                     tier_profile = tier_profiles[tier]
-                    gateway = gateway_by_role.get(phase.agent_role)
                     active = not phase.opt_in or phase.id in admission.policy.mandatory_phase_ids
                     activation_reason = "mandatory platform workflow phase" if phase.id in admission.policy.mandatory_phase_ids else "enabled by template default"
                     if phase.opt_in and phase.id not in admission.policy.mandatory_phase_ids:
@@ -931,14 +1201,6 @@ def create_app(
                             "optional phase activation matched policy-approved product evidence"
                             if active
                             else "optional phase activation did not match product evidence"
-                        )
-                    if active and gateway is not None and (
-                        gateway.model_alias != tier_profile.model_alias
-                        or gateway.max_budget_usd > tier_profile.max_budget_usd
-                    ):
-                        raise HTTPException(
-                            status_code=503,
-                            detail=f"agent gateway route exceeds the resolved {tier.value} model tier profile",
                         )
                     active_phases.append(
                         ResolvedWorkflowPhase(
@@ -990,6 +1252,10 @@ def create_app(
                     phases=active_phases,
                     effective_constraints=updated.constraints,
                 )
+                try:
+                    resolved_workflow_artifact = store.put_resolved_workflow(updated.run_id, resolved_workflow)
+                except PlanStoreUnavailableError as error:
+                    raise HTTPException(status_code=503, detail="resolved workflow storage is temporarily unavailable") from error
                 await workflow_configuration_store.put_run_resolution(resolved_workflow)
             await starter.start_run(
                 RunEnvelope(
@@ -1010,9 +1276,8 @@ def create_app(
                     registry_resolutions=resolutions,
                     workflow_template_ref=resolved_workflow.template_ref if resolved_workflow else None,
                     workflow_policy_ref=resolved_workflow.policy_ref if resolved_workflow else None,
-                    workflow_resolution_sha256=(
-                        sha256(canonical_configuration_bytes(resolved_workflow)).hexdigest() if resolved_workflow else None
-                    ),
+                    workflow_resolution_ref=resolved_workflow_artifact.ref if resolved_workflow_artifact else None,
+                    workflow_resolution_sha256=resolved_workflow_artifact.sha256 if resolved_workflow_artifact else None,
                     workflow_required_gate_ids=[gate.id for gate in resolved_workflow.gates] if resolved_workflow else [],
                     traceparent=carrier.get("traceparent"),
                     tracestate=carrier.get("tracestate"),
@@ -1117,6 +1382,11 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
+        if (
+            await workflow_configuration_store.get_run_resolution(record.run_id) is not None
+            or await workflow_configuration_store.get_run_admission(record.run_id) is not None
+        ):
+            await require_resolved_gate(record, principal, "product_specification_review", "approve")
         if record.status is not PlanningRunStatus.PLANNING:
             if (
                 record.selected_product_specification_artifact is not None
@@ -1291,47 +1561,7 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
-        if (
-            request_body.decision is PlanApprovalDecision.APPROVE
-            and record.constraints.max_wall_clock_minutes > settings.max_wall_clock_minutes
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "plan must be cancelled and resubmitted: its approved execution duration exceeds "
-                    "the current GitHub App workspace credential limit"
-                ),
-            )
-        request_sha256 = sha256(
-            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        try:
-            recorded = await supervisor_store.record_plan_approval(
-                run_id=run_id,
-                artifact_sha256=request_body.artifact_sha256,
-                decision=request_body.decision,
-                actor_id=principal.subject,
-                comment=request_body.comment,
-                idempotency_key=idempotency_key,
-                request_sha256=request_sha256,
-                mcp_selection=request_body.mcp_selection,
-            )
-        except ApprovalConflictError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-        delivered = recorded.delivered or recorded.decision_id in await dispatcher.deliver_once(
-            decision_id=recorded.decision_id,
-            limit=1,
-        )
-        response = PlanApprovalResponse(
-            decision_id=recorded.decision_id,
-            run_id=recorded.run_id,
-            decision=recorded.decision,
-            artifact_sha256=recorded.artifact_sha256,
-            actor_id=recorded.actor_id,
-            delivered=delivered,
-            created_at=recorded.created_at,
-            mcp_selection=recorded.mcp_selection,
-        )
+        response = await submit_resolved_plan_gate(record, principal, request_body, idempotency_key)
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
 
     @app.post("/api/v1/runs/{run_id}/approvals/implementation")
@@ -1351,34 +1581,78 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
-        request_sha256 = sha256(
-            json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        try:
-            recorded = await supervisor_store.record_implementation_approval(
-                run_id=run_id,
-                artifact_sha256=request_body.artifact_sha256,
-                decision=request_body.decision,
-                actor_id=principal.subject,
-                comment=request_body.comment,
-                idempotency_key=idempotency_key,
-                request_sha256=request_sha256,
-            )
-        except ApprovalConflictError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-        delivered = recorded.delivered or recorded.decision_id in await implementation_dispatcher.deliver_once(
-            decision_id=recorded.decision_id, limit=1
-        )
-        response = ImplementationApprovalResponse(
-            decision_id=recorded.decision_id,
-            run_id=recorded.run_id,
-            decision=recorded.decision,
-            artifact_sha256=recorded.artifact_sha256,
-            actor_id=recorded.actor_id,
-            delivered=delivered,
-            created_at=recorded.created_at,
-        )
+        response = await submit_resolved_delivery_gate(record, principal, request_body, idempotency_key)
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
+
+    @app.post("/api/v1/planning-runs/{run_id}/gates/{gate_id}")
+    async def decide_resolved_workflow_gate(
+        run_id: str,
+        gate_id: str,
+        request_body: WorkflowGateDecisionRequest,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """Submit a decision through the gate declared in the run contract.
+
+        The current built-in adapters deliberately cover the three mandatory
+        gates.  A template can declare additional gates, but it cannot make
+        them executable merely by naming a route: a corresponding runtime
+        adapter must be released with the worker.  Failing closed here avoids
+        silently bypassing a newly introduced policy gate.
+        """
+
+        if not idempotency_key or len(idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_workflow_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        await require_resolved_gate(record, principal, gate_id, request_body.decision)
+
+        if gate_id == "product_specification_review":
+            if request_body.artifact_revision is None:
+                raise HTTPException(status_code=422, detail="artifact_revision is required for the product specification gate")
+            return await accept_product_specification(
+                run_id,
+                ProductSpecificationAcceptanceRequest(
+                    revision=request_body.artifact_revision,
+                    artifact_sha256=request_body.artifact_sha256,
+                ),
+                authorization,
+                idempotency_key,
+            )
+        if gate_id == "plan_scope_review":
+            response = await submit_resolved_plan_gate(
+                record,
+                principal,
+                PlanApprovalRequest(
+                    decision=PlanApprovalDecision(request_body.decision),
+                    artifact_sha256=request_body.artifact_sha256,
+                    comment=request_body.comment,
+                    mcp_selection=request_body.mcp_selection,
+                ),
+                idempotency_key,
+            )
+            body = response.model_dump(mode="json")
+            body["gate_id"] = gate_id
+            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=body)
+        if gate_id == "delivery_review":
+            response = await submit_resolved_delivery_gate(
+                record,
+                principal,
+                ImplementationApprovalRequest(
+                    decision=ImplementationApprovalDecision(request_body.decision),
+                    artifact_sha256=request_body.artifact_sha256,
+                    comment=request_body.comment,
+                ),
+                idempotency_key,
+            )
+            body = response.model_dump(mode="json")
+            body["gate_id"] = gate_id
+            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=body)
+        raise HTTPException(status_code=409, detail="workflow gate has no released runtime adapter")
 
     @app.get("/api/v1/runs/{run_id}/status")
     async def get_run_status(run_id: str) -> dict:

@@ -18,6 +18,8 @@ from .models import ImplementationArtifact
 class RunStore(Protocol):
     def get_plan(self, plan_ref: str) -> dict: ...
 
+    def get_artifact(self, artifact_ref: str) -> dict: ...
+
     def get_status(self, run_id: str) -> dict | None: ...
 
     def put_status(self, run_id: str, status: dict) -> None: ...
@@ -71,6 +73,14 @@ class MinioRunStore:
             raise ValueError("plan reference does not target the configured immutable plan snapshot bucket")
         object_name = parsed.path.lstrip("/")
         return self._get_object(self._plan_snapshots_bucket, object_name)
+
+    def get_artifact(self, artifact_ref: str) -> dict:
+        """Read a non-status immutable JSON artifact from the snapshots bucket."""
+
+        parsed = urlparse(artifact_ref)
+        if parsed.scheme != "s3" or parsed.netloc != self._plan_snapshots_bucket:
+            raise ValueError("artifact reference does not target the configured immutable plan snapshot bucket")
+        return self._get_object(self._plan_snapshots_bucket, parsed.path.lstrip("/"))
 
     def get_status(self, run_id: str) -> dict | None:
         try:

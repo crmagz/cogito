@@ -397,3 +397,35 @@ The legacy `/api/v1/planning-runs` endpoint remains a migration path. It does
 not acquire a policy binding implicitly, so existing integrations preserve their
 historic behavior while new product-manager workflows always use the governed
 endpoint.
+
+### Implemented lifecycle and gate routing
+
+Platform configuration follows an explicit immutable lifecycle:
+
+```text
+draft -> validated -> published -> deprecated -> revoked
+```
+
+Only policy editors may create or validate drafts; only policy publishers may
+publish, deprecate, or revoke them. Every state transition is append-only and
+attributed in `workflow_configuration_events`. A binding can select only a
+published version.
+
+At product-manager submission Cogito writes a `WorkflowAdmissionSnapshot`. It
+pins the selected template, policy, gate definitions, and effective constraints
+before a product specification exists. That snapshot governs the first gate;
+the later `ResolvedWorkflow` must match it before the worker starts. A later
+project-binding edit therefore cannot alter an active submission's authority.
+
+All mandatory gates are available through one schema-addressed route:
+
+```text
+POST /api/v1/planning-runs/{run_id}/gates/{gate_id}
+```
+
+The API checks the gate ID, permitted decision, configured approver role,
+separation-of-duties rule, immutable artifact digest, and idempotency key. The
+product, plan, and delivery adapters then delegate to the existing durable
+supervisor/outbox transitions. Additional template gates fail closed until a
+corresponding runtime adapter is released; declaring a gate never creates an
+unreviewed bypass around the worker.

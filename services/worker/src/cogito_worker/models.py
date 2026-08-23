@@ -72,6 +72,7 @@ class RunEnvelope:
     registry_resolutions: list[RegistrationReference] = field(default_factory=list)
     workflow_template_ref: str | None = None
     workflow_policy_ref: str | None = None
+    workflow_resolution_ref: str | None = None
     workflow_resolution_sha256: str | None = None
     workflow_required_gate_ids: list[str] = field(default_factory=list)
     traceparent: str | None = None

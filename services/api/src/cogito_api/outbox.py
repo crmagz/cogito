@@ -119,7 +119,15 @@ class PlanApprovalOutboxDispatcher:
         )
         for item in pending:
             try:
-                accepted = await self._starter.submit_plan_approval(item.workflow_id, item.payload)
+                # New workers validate the resolved gate ID themselves. A
+                # legacy envelope has no resolved gate set and returns False,
+                # in which case the historic update remains the compatibility
+                # adapter during the rollout.
+                accepted = await self._starter.submit_workflow_gate(
+                    item.workflow_id, "plan_scope_review", item.payload
+                )
+                if not accepted:
+                    accepted = await self._starter.submit_plan_approval(item.workflow_id, item.payload)
             except Exception as error:
                 await self._store.release_plan_approval_delivery(
                     item.decision_id,
@@ -169,7 +177,11 @@ class ImplementationApprovalOutboxDispatcher:
         )
         for item in pending:
             try:
-                accepted = await self._starter.submit_implementation_approval(item.workflow_id, item.payload)
+                accepted = await self._starter.submit_workflow_gate(
+                    item.workflow_id, "delivery_review", item.payload
+                )
+                if not accepted:
+                    accepted = await self._starter.submit_implementation_approval(item.workflow_id, item.payload)
             except Exception as error:
                 await self._store.release_implementation_approval_delivery(
                     item.decision_id, retry_seconds=_retry_delay(item.attempt_count), error=_error_detail(error)

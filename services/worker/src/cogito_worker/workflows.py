@@ -65,6 +65,7 @@ class DeveloperRunWorkflow:
         self._processed_plan_decision_ids: set[str] = set()
         self._processed_implementation_decision_ids: set[str] = set()
         self._pinned_mcp_selection_keys: set[tuple[str, str, str, str, str, str, str]] = set()
+        self._resolved_gates: dict[str, dict[str, Any]] = {}
 
     @workflow.update
     async def submit_plan_approval(self, decision: dict[str, Any]) -> bool:
@@ -126,6 +127,25 @@ class DeveloperRunWorkflow:
         self._implementation_decision = decision
         return True
 
+    @workflow.update
+    async def submit_workflow_gate(self, gate_id: str, decision: dict[str, Any]) -> bool:
+        """Accept a decision through the gate identity pinned in the resolution.
+
+        Legacy updates remain available for legacy envelopes, but a
+        resolution-bound workflow verifies the gate's declared decisions
+        before routing to its registered Temporal transition adapter.
+        """
+
+        gate = self._resolved_gates.get(gate_id)
+        if gate is None or decision.get("decision") not in set(gate.get("permitted_decisions", [])):
+            return False
+        if gate_id == "plan_scope_review":
+            return self._accept_plan_approval(decision)
+        if gate_id == "delivery_review":
+            return await self.submit_implementation_approval(decision)
+        # Product review happens before this execution workflow is started.
+        return False
+
     @workflow.run
     async def run(self, envelope: RunEnvelope) -> RunResult:
         implementation_status_reported = False
@@ -143,6 +163,18 @@ class DeveloperRunWorkflow:
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
             )
             _validate_plan_snapshot(plan, envelope)
+            if envelope.workflow_resolution_ref is not None:
+                resolution = await workflow.execute_activity(
+                    WorkerActivities.load_resolved_workflow,
+                    args=[envelope.workflow_resolution_ref],
+                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                )
+                _validate_resolved_workflow(resolution, envelope)
+                self._resolved_gates = {
+                    gate["id"]: gate
+                    for gate in resolution["gates"]
+                    if isinstance(gate, dict) and isinstance(gate.get("id"), str)
+                }
             (
                 phases,
                 productive_turns,
@@ -708,6 +740,7 @@ def _validate_plan_snapshot(plan: dict, envelope: RunEnvelope) -> None:
         {
             envelope.workflow_template_ref is None,
             envelope.workflow_policy_ref is None,
+            envelope.workflow_resolution_ref is None,
             envelope.workflow_resolution_sha256 is None,
         }
     ) != 1:
@@ -718,6 +751,7 @@ def _validate_plan_snapshot(plan: dict, envelope: RunEnvelope) -> None:
         if (
             not envelope.workflow_template_ref
             or not envelope.workflow_policy_ref
+            or not envelope.workflow_resolution_ref
             or not envelope.workflow_resolution_sha256
             or len(envelope.workflow_resolution_sha256) != 64
             or not mandatory_gates.issubset(submitted_gates)
@@ -758,6 +792,37 @@ def _validate_plan_snapshot(plan: dict, envelope: RunEnvelope) -> None:
                 owner_requirements.extend(requirement_ids)
         if set(owner_requirements) != set(expected_requirements) or len(owner_requirements) != len(set(owner_requirements)):
             raise ValueError("plan requirement ownership does not match the selected specification")
+
+
+def _validate_resolved_workflow(resolution: dict, envelope: RunEnvelope) -> None:
+    """Verify the API-compiled workflow before the worker can provision state."""
+
+    digest = hashlib.sha256(
+        json.dumps(resolution, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    if digest != envelope.workflow_resolution_sha256:
+        raise ValueError("resolved workflow digest does not match the submitted envelope")
+    if (
+        resolution.get("run_id") != envelope.run_id
+        or resolution.get("template_ref") != envelope.workflow_template_ref
+        or resolution.get("policy_ref") != envelope.workflow_policy_ref
+    ):
+        raise ValueError("resolved workflow identity does not match the submitted envelope")
+    plan_artifact = resolution.get("plan_artifact")
+    if not isinstance(plan_artifact, dict) or (
+        plan_artifact.get("ref") != envelope.plan_ref or plan_artifact.get("sha256") != envelope.plan_sha256
+    ):
+        raise ValueError("resolved workflow plan artifact does not match the submitted envelope")
+    gates = resolution.get("gates")
+    if not isinstance(gates, list) or {gate.get("id") for gate in gates if isinstance(gate, dict)} != set(
+        envelope.workflow_required_gate_ids
+    ):
+        raise ValueError("resolved workflow gates do not match the submitted envelope")
+    phases = resolution.get("phases")
+    if not isinstance(phases, list) or not any(
+        isinstance(phase, dict) and phase.get("active") is True for phase in phases
+    ):
+        raise ValueError("resolved workflow has no active execution phases")
 
 
 async def _backup_phase(phase: PlanPhase, workspace, ceiling: str):

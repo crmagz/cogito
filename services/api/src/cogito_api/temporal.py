@@ -17,6 +17,8 @@ class RunStarter(Protocol):
 
     async def submit_implementation_approval(self, workflow_id: str, decision: dict[str, str]) -> bool: ...
 
+    async def submit_workflow_gate(self, workflow_id: str, gate_id: str, decision: dict[str, Any]) -> bool: ...
+
 
 class WorkflowOutcomeInspector(Protocol):
     """Read a closed workflow's typed business outcome without mutating it."""
@@ -73,6 +75,16 @@ class TemporalRunStarter:
         client = await self._get_client()
         handle = client.get_workflow_handle(workflow_id)
         return await handle.execute_update("submit_implementation_approval", decision, id=decision_id)
+
+    async def submit_workflow_gate(self, workflow_id: str, gate_id: str, decision: dict[str, Any]) -> bool:
+        """Deliver a resolution-bound gate decision, retaining legacy fallbacks in dispatchers."""
+
+        decision_id = decision.get("decision_id")
+        if not decision_id:
+            return False
+        client = await self._get_client()
+        handle = client.get_workflow_handle(workflow_id)
+        return await handle.execute_update("submit_workflow_gate", gate_id, decision, id=decision_id)
 
     async def get_terminal_outcome(self, workflow_id: str) -> str | None:
         """Return a recognized terminal workflow result, or ``None`` while it is live.

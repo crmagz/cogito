@@ -26,6 +26,9 @@ class InMemoryRunStore:
     def get_plan(self, plan_ref: str) -> dict:
         return self.plans[plan_ref]
 
+    def get_artifact(self, artifact_ref: str) -> dict:
+        return self.plans[artifact_ref]
+
     def get_status(self, run_id: str) -> dict | None:
         return self.statuses.get(run_id)
 
