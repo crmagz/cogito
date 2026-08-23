@@ -168,6 +168,23 @@ async def test_workflow_runs_activities_and_reports_completion(
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
+    workflow_ref = "s3://plan-snapshots/runs/run-1/resolved-workflow.json"
+    resolution = {
+        "run_id": "run-1",
+        "template_ref": "software_delivery@1.0.0",
+        "policy_ref": "platform_standard@1.0.0",
+        "plan_artifact": {"ref": "s3://plans/plans/run-1/plan.json", "sha256": plan_sha256},
+        "gates": [
+            {"id": "product_specification_review"},
+            {"id": "plan_scope_review"},
+            {"id": "delivery_review"},
+        ],
+        "phases": [{"id": "implementation", "active": True}],
+    }
+    store.plans[workflow_ref] = resolution
+    workflow_digest = hashlib.sha256(
+        json.dumps(resolution, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     workspaces = InMemoryExecutionWorkspaces()
     harness = InMemoryHarness()
     activities = WorkerActivities(store, workspaces, harness)
@@ -179,6 +196,7 @@ async def test_workflow_runs_activities_and_reports_completion(
         workflows=[DeveloperRunWorkflow],
         activities=[
             activities.load_plan,
+            activities.load_resolved_workflow,
             activities.report_status,
             activities.freeze_implementation_artifact,
             activities.provision_execution_workspace,
@@ -197,6 +215,15 @@ async def test_workflow_runs_activities_and_reports_completion(
                 plan_ref="s3://plans/plans/run-1/plan.json",
                 plan_sha256=plan_sha256,
                 spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
+                workflow_template_ref="software_delivery@1.0.0",
+                workflow_policy_ref="platform_standard@1.0.0",
+                workflow_resolution_ref=workflow_ref,
+                workflow_resolution_sha256=workflow_digest,
+                workflow_required_gate_ids=[
+                    "product_specification_review",
+                    "plan_scope_review",
+                    "delivery_review",
+                ],
             ),
             id=f"test-workflow-{uuid.uuid4()}",
             task_queue=task_queue,

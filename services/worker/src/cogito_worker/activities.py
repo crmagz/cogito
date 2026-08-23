@@ -70,6 +70,13 @@ class WorkerActivities:
         return self._store.get_plan(plan_ref)
 
     @activity.defn
+    async def load_resolved_workflow(self, workflow_ref: str) -> dict:
+        """Load the API-compiled immutable workflow before execution begins."""
+
+        activity.logger.info("loading resolved workflow", extra={"workflow_ref": workflow_ref})
+        return self._store.get_artifact(workflow_ref)
+
+    @activity.defn
     async def report_status(
         self,
         run_id: str,

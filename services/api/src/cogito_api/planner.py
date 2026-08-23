@@ -26,6 +26,23 @@ class PlannerError(Exception):
     """Raised when the planner cannot safely produce an executable plan artifact."""
 
 
+class PlannerRequestError(PlannerError):
+    """Raised when the model gateway cannot complete a planner request.
+
+    These errors are transient from the workflow's perspective and may be
+    retried by the durable planning dispatcher.
+    """
+
+
+class PlannerOutputError(PlannerError):
+    """Raised when a model response cannot satisfy Cogito's plan contract.
+
+    The response was received, but it is not safe to execute.  Retrying the
+    same accepted product specification in the background cannot repair this
+    deterministically, so callers must surface it for operator action.
+    """
+
+
 class RequirementPartitionError(ValueError):
     """Raised when phase ownership cannot form the selected requirement partition."""
 
@@ -132,7 +149,7 @@ class LiteLLMPlanner:
             plan = await self._request_plan(payload)
             _validate_generated_plan(plan, context, self._settings)
             _validate_requirement_partition(plan, context.requirement_ids)
-        except RequirementPartitionError as error:
+        except (PlannerOutputError, RequirementPartitionError) as error:
             retry_payload = {
                 **payload,
                 "messages": [
@@ -152,8 +169,10 @@ class LiteLLMPlanner:
                 plan = await self._request_plan(retry_payload)
                 _validate_generated_plan(plan, context, self._settings)
                 _validate_requirement_partition(plan, context.requirement_ids)
-            except RequirementPartitionError as retry_error:
-                raise PlannerError(f"LiteLLM planner output failed requirement traceability: {retry_error}") from retry_error
+            except (PlannerOutputError, RequirementPartitionError) as retry_error:
+                raise PlannerOutputError(
+                    f"LiteLLM planner output failed contract validation after one repair attempt: {retry_error}"
+                ) from retry_error
         return plan
 
     async def _request_plan(self, payload: dict[str, object]) -> AiPlan:
@@ -169,7 +188,7 @@ class LiteLLMPlanner:
                 response.raise_for_status()
                 body = response.json()
         except (httpx.HTTPError, ValueError) as error:
-            raise PlannerError("LiteLLM planner request failed") from error
+            raise PlannerRequestError("LiteLLM planner request failed") from error
         try:
             content = body["choices"][0]["message"]["content"]
             if not isinstance(content, str):
@@ -181,9 +200,9 @@ class LiteLLMPlanner:
                 for detail in error.errors()
             ):
                 raise RequirementPartitionError("plan phase requirement IDs must be unique") from error
-            raise PlannerError("LiteLLM planner returned invalid plan JSON") from error
+            raise PlannerOutputError("LiteLLM planner returned invalid plan JSON") from error
         except (KeyError, IndexError, TypeError, ValueError) as error:
-            raise PlannerError("LiteLLM planner returned invalid plan JSON") from error
+            raise PlannerOutputError("LiteLLM planner returned invalid plan JSON") from error
         return plan
 
     async def generate_product_specification(
@@ -297,7 +316,7 @@ def _validate_generated_plan(plan: AiPlan, context: PlanningContext, settings: S
     violations.extend(validate_spec_reference(plan.spec_set))
     if violations:
         fields = ", ".join(sorted({violation.field for violation in violations}))
-        raise PlannerError(f"LiteLLM planner output violated the planning contract: {fields}")
+        raise PlannerOutputError(f"LiteLLM planner output violated the planning contract: {fields}")
 
 
 def _validate_requirement_partition(plan: AiPlan, requirement_ids: tuple[str, ...]) -> None:

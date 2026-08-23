@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from fastapi.testclient import TestClient
 import pytest
@@ -55,14 +56,17 @@ def _binding() -> dict:
 
 
 def _app(*, roles: tuple[str, ...], valid_plan: dict, valid_product_specification: dict):
-    return create_app(
-        store=InMemoryPlanStore(),
+    store = InMemoryPlanStore()
+    app = create_app(
+        store=store,
         settings=make_settings(auth_static_roles=roles),
         starter=FakeRunStarter(),
         supervisor_store=InMemorySupervisorStore(),
         planner=FakePlanner(AiPlan.model_validate(valid_plan), ProductSpecification.model_validate(valid_product_specification)),
         workflow_configuration_store=InMemoryWorkflowConfigurationStore(),
     )
+    app.state.test_plan_store = store
+    return app
 
 
 def test_template_requires_default_policy_and_all_human_gates() -> None:
@@ -125,6 +129,27 @@ def test_product_manager_can_submit_only_structured_intake_after_platform_bindin
         body = response.json()
         assert body["status"] == "planning"
         assert body["source_artifact"]["ref"].endswith("/source-spec.json")
+        source = json.loads(app.state.test_plan_store.source_specifications[body["run_id"]])
+        assert source["schema_version"] == "cogito.initial-specification/v1"
+        assert source["goal"] == _intake()["objective"]
+        assert source["repositories"] == [
+            {"ref": _binding()["target_repos"][0], "role": "primary_target"}
+        ]
+        assert source["workflow_context"] == {
+            "project_id": "default",
+            "template_ref": "software_delivery@1.0.0",
+            "policy_ref": "platform_standard@1.0.0",
+            "required_gates": [
+                "product_specification_review",
+                "plan_scope_review",
+                "delivery_review",
+            ],
+        }
+        assert source["product_manager_intake"] == _intake() | {
+            "schema_version": 1,
+            "repository_candidates": [],
+            "discovery_preference": "supplied_first",
+        }
 
 
 def test_product_manager_cannot_modify_project_binding(valid_plan: dict, valid_product_specification: dict) -> None:

@@ -125,7 +125,7 @@ async def test_litellm_planner_stops_after_one_requirement_partition_retry(valid
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(duplicate)}}]})
 
     planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
-    with pytest.raises(PlannerError, match="failed requirement traceability"):
+    with pytest.raises(PlannerError, match="failed contract validation"):
         await planner.generate(
             PlanningContext(
                 initial_specification="Add a rate limiter.",

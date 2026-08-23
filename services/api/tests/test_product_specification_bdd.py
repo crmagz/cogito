@@ -184,10 +184,11 @@ def authorized_operator_records_revised_product_specification(
 
 @then("the planning run exposes the new immutable product specification revision")
 def planning_run_exposes_new_immutable_revision(refinement_context: dict[str, object]) -> None:
-    """A human revision is retained separately and requires a fresh selection."""
+    """A human revision is retained and becomes the reviewed planning input."""
 
     response = refinement_context["revision_response"]
     assert response.status_code == 200
     body = response.json()
     assert body["product_specification_revision"] == 2
-    assert body["selected_product_specification_artifact"] is None
+    assert body["selected_product_specification_artifact"] == body["product_specification_artifact"]
+    assert body["selected_product_specification_revision"] == 2
