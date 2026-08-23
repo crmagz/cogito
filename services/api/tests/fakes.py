@@ -193,6 +193,7 @@ class InMemorySupervisorStore:
         self.workbench_feedback_request_hashes: dict[tuple[str, str], str] = {}
         self.planning_generation_claims: dict[str, str] = {}
         self.planning_generation_attempts: dict[str, int] = {}
+        self.planning_generation_renewals: list[tuple[str, str]] = []
 
     async def create_agent_run(self, record: AgentRunRecord) -> None:
         self.agent_runs[record.run_id] = record
@@ -233,6 +234,12 @@ class InMemorySupervisorStore:
         record = self.agent_runs.get(run_id)
         if record is not None and record.status is AgentRunStatus.RUNNING:
             self.agent_runs[run_id] = replace(record, status=AgentRunStatus.QUEUED, updated_at=datetime.now(timezone.utc).isoformat())
+
+    async def renew_planning_generation_delivery(self, run_id: str, claim_id: str) -> bool:
+        if self.planning_generation_claims.get(run_id) != claim_id:
+            return False
+        self.planning_generation_renewals.append((run_id, claim_id))
+        return True
 
     async def record_planning_agent_terminal(
         self, run_id: str, claim_id: str, *, succeeded: bool, error_summary: str | None = None
@@ -725,6 +732,7 @@ class InMemorySupervisorStore:
             or record.product_specification_revision != revision
             or artifact.sha256 != artifact_sha256
             or record.specification_evaluation_artifact is None
+            or record.specification_evaluation_readiness not in {"ready", "waived"}
         ):
             if (
                 record.selected_product_specification_revision == revision
@@ -1265,7 +1273,12 @@ class InMemorySupervisorStore:
         return [
             record
             for record in self.planning_runs.values()
-            if record.status in {PlanningRunStatus.IMPLEMENTING, PlanningRunStatus.FINALIZING} and record.workflow_id
+            if record.status in {
+                PlanningRunStatus.AWAITING_PLAN_APPROVAL,
+                PlanningRunStatus.IMPLEMENTING,
+                PlanningRunStatus.FINALIZING,
+            }
+            and record.workflow_id
         ][:limit]
 
     async def reconcile_terminal_workflow(self, *, run_id: str, workflow_id: str, outcome: str) -> bool:
@@ -1282,7 +1295,11 @@ class InMemorySupervisorStore:
             or agent is None
             or target is None
             or record.workflow_id != workflow_id
-            or record.status not in {PlanningRunStatus.IMPLEMENTING, PlanningRunStatus.FINALIZING}
+            or record.status not in {
+                PlanningRunStatus.AWAITING_PLAN_APPROVAL,
+                PlanningRunStatus.IMPLEMENTING,
+                PlanningRunStatus.FINALIZING,
+            }
         ):
             return False
         terminal = {AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED, AgentRunStatus.TIMED_OUT}

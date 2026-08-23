@@ -825,7 +825,13 @@ def create_app(
         ):
             raise HTTPException(status_code=409, detail="the displayed product specification is stale or ineligible for acceptance")
 
-        await evaluate_current_product_specification(record)
+        evaluated = await evaluate_current_product_specification(record)
+        if evaluated.specification_evaluation_readiness not in {"ready", "waived"}:
+            response = ProductSpecificationAcceptanceResponse(
+                **_planning_run_response(evaluated).model_dump(),
+                outcome=ProductSpecificationAcceptanceOutcome.NEEDS_REFINEMENT,
+            )
+            return JSONResponse(content=response.model_dump(mode="json"))
         try:
             request_sha256 = sha256(
                 json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()

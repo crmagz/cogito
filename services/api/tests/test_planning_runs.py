@@ -236,7 +236,7 @@ def test_lifespan_dispatcher_generates_an_accepted_plan(
         assert len(starter.started_runs) == 1
 
 
-def test_accept_product_specification_records_evaluation_findings_without_blocking_selection(
+def test_accept_product_specification_returns_needs_refinement_without_selecting(
     client: TestClient, valid_plan: dict, valid_product_specification: dict
 ) -> None:
     run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
@@ -272,15 +272,15 @@ def test_accept_product_specification_records_evaluation_findings_without_blocki
 
     assert accepted.status_code == 200
     body = accepted.json()
-    assert body["outcome"] == "accepted"
+    assert body["outcome"] == "needs_refinement"
     assert body["specification_evaluation_readiness"] == "needs_revision"
     assert body["specification_evaluation_artifact"] is not None
-    assert body["selected_product_specification_artifact"] is not None
+    assert body["selected_product_specification_artifact"] is None
     workbench = client.get(f"/api/v1/workbench/runs/{run_id}").json()
     states = {stage["stage_id"]: stage["state"] for stage in workbench["stages"]}
     assert states["product_specification"] == "completed"
-    assert states["specification_evaluation"] == "completed"
-    assert states["planning"] == "queued"
+    assert states["specification_evaluation"] == "needs_revision"
+    assert states["planning"] == "needs_revision"
     assert states["plan_approval"] == "unavailable"
 
 

@@ -80,6 +80,21 @@ async def test_reconciler_repairs_a_completed_temporal_workflow_after_status_int
 
 
 @pytest.mark.asyncio
+async def test_reconciler_repairs_a_workflow_that_ended_before_implementation_status() -> None:
+    """A schedule-to-start timeout cannot strand the plan-approval gate."""
+
+    store = InMemorySupervisorStore()
+    store.planning_runs["run-1"] = _run(PlanningRunStatus.AWAITING_PLAN_APPROVAL)
+    store.agent_runs["run-1"] = _agent(AgentRunStatus.WAITING_FOR_APPROVAL)
+
+    repaired = await WorkflowProjectionReconciler(store, _Inspector({"run-1:plan:1": "failed"})).reconcile_once()
+
+    assert repaired == 1
+    assert store.planning_runs["run-1"].status is PlanningRunStatus.PLANNING_FAILED
+    assert store.agent_runs["run-1"].status is AgentRunStatus.FAILED
+
+
+@pytest.mark.asyncio
 async def test_reconciler_does_not_guess_from_a_live_or_unrecognized_workflow() -> None:
     store = InMemorySupervisorStore()
     store.planning_runs["run-1"] = _run()

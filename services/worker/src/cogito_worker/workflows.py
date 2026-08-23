@@ -127,6 +127,7 @@ class DeveloperRunWorkflow:
 
     @workflow.run
     async def run(self, envelope: RunEnvelope) -> RunResult:
+        implementation_status_reported = False
         try:
             planner_registration = require_role(envelope, "planner")
             require_tool(planner_registration, "planning_model", "plan_generation")
@@ -204,6 +205,7 @@ class DeveloperRunWorkflow:
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 schedule_to_start_timeout=_WORKER_START_TIMEOUT,
             )
+            implementation_status_reported = True
             workspace = await workflow.execute_activity(
                 WorkerActivities.provision_execution_workspace,
                 args=[
@@ -461,7 +463,7 @@ class DeveloperRunWorkflow:
             # status activity cannot repair the projection either. Return the
             # terminal outcome so the API reconciler records a durable failure
             # instead of leaving the handoff queued forever.
-            if _is_timeout_error(error):
+            if _is_timeout_error(error) and not implementation_status_reported:
                 return RunResult(run_id=envelope.run_id, status="failed")
             await workflow.execute_activity(
                 WorkerActivities.report_status,
