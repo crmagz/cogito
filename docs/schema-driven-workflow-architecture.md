@@ -429,3 +429,20 @@ product, plan, and delivery adapters then delegate to the existing durable
 supervisor/outbox transitions. Additional template gates fail closed until a
 corresponding runtime adapter is released; declaring a gate never creates an
 unreviewed bypass around the worker.
+
+## Repository-domain context
+
+Repository relationships are not product-manager input. A product manager may
+name only known repository candidates and select a bounded discovery preference
+(`supplied_only`, `supplied_first`, or `expand_if_needed`). Platform policy
+continues to decide whether discovery may inspect or propose any additional
+repository.
+
+Each participating repository has at most one domain-context document at
+`docs/domain.md`. It is a single Markdown source of truth with schema-validated
+YAML front matter, a Cogito-generated Mermaid region, and human-maintained
+prose. Cogito reads the front matter as structured evidence, verifies that the
+generated graph has not drifted, and pins only the document reference, commit,
+and digest in run artifacts. Discovery is read-only; any document update is a
+normal governed pull request that may modify only the front matter and marked
+generated Mermaid block, never unrelated narrative.

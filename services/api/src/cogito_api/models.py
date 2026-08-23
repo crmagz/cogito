@@ -103,6 +103,16 @@ class SpecificationIntake(BaseModel):
     acceptance_expectations: list[str] = Field(min_length=1, max_length=256)
     constraints: list[str] = Field(default_factory=list, max_length=256)
     unknowns: list[str] = Field(default_factory=list, max_length=256)
+    repository_candidates: list["RepositoryCandidate"] = Field(
+        default_factory=list,
+        max_length=32,
+        description="Repositories the product manager already believes are relevant; relationships are discovered server-side",
+    )
+    discovery_preference: "RepositoryDiscoveryPreference" = Field(
+        default="supplied_first",
+        validate_default=True,
+        description="Whether discovery may expand beyond the product manager's supplied repository candidates",
+    )
 
     @model_validator(mode="after")
     def validate_non_blank_values(self) -> "SpecificationIntake":
@@ -117,6 +127,32 @@ class SpecificationIntake(BaseModel):
         )
         if not self.objective.strip() or any(not value.strip() for field in fields for value in field):
             raise ValueError("specification intake values must be non-blank")
+        repository_ids = [candidate.repository_id for candidate in self.repository_candidates]
+        if len(set(repository_ids)) != len(repository_ids):
+            raise ValueError("repository candidates must be unique")
+        return self
+
+
+class RepositoryDiscoveryPreference(StrEnum):
+    """Bounded product-manager hint; platform policy still controls actual discovery authority."""
+
+    SUPPLIED_ONLY = "supplied_only"
+    SUPPLIED_FIRST = "supplied_first"
+    EXPAND_IF_NEEDED = "expand_if_needed"
+
+
+class RepositoryCandidate(BaseModel):
+    """A simple repository identifier supplied without technical relationship mapping."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repository_id: str = Field(min_length=1, max_length=256)
+    note: str | None = Field(default=None, min_length=1, max_length=1_000)
+
+    @model_validator(mode="after")
+    def validate_repository_id(self) -> "RepositoryCandidate":
+        if not self.repository_id.strip() or self.repository_id != self.repository_id.strip():
+            raise ValueError("repository candidate identifier must be non-blank and trimmed")
         return self
 
 
