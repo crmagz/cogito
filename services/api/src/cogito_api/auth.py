@@ -84,6 +84,36 @@ class ApprovalAuthenticator:
         ):
             raise HTTPException(status_code=403, detail="operator is not authorized to perform this operation")
 
+    def require_product_manager(self, principal: Principal) -> None:
+        if not (
+            {
+                self._settings.auth_oidc_product_manager_role,
+                self._settings.auth_oidc_approval_role,
+                self._settings.auth_oidc_admin_role,
+            }
+            & principal.roles
+        ):
+            raise HTTPException(status_code=403, detail="operator is not authorized to submit a product specification")
+
+    def require_workflow_approver(self, principal: Principal) -> None:
+        if not (
+            {
+                self._settings.auth_oidc_workflow_approver_role,
+                self._settings.auth_oidc_approval_role,
+                self._settings.auth_oidc_admin_role,
+            }
+            & principal.roles
+        ):
+            raise HTTPException(status_code=403, detail="operator is not authorized to approve workflow gates")
+
+    def require_policy_editor(self, principal: Principal) -> None:
+        if not ({self._settings.auth_oidc_policy_editor_role, self._settings.auth_oidc_admin_role} & principal.roles):
+            raise HTTPException(status_code=403, detail="operator is not authorized to edit workflow configuration")
+
+    def require_policy_publisher(self, principal: Principal) -> None:
+        if not ({self._settings.auth_oidc_policy_publisher_role, self._settings.auth_oidc_admin_role} & principal.roles):
+            raise HTTPException(status_code=403, detail="operator is not authorized to publish workflow configuration")
+
     def _decode_oidc_token(self, token: str) -> dict:
         assert self._jwks is not None
         signing_key = self._jwks.get_signing_key_from_jwt(token)

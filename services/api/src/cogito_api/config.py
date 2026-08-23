@@ -49,7 +49,11 @@ class Settings:
     auth_oidc_audience: str
     auth_oidc_jwks_url: str
     auth_oidc_role_claim: str
+    auth_oidc_product_manager_role: str
     auth_oidc_approval_role: str
+    auth_oidc_workflow_approver_role: str
+    auth_oidc_policy_editor_role: str
+    auth_oidc_policy_publisher_role: str
     auth_oidc_project_claim: str
     auth_oidc_viewer_role: str
     auth_oidc_admin_role: str
@@ -143,7 +147,19 @@ def load_settings() -> Settings:
         auth_oidc_audience=os.environ.get("COGITO_AUTH_OIDC_AUDIENCE", ""),
         auth_oidc_jwks_url=os.environ.get("COGITO_AUTH_OIDC_JWKS_URL", ""),
         auth_oidc_role_claim=os.environ.get("COGITO_AUTH_OIDC_ROLE_CLAIM", "roles"),
+        auth_oidc_product_manager_role=os.environ.get(
+            "COGITO_AUTH_OIDC_PRODUCT_MANAGER_ROLE", "cogito-product-manager"
+        ),
         auth_oidc_approval_role=os.environ.get("COGITO_AUTH_OIDC_APPROVAL_ROLE", "cogito-approver"),
+        auth_oidc_workflow_approver_role=os.environ.get(
+            "COGITO_AUTH_OIDC_WORKFLOW_APPROVER_ROLE", "cogito-workflow-approver"
+        ),
+        auth_oidc_policy_editor_role=os.environ.get(
+            "COGITO_AUTH_OIDC_POLICY_EDITOR_ROLE", "cogito-policy-editor"
+        ),
+        auth_oidc_policy_publisher_role=os.environ.get(
+            "COGITO_AUTH_OIDC_POLICY_PUBLISHER_ROLE", "cogito-policy-publisher"
+        ),
         auth_oidc_project_claim=os.environ.get("COGITO_AUTH_OIDC_PROJECT_CLAIM", "cogito_projects"),
         auth_oidc_viewer_role=os.environ.get("COGITO_AUTH_OIDC_VIEWER_ROLE", "cogito-viewer"),
         auth_oidc_admin_role=os.environ.get("COGITO_AUTH_OIDC_ADMIN_ROLE", "cogito-admin"),

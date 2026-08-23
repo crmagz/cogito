@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import re
 
 from .models import (
+    PlanPhase,
     ProductSpecification,
     SpecificationEvaluation,
     SpecificationEvaluationCoverage,
@@ -13,6 +14,7 @@ from .models import (
     SpecificationEvaluationFindingKind,
     SpecificationEvaluationReadiness,
     SpecificationRiskTier,
+    WorkflowRequirementRelationship,
 )
 
 EVALUATOR_VERSION = "deterministic-v1"
@@ -175,3 +177,60 @@ def validate_plan_traceability(specification: ProductSpecification, requirement_
     missing = known - set(referenced)
     if missing:
         raise ValueError("plan does not cover requirement IDs: " + ", ".join(sorted(missing)))
+
+
+def validate_requirement_assignments(specification: ProductSpecification, phases: list[PlanPhase]) -> None:
+    """Validate ownership independently from support and verification reuse.
+
+    Older planners emit ``requirement_ids`` only.  Treat that field as an
+    ownership declaration so existing historical plans remain valid while new
+    plans can cite one requirement in several supporting or verification
+    phases without triggering the former false-positive duplicate error.
+    """
+
+    known = set(specification.requirement_ids)
+    criterion_ids = {criterion.id for criterion in specification.acceptance_criteria}
+    owners: dict[str, list[str]] = {}
+    referenced: set[str] = set()
+    for phase in phases:
+        assignments = phase.requirement_assignments
+        if not assignments:
+            assignments = [
+                # Constructing this small compatibility object keeps one
+                # validation rule for legacy and schema-v2 plan output.
+                {"requirement_id": requirement_id, "relationship": WorkflowRequirementRelationship.OWNS}
+                for requirement_id in phase.requirement_ids
+            ]
+        if not assignments:
+            raise ValueError(f"plan phase '{phase.id}' must declare a requirement relationship")
+        for assignment in assignments:
+            requirement_id = (
+                assignment.requirement_id if hasattr(assignment, "requirement_id") else assignment["requirement_id"]
+            )
+            relationship = assignment.relationship if hasattr(assignment, "relationship") else assignment["relationship"]
+            acceptance_ids = (
+                assignment.acceptance_criterion_ids
+                if hasattr(assignment, "acceptance_criterion_ids")
+                else assignment.get("acceptance_criterion_ids", [])
+            )
+            if requirement_id not in known:
+                raise ValueError("plan references unknown requirement IDs: " + requirement_id)
+            unknown_criteria = set(acceptance_ids) - criterion_ids
+            if unknown_criteria:
+                raise ValueError(
+                    "plan references unknown acceptance criterion IDs: " + ", ".join(sorted(unknown_criteria))
+                )
+            referenced.add(requirement_id)
+            if relationship is WorkflowRequirementRelationship.OWNS or relationship == "owns":
+                owners.setdefault(requirement_id, []).append(phase.id)
+
+    missing = known - set(owners)
+    if missing:
+        raise ValueError("plan does not assign owner phases for requirement IDs: " + ", ".join(sorted(missing)))
+    repeated = {requirement_id: phase_ids for requirement_id, phase_ids in owners.items() if len(phase_ids) > 1}
+    if repeated:
+        details = ", ".join(f"{requirement_id} ({', '.join(phase_ids)})" for requirement_id, phase_ids in sorted(repeated.items()))
+        raise ValueError("plan assigns requirement ownership more than once: " + details)
+    uncovered = known - referenced
+    if uncovered:
+        raise ValueError("plan does not reference requirement IDs: " + ", ".join(sorted(uncovered)))

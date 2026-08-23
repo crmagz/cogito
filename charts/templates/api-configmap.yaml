@@ -62,12 +62,16 @@ data:
   COGITO_AUTH_MODE: {{ default "static" $auth.mode | quote }}
   COGITO_AUTH_STATIC_SUBJECT: {{ default "local-operator" $staticAuth.subject | quote }}
   COGITO_AUTH_STATIC_PROJECTS: {{ toJson (default (list "default") $staticAuth.projects) | quote }}
-  COGITO_AUTH_STATIC_ROLES: {{ toJson (default (list "cogito-viewer" "cogito-approver") $staticAuth.roles) | quote }}
+  COGITO_AUTH_STATIC_ROLES: {{ toJson (default (list "cogito-viewer" "cogito-approver" "cogito-product-manager" "cogito-workflow-approver" "cogito-policy-editor" "cogito-policy-publisher") $staticAuth.roles) | quote }}
   COGITO_AUTH_OIDC_ISSUER: {{ default "" $oidcAuth.issuer | quote }}
   COGITO_AUTH_OIDC_AUDIENCE: {{ default "" $oidcAuth.audience | quote }}
   COGITO_AUTH_OIDC_JWKS_URL: {{ default "" $oidcAuth.jwksUrl | quote }}
   COGITO_AUTH_OIDC_ROLE_CLAIM: {{ default "roles" $oidcAuth.roleClaim | quote }}
+  COGITO_AUTH_OIDC_PRODUCT_MANAGER_ROLE: {{ default "cogito-product-manager" $oidcAuth.productManagerRole | quote }}
   COGITO_AUTH_OIDC_APPROVAL_ROLE: {{ default "cogito-approver" $oidcAuth.approvalRole | quote }}
+  COGITO_AUTH_OIDC_WORKFLOW_APPROVER_ROLE: {{ default "cogito-workflow-approver" $oidcAuth.workflowApproverRole | quote }}
+  COGITO_AUTH_OIDC_POLICY_EDITOR_ROLE: {{ default "cogito-policy-editor" $oidcAuth.policyEditorRole | quote }}
+  COGITO_AUTH_OIDC_POLICY_PUBLISHER_ROLE: {{ default "cogito-policy-publisher" $oidcAuth.policyPublisherRole | quote }}
   COGITO_AUTH_OIDC_PROJECT_CLAIM: {{ default "cogito_projects" $oidcAuth.projectClaim | quote }}
   COGITO_AUTH_OIDC_VIEWER_ROLE: {{ default "cogito-viewer" $oidcAuth.viewerRole | quote }}
   COGITO_AUTH_OIDC_ADMIN_ROLE: {{ default "cogito-admin" $oidcAuth.adminRole | quote }}

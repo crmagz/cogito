@@ -704,6 +704,26 @@ def _validate_plan_snapshot(plan: dict, envelope: RunEnvelope) -> None:
         or plan.get("target_repos") != envelope.target_repos
     ):
         raise ValueError("run envelope does not match its immutable plan snapshot")
+    if len(
+        {
+            envelope.workflow_template_ref is None,
+            envelope.workflow_policy_ref is None,
+            envelope.workflow_resolution_sha256 is None,
+        }
+    ) != 1:
+        raise ValueError("run envelope must pin workflow template, policy, and resolution together")
+    if envelope.workflow_template_ref is not None:
+        mandatory_gates = {"product_specification_review", "plan_scope_review", "delivery_review"}
+        submitted_gates = envelope.workflow_required_gate_ids
+        if (
+            not envelope.workflow_template_ref
+            or not envelope.workflow_policy_ref
+            or not envelope.workflow_resolution_sha256
+            or len(envelope.workflow_resolution_sha256) != 64
+            or not mandatory_gates.issubset(submitted_gates)
+            or len(submitted_gates) != len(set(submitted_gates))
+        ):
+            raise ValueError("run envelope is missing mandatory platform workflow gates")
     if envelope.specification_evaluation_sha256 is not None:
         if plan.get("specification_evaluation_sha256") != envelope.specification_evaluation_sha256:
             raise ValueError("plan evaluation digest does not match the submitted envelope")
@@ -714,20 +734,30 @@ def _validate_plan_snapshot(plan: dict, envelope: RunEnvelope) -> None:
             or len(set(expected_requirements)) != len(expected_requirements)
         ):
             raise ValueError("submitted envelope has invalid requirement traceability")
-        phase_requirements: list[str] = []
+        owner_requirements: list[str] = []
         for phase in plan.get("phases", []):
             if not isinstance(phase, dict):
                 raise ValueError("plan phase is not an object")
-            requirement_ids = phase.get("requirement_ids")
-            if (
-                not isinstance(requirement_ids, list)
-                or not requirement_ids
-                or not all(isinstance(requirement_id, str) and requirement_id.strip() == requirement_id for requirement_id in requirement_ids)
-            ):
-                raise ValueError("plan phase has no requirement traceability")
-            phase_requirements.extend(requirement_ids)
-        if set(phase_requirements) != set(expected_requirements) or len(phase_requirements) != len(set(phase_requirements)):
-            raise ValueError("plan requirement traceability does not match the selected specification")
+            assignments = phase.get("requirement_assignments")
+            if assignments:
+                if not isinstance(assignments, list):
+                    raise ValueError("plan phase requirement assignments are invalid")
+                for assignment in assignments:
+                    if not isinstance(assignment, dict) or not isinstance(assignment.get("requirement_id"), str):
+                        raise ValueError("plan phase requirement assignment is invalid")
+                    if assignment.get("relationship") == "owns":
+                        owner_requirements.append(assignment["requirement_id"])
+            else:
+                requirement_ids = phase.get("requirement_ids")
+                if (
+                    not isinstance(requirement_ids, list)
+                    or not requirement_ids
+                    or not all(isinstance(requirement_id, str) and requirement_id.strip() == requirement_id for requirement_id in requirement_ids)
+                ):
+                    raise ValueError("plan phase has no requirement traceability")
+                owner_requirements.extend(requirement_ids)
+        if set(owner_requirements) != set(expected_requirements) or len(owner_requirements) != len(set(owner_requirements)):
+            raise ValueError("plan requirement ownership does not match the selected specification")
 
 
 async def _backup_phase(phase: PlanPhase, workspace, ceiling: str):

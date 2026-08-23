@@ -39,11 +39,13 @@ from .models import (
     PlanApprovalDecision,
     PlanApprovalRequest,
     PlanApprovalResponse,
+    PlanConstraints,
     ProductSpecification,
     ProductSpecificationAcceptanceOutcome,
     ProductSpecificationAcceptanceRequest,
     ProductSpecificationAcceptanceResponse,
     MAX_PRODUCT_SPECIFICATION_BYTES,
+    ModelTier,
     ProductSpecificationRevisionRequest,
     ProductSpecificationSelectionRequest,
     SpecificationEvaluationReadiness,
@@ -51,9 +53,15 @@ from .models import (
     PlanningRunResponse,
     PlanningRunStatus,
     PlanningRunSubmission,
+    ProjectWorkflowBinding,
+    ResolvedWorkflow,
+    ResolvedWorkflowPhase,
     RunEnvelope,
     RunSubmission,
     Violation,
+    WorkflowPolicy,
+    WorkflowRunSubmission,
+    WorkflowTemplate,
     WorkbenchArtifactKind,
     WorkbenchArtifactSummary,
     WorkbenchApprovalSummary,
@@ -92,7 +100,7 @@ from .models import (
     WorkbenchTimelineEvent,
     WorkbenchTimelineResponse,
 )
-from .specification_evaluation import evaluate_specification, validate_plan_traceability
+from .specification_evaluation import evaluate_specification, validate_requirement_assignments
 from .outbox import (
     ImplementationApprovalOutboxDispatcher,
     PlanApprovalOutboxDispatcher,
@@ -121,6 +129,16 @@ from .supervisor import (
     SupervisorStore,
 )
 from .temporal import RunStarter, TemporalRunStarter
+from .workflow_control import (
+    InMemoryWorkflowConfigurationStore,
+    PostgresWorkflowConfigurationStore,
+    WorkflowAdmission,
+    WorkflowConfigurationError,
+    WorkflowConfigurationStore,
+    configuration_ref,
+    canonical_configuration_bytes,
+    validate_admission,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -227,8 +245,10 @@ def create_app(
     starter: RunStarter | None = None,
     supervisor_store: SupervisorStore | None = None,
     planner: Planner | None = None,
+    workflow_configuration_store: WorkflowConfigurationStore | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
+    uses_in_memory_supervisor = supervisor_store is not None
     store = store or MinioPlanStore(
         Minio(
             settings.minio_endpoint,
@@ -244,6 +264,11 @@ def create_app(
         settings.temporal_host, settings.temporal_namespace, settings.temporal_task_queue
     )
     supervisor_store = supervisor_store or PostgresSupervisorStore(settings.supervisor_database_url)
+    workflow_configuration_store = workflow_configuration_store or (
+        InMemoryWorkflowConfigurationStore()
+        if uses_in_memory_supervisor
+        else PostgresWorkflowConfigurationStore(settings.supervisor_database_url)
+    )
     planner = planner or LiteLLMPlanner(settings)
     catalog = load_component_catalog(Path(settings.registry_catalog_path))
     if settings.mcp_github_enabled and not settings.mcp_enabled:
@@ -297,6 +322,30 @@ def create_app(
                 catalog.components, mcp_policy.policy_revision, assignments, mcp_policy
             )
 
+    async def bootstrap_workflow_configuration() -> None:
+        await workflow_configuration_store.bootstrap_defaults(
+            project_id=settings.workbench_default_project_id,
+            constraints=PlanConstraints(
+                max_wall_clock_minutes=settings.max_wall_clock_minutes,
+                max_cost_usd=settings.max_cost_usd,
+                max_review_rounds=settings.max_review_rounds,
+                max_turns_per_phase=settings.max_turns_per_phase,
+            ),
+        )
+
+    async def resolve_workflow_admission(project_id: str) -> WorkflowAdmission:
+        binding = await workflow_configuration_store.get_binding(project_id)
+        if binding is None:
+            raise WorkflowConfigurationError("project has no platform-owned workflow binding")
+        template = await workflow_configuration_store.get_template(binding.template_ref)
+        if template is None:
+            raise WorkflowConfigurationError("project workflow template is not published")
+        policy_ref = binding.policy_ref or template.default_policy_ref
+        policy = await workflow_configuration_store.get_policy(policy_ref)
+        if policy is None:
+            raise WorkflowConfigurationError("workflow policy is not published")
+        return validate_admission(binding, template, policy)
+
     async def resolve_roles(run_id: str, roles: list[str], project_id: str, target_repositories: list[str] | None = None):
         await bootstrap_registry()
         try:
@@ -334,6 +383,7 @@ def create_app(
         # ready. Deferring this until the first submitted run makes a broken
         # migration or policy look healthy and delays a safe failure boundary.
         await bootstrap_registry()
+        await bootstrap_workflow_configuration()
         delivery_task = asyncio.create_task(dispatcher.run())
         implementation_delivery_task = asyncio.create_task(implementation_dispatcher.run())
         planning_generation_task = asyncio.create_task(planning_generation_dispatcher.run())
@@ -355,6 +405,9 @@ def create_app(
             close = getattr(supervisor_store, "close", None)
             if close is not None:
                 await close()
+            workflow_close = getattr(workflow_configuration_store, "close", None)
+            if workflow_close is not None:
+                await workflow_close()
 
     app = FastAPI(title="Cogito API", lifespan=lifespan)
     app.add_middleware(TraceRequestMiddleware, telemetry=telemetry)
@@ -378,6 +431,148 @@ def create_app(
         if readiness.is_ready():
             return JSONResponse(status_code=status.HTTP_200_OK, content={"status": "ready"})
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"status": "not_ready"})
+
+    @app.post("/api/v1/workflow-templates")
+    async def publish_workflow_template(
+        template: WorkflowTemplate, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        """Publish one immutable platform-owned template version."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_policy_publisher(principal)
+        try:
+            if await workflow_configuration_store.get_policy(template.default_policy_ref) is None:
+                raise WorkflowConfigurationError("workflow template default policy is not published")
+            await workflow_configuration_store.put_template(template, actor=principal.subject)
+        except WorkflowConfigurationError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return JSONResponse(status_code=status.HTTP_201_CREATED, content=template.model_dump(mode="json"))
+
+    @app.post("/api/v1/workflow-policies")
+    async def publish_workflow_policy(
+        policy: WorkflowPolicy, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        """Publish one immutable policy version selected only by platform roles."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_policy_publisher(principal)
+        try:
+            await workflow_configuration_store.put_policy(policy, actor=principal.subject)
+        except WorkflowConfigurationError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return JSONResponse(status_code=status.HTTP_201_CREATED, content=policy.model_dump(mode="json"))
+
+    @app.put("/api/v1/project-workflow-bindings/{project_id}")
+    async def set_project_workflow_binding(
+        project_id: str,
+        binding: ProjectWorkflowBinding,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Select the governed template, repository set, and hard limits for a project."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_policy_editor(principal)
+        if project_id != binding.project_id:
+            raise HTTPException(status_code=422, detail="binding project_id must match the path")
+        if project_id not in principal.projects and settings.auth_oidc_admin_role not in principal.roles:
+            raise HTTPException(status_code=403, detail="operator is not authorized for the target project")
+        try:
+            template = await workflow_configuration_store.get_template(binding.template_ref)
+            if template is None:
+                raise WorkflowConfigurationError("project workflow template is not published")
+            policy = await workflow_configuration_store.get_policy(binding.policy_ref or template.default_policy_ref)
+            if policy is None:
+                raise WorkflowConfigurationError("workflow policy is not published")
+            validate_admission(binding, template, policy)
+            violations = validate_target_repositories(
+                binding.target_repos, settings.allowed_git_hosts, settings.execution_github_app_git_host
+            ) + validate_spec_reference(binding.spec_set)
+            if violations:
+                raise PlanValidationError(violations)
+            await workflow_configuration_store.put_binding(binding, actor=principal.subject)
+        except WorkflowConfigurationError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return JSONResponse(content=binding.model_dump(mode="json"))
+
+    @app.get("/api/v1/project-workflow-bindings/{project_id}")
+    async def get_project_workflow_binding(
+        project_id: str, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        if project_id not in principal.projects and settings.auth_oidc_admin_role not in principal.roles:
+            raise HTTPException(status_code=403, detail="operator is not authorized for the target project")
+        binding = await workflow_configuration_store.get_binding(project_id)
+        if binding is None:
+            raise HTTPException(status_code=404, detail="project workflow binding not found")
+        return JSONResponse(content=binding.model_dump(mode="json"))
+
+    @app.post("/api/v1/projects/{project_id}/workflow-runs")
+    async def submit_workflow_run(
+        project_id: str,
+        submission: WorkflowRunSubmission,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Accept one validated product-manager specification and resolve platform context."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_product_manager(principal)
+        if project_id not in principal.projects:
+            raise HTTPException(status_code=403, detail="operator is not authorized for the target project")
+        try:
+            admission = await resolve_workflow_admission(project_id)
+        except WorkflowConfigurationError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        constraints = admission.binding.constraints
+        maximum = admission.policy.max_constraints
+        if (
+            constraints.max_wall_clock_minutes > maximum.max_wall_clock_minutes
+            or constraints.max_cost_usd > maximum.max_cost_usd
+            or constraints.max_review_rounds > maximum.max_review_rounds
+            or constraints.max_turns_per_phase > maximum.max_turns_per_phase
+        ):
+            raise HTTPException(status_code=409, detail="project binding exceeds its workflow policy limits")
+        violations = validate_constraints(constraints, settings)
+        if violations:
+            raise PlanValidationError(violations)
+        run_id = str(uuid.uuid4())
+        if submission.dry_run:
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content={
+                    "run_id": run_id,
+                    "status": "validated",
+                    "dry_run": True,
+                    "template_ref": admission.binding.template_ref,
+                    "policy_ref": admission.binding.policy_ref or admission.template.default_policy_ref,
+                },
+            )
+        submitted_at = datetime.now(timezone.utc).isoformat()
+        source_text = json.dumps(submission.specification.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        try:
+            source_artifact = store.put_source_specification(run_id, source_text)
+        except PlanStoreUnavailableError as error:
+            raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
+        await supervisor_store.create_agent_run(
+            AgentRunRecord(
+                run_id=run_id, root_run_id=run_id, parent_run_id=None, agent_name="planner",
+                status=AgentRunStatus.QUEUED, trace_id=telemetry.trace_id() or secrets.token_hex(16),
+                created_at=submitted_at, updated_at=submitted_at,
+            )
+        )
+        try:
+            await resolve_roles(run_id, ["planner"], project_id, admission.binding.target_repos)
+        except RegistryConflictError as error:
+            raise HTTPException(status_code=503, detail="registry is temporarily unavailable") from error
+        record = PlanningRunRecord(
+            run_id=run_id, status=PlanningRunStatus.PLANNING, source_artifact=source_artifact,
+            target_repos=admission.binding.target_repos, spec_set=admission.binding.spec_set,
+            constraints=constraints, priority=submission.priority, submitted_at=submitted_at,
+            submitted_by=principal.subject, project_id=project_id,
+        )
+        await supervisor_store.create_planning_run(record)
+        telemetry.transition(AgentRunStatus.QUEUED.value, "planner")
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=_planning_run_response(record).model_dump(mode="json"))
 
     @app.post("/api/v1/runs")
     async def submit_run(
@@ -498,7 +693,7 @@ def create_app(
         """
 
         principal = await authenticator.authenticate(authorization)
-        authenticator.require_approver(principal)
+        authenticator.require_workflow_approver(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
@@ -632,7 +827,7 @@ def create_app(
             except PlannerError as error:
                 raise HTTPException(status_code=502, detail="planner failed to produce a valid plan") from error
             try:
-                validate_plan_traceability(selected_specification, [phase.requirement_ids for phase in generated_plan.phases])
+                validate_requirement_assignments(selected_specification, generated_plan.phases)
             except ValueError as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
             generated_plan = generated_plan.model_copy(
@@ -692,6 +887,110 @@ def create_app(
                 updated.project_id or settings.workbench_default_project_id,
                 updated.target_repos,
             )
+            resolved_workflow = None
+            try:
+                admission = await resolve_workflow_admission(updated.project_id or settings.workbench_default_project_id)
+            except WorkflowConfigurationError:
+                # The legacy planning endpoint remains usable during migration.
+                # New product-manager submissions cannot reach this point without
+                # a project binding, so they always receive a resolved contract.
+                admission = None
+            if admission is not None:
+                active_phases = []
+                tier_profiles = {profile.tier: profile for profile in admission.policy.model_tier_profiles}
+                gateway_by_role = {resolution.role: resolution.gateway for resolution in resolutions}
+                capability_profiles = {
+                    configuration_ref(profile.id, profile.version): profile
+                    for profile in admission.template.capability_profiles
+                }
+                activation_text = "\n".join(
+                    statement.text
+                    for statement in selected_specification.constraints + selected_specification.risks
+                ).casefold()
+                for phase in admission.template.phases:
+                    tier = next(
+                        (
+                            candidate
+                            for candidate in (ModelTier.COMPLEX, ModelTier.BALANCED, ModelTier.FAST)
+                            if candidate in phase.permitted_tiers
+                        ),
+                        None,
+                    )
+                    assert tier is not None
+                    tier_profile = tier_profiles[tier]
+                    gateway = gateway_by_role.get(phase.agent_role)
+                    active = not phase.opt_in or phase.id in admission.policy.mandatory_phase_ids
+                    activation_reason = "mandatory platform workflow phase" if phase.id in admission.policy.mandatory_phase_ids else "enabled by template default"
+                    if phase.opt_in and phase.id not in admission.policy.mandatory_phase_ids:
+                        assert phase.activation is not None
+                        active = (
+                            phase.activation.kind == "always"
+                            or (phase.activation.value or "").casefold() in activation_text
+                        )
+                        activation_reason = (
+                            "optional phase activation matched policy-approved product evidence"
+                            if active
+                            else "optional phase activation did not match product evidence"
+                        )
+                    if active and gateway is not None and (
+                        gateway.model_alias != tier_profile.model_alias
+                        or gateway.max_budget_usd > tier_profile.max_budget_usd
+                    ):
+                        raise HTTPException(
+                            status_code=503,
+                            detail=f"agent gateway route exceeds the resolved {tier.value} model tier profile",
+                        )
+                    active_phases.append(
+                        ResolvedWorkflowPhase(
+                            id=phase.id,
+                            active=active,
+                            activation_reason=activation_reason,
+                            agent_role=phase.agent_role,
+                            model_tier=tier,
+                            capability_profile_refs=phase.capability_profile_refs,
+                        )
+                    )
+                permitted_mcp_tools_by_role: dict[str, set[str]] = {}
+                configured_profile_roles: set[str] = set()
+                for phase in active_phases:
+                    if not phase.active or not phase.capability_profile_refs:
+                        continue
+                    configured_profile_roles.add(phase.agent_role)
+                    permitted_tools = permitted_mcp_tools_by_role.setdefault(phase.agent_role, set())
+                    for reference in phase.capability_profile_refs:
+                        permitted_tools.update(capability_profiles[reference].allowed_mcp_tools)
+                if configured_profile_roles:
+                    resolutions = [
+                        resolution.model_copy(
+                            update={
+                                "mcp_grants": [
+                                    grant
+                                    for grant in resolution.mcp_grants
+                                    if grant.tool_name in permitted_mcp_tools_by_role.get(resolution.role, set())
+                                ]
+                            }
+                        )
+                        if resolution.role in configured_profile_roles
+                        else resolution
+                        for resolution in resolutions
+                    ]
+                resolved_workflow = ResolvedWorkflow(
+                    run_id=updated.run_id,
+                    project_id=updated.project_id or settings.workbench_default_project_id,
+                    template_ref=admission.binding.template_ref,
+                    policy_ref=admission.binding.policy_ref or admission.template.default_policy_ref,
+                    model_tier_profile_refs=[
+                        configuration_ref(profile.id, profile.version) for profile in admission.policy.model_tier_profiles
+                    ],
+                    source_artifact=updated.source_artifact,
+                    product_specification_artifact=updated.selected_product_specification_artifact,
+                    specification_evaluation_artifact=updated.selected_specification_evaluation_artifact,
+                    plan_artifact=updated.plan_artifact,
+                    gates=admission.template.required_gates,
+                    phases=active_phases,
+                    effective_constraints=updated.constraints,
+                )
+                await workflow_configuration_store.put_run_resolution(resolved_workflow)
             await starter.start_run(
                 RunEnvelope(
                     run_id=updated.run_id,
@@ -709,6 +1008,12 @@ def create_app(
                     specification_evaluation_sha256=updated.selected_specification_evaluation_artifact.sha256,
                     specification_requirement_ids=selected_specification.requirement_ids,
                     registry_resolutions=resolutions,
+                    workflow_template_ref=resolved_workflow.template_ref if resolved_workflow else None,
+                    workflow_policy_ref=resolved_workflow.policy_ref if resolved_workflow else None,
+                    workflow_resolution_sha256=(
+                        sha256(canonical_configuration_bytes(resolved_workflow)).hexdigest() if resolved_workflow else None
+                    ),
+                    workflow_required_gate_ids=[gate.id for gate in resolved_workflow.gates] if resolved_workflow else [],
                     traceparent=carrier.get("traceparent"),
                     tracestate=carrier.get("tracestate"),
                 )
@@ -807,7 +1112,7 @@ def create_app(
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
         principal = await authenticator.authenticate(authorization)
-        authenticator.require_approver(principal)
+        authenticator.require_workflow_approver(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
@@ -888,7 +1193,7 @@ def create_app(
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
         principal = await authenticator.authenticate(authorization)
-        authenticator.require_approver(principal)
+        authenticator.require_workflow_approver(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
@@ -948,7 +1253,7 @@ def create_app(
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
         principal = await authenticator.authenticate(authorization)
-        authenticator.require_approver(principal)
+        authenticator.require_workflow_approver(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
@@ -981,7 +1286,7 @@ def create_app(
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
         principal = await authenticator.authenticate(authorization)
-        authenticator.require_approver(principal)
+        authenticator.require_workflow_approver(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
@@ -1041,7 +1346,7 @@ def create_app(
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
         principal = await authenticator.authenticate(authorization)
-        authenticator.require_approver(principal)
+        authenticator.require_workflow_approver(principal)
         record = await supervisor_store.get_planning_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
@@ -1119,6 +1424,23 @@ def create_app(
         require_workbench_scope(record, principal)
         response = _planning_run_response(record)
         return JSONResponse(content=response.model_dump(mode="json"))
+
+    @app.get("/api/v1/planning-runs/{run_id}/resolved-workflow")
+    async def get_resolved_workflow(
+        run_id: str, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        """Expose the server-authorized workflow contract without any credentials."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        resolved_workflow = await workflow_configuration_store.get_run_resolution(run_id)
+        if resolved_workflow is None:
+            raise HTTPException(status_code=404, detail="resolved workflow is not available")
+        return JSONResponse(content=resolved_workflow.model_dump(mode="json"))
 
     @app.post("/api/v1/planning-runs/{run_id}/revise-product-specification")
     async def revise_product_specification(
