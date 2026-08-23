@@ -54,6 +54,8 @@ async def test_litellm_planner_requests_json_with_dedicated_bearer_key(valid_pla
     assert captured["body"]["model"] == "balanced"  # type: ignore[index]
     assert captured["body"]["response_format"] == {"type": "json_object"}  # type: ignore[index]
     assert '"title"' in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "product specification has already been accepted" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "repository-relative paths" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
 
 
 async def test_litellm_planner_retries_an_invalid_requirement_partition(valid_plan: dict) -> None:
@@ -160,6 +162,32 @@ async def test_litellm_planner_rejects_model_output_that_changes_target_reposito
         )
 
 
+async def test_litellm_planner_repairs_ephemeral_workspace_verification_paths(valid_plan: dict) -> None:
+    invalid = json.loads(json.dumps(valid_plan))
+    invalid["phases"][0]["verification"] = ["test -f /tmp/specification.md"]
+    requests = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        candidate = invalid if requests == 1 else valid_plan
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(candidate)}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
+    plan = await planner.generate(
+        PlanningContext(
+            initial_specification="Add a rate limiter.",
+            target_repos=valid_plan["target_repos"],
+            spec_set=valid_plan["spec_set"],
+            constraints=AiPlan.model_validate(valid_plan).constraints,
+        ),
+        planner_gateway(),
+    )
+
+    assert plan == AiPlan.model_validate(valid_plan)
+    assert requests == 2
+
+
 async def test_litellm_planner_accepts_a_single_fenced_json_object(valid_plan: dict) -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": f"```json\n{json.dumps(valid_plan)}\n```"}}]})
@@ -255,6 +283,35 @@ async def test_litellm_planner_generates_a_source_grounded_product_specification
     assert "no tools" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert "title and problem_statement" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert "Only assumptions may use kind=assumption" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert '"acceptance_criteria"' in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+
+
+async def test_litellm_planner_repairs_incomplete_product_specification_coverage() -> None:
+    incomplete = valid_product_specification()
+    incomplete["non_functional_requirements"] = [
+        {
+            "id": "non-functional-1",
+            "text": "Record rate limit decisions in metrics.",
+            "kind": "source",
+            "source_segment_ids": ["source-1"],
+        }
+    ]
+    requests = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        candidate = incomplete if requests == 1 else valid_product_specification()
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(candidate)}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
+    specification = await planner.generate_product_specification(
+        ProductSpecificationContext(initial_specification="Add a rate limiter."),
+        planner_gateway(),
+    )
+
+    assert specification == ProductSpecification.model_validate(valid_product_specification())
+    assert requests == 2
 
 
 async def test_litellm_planner_rejects_product_specification_with_unknown_source_segment() -> None:

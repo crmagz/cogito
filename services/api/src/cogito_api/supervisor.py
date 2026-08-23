@@ -3216,12 +3216,10 @@ class PostgresSupervisorStore:
 
         target = {
             "completed": (PlanningRunStatus.COMPLETED.value, AgentRunStatus.SUCCEEDED.value),
-            "failed": (PlanningRunStatus.PLANNING_FAILED.value, AgentRunStatus.FAILED.value),
-            "stopped_with_backup": (PlanningRunStatus.PLANNING_FAILED.value, AgentRunStatus.TIMED_OUT.value),
+            "stopped_with_backup": (PlanningRunStatus.IMPLEMENTATION_FAILED.value, AgentRunStatus.TIMED_OUT.value),
         }.get(outcome)
-        if target is None:
+        if target is None and outcome != "failed":
             return False
-        planning_status, agent_status = target
         async with self._engine.begin() as connection:
             result = await connection.execute(
                 text(
@@ -3242,6 +3240,15 @@ class PostgresSupervisorStore:
                 PlanningRunStatus.FINALIZING.value,
             }:
                 return False
+            if outcome == "failed":
+                target = (
+                    PlanningRunStatus.PLANNING_FAILED.value
+                    if row["planning_status"] == PlanningRunStatus.AWAITING_PLAN_APPROVAL.value
+                    else PlanningRunStatus.IMPLEMENTATION_FAILED.value,
+                    AgentRunStatus.FAILED.value,
+                )
+            assert target is not None
+            planning_status, agent_status = target
             current_agent_status = row["agent_status"]
             if current_agent_status in _TERMINAL_AGENT_STATUSES and current_agent_status != agent_status:
                 return False

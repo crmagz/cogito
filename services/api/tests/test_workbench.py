@@ -9,7 +9,7 @@ import json
 from fastapi.testclient import TestClient
 
 from cogito_api.main import create_app
-from cogito_api.models import AgentRunStatus, AiPlan, PlanningRunStatus, RegistrationLifecycle
+from cogito_api.models import AgentRunStatus, AiPlan, ArtifactReference, PlanningRunStatus, RegistrationLifecycle
 from cogito_api.supervisor import AgentRunRecord, WorkbenchAgentLifecycleTransitionRecord
 
 from .conftest import make_settings
@@ -254,6 +254,29 @@ def test_workbench_recovers_a_terminal_failure_summary_from_durable_worker_statu
 
     assert response.status_code == 200
     assert response.json()["failure_summary"] == "phase one failed: verification command returned 1"
+
+
+def test_workbench_projects_a_post_approval_failure_as_implementation_failed(client, valid_plan, supervisor_store) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    original = supervisor_store.planning_runs[run_id]
+    supervisor_store.planning_runs[run_id] = replace(
+        original,
+        status=PlanningRunStatus.IMPLEMENTATION_FAILED,
+        plan_artifact=ArtifactReference(ref="s3://plan-snapshots/plans/run-1/plan.json", sha256="a" * 64),
+    )
+    supervisor_store.agent_runs[run_id] = replace(
+        supervisor_store.agent_runs[run_id],
+        status=AgentRunStatus.FAILED,
+        error_summary="phase scaffold failed: verification command returned 1",
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    stages = {stage["stage_id"]: stage for stage in response.json()["stages"]}
+    assert stages["planning"]["state"] == "completed"
+    assert stages["implementation"]["state"] == "failed"
+    assert response.json()["failure_summary"] == "phase scaffold failed: verification command returned 1"
 
 
 def test_workbench_approver_can_view_pinned_mcp_capabilities_and_submit_selection(valid_plan: dict) -> None:

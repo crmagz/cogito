@@ -217,16 +217,15 @@ class PostgresRunStateReporter:
                         {"run_id": run_id, "artifact_sha256": digest},
                     )
             if status in {"failed", "phase_failed", "stopped_with_backup"}:
-                # Planning runs have no generic `failed` state. Preserve the
-                # terminal worker outcome in the lifecycle event below while
-                # making the Supervisor projection terminal as well, so an
-                # operator can never be shown a live implementation gate for
-                # a workflow Temporal has already closed.
+                # This status is emitted only after Temporal accepted a plan
+                # approval and entered execution. Preserve that distinction
+                # in the Supervisor projection: an execution failure must not
+                # make a completed planning phase appear to have failed.
                 await connection.execute(
                     text(
                         """
                         UPDATE supervisor_runs
-                        SET status = 'planning_failed'
+                        SET status = 'implementation_failed'
                         WHERE run_id = :run_id
                           AND status IN ('planning', 'implementing', 'awaiting_implementation_approval', 'finalizing')
                         """

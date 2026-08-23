@@ -83,6 +83,28 @@ def test_template_requires_default_policy_and_all_human_gates() -> None:
             }
         )
 
+    unsupported_phase = {
+        "id": "security_review",
+        "kind": "review",
+        "agent_role": "reviewer",
+        "depends_on": ["implementation"],
+        "permitted_tiers": ["balanced"],
+    }
+    with pytest.raises(ValidationError, match="released runtime"):
+        WorkflowTemplate.model_validate(
+            default_template().model_dump(mode="json") | {"phases": [*default_template().model_dump(mode="json")["phases"], unsupported_phase]}
+        )
+
+    incompatible_role = default_template().model_dump(mode="json")
+    incompatible_role["phases"][-1]["agent_role"] = "planner"
+    with pytest.raises(ValidationError, match="phase roles"):
+        WorkflowTemplate.model_validate(incompatible_role)
+
+    incompatible_artifact = default_template().model_dump(mode="json")
+    incompatible_artifact["required_gates"][1]["required_artifacts"] = [{"schema_id": "security_review", "version": "1"}]
+    with pytest.raises(ValidationError, match="gate artifacts"):
+        WorkflowTemplate.model_validate(incompatible_artifact)
+
 
 def test_requirement_relationships_allow_support_reuse_but_one_owner(valid_product_specification: dict) -> None:
     from cogito_api.models import ProductSpecification
@@ -181,6 +203,16 @@ def test_configuration_versions_have_an_audited_draft_to_publish_lifecycle() -> 
     assert [event[3].value for event in store.lifecycle_events] == ["validated", "published", "validated", "published"]
 
 
+def test_bootstrap_keeps_an_existing_immutable_default_policy() -> None:
+    store = InMemoryWorkflowConfigurationStore()
+    initial_constraints = PlanConstraints(max_cost_usd=25)
+
+    asyncio.run(store.bootstrap_defaults(project_id="default", constraints=initial_constraints))
+    asyncio.run(store.bootstrap_defaults(project_id="default", constraints=PlanConstraints(max_cost_usd=50)))
+
+    assert asyncio.run(store.get_policy("platform_standard@1.0.0")) == default_policy("default", initial_constraints)
+
+
 def test_platform_can_publish_a_policy_only_after_validation(
     valid_plan: dict, valid_product_specification: dict
 ) -> None:
@@ -254,3 +286,76 @@ def test_resolved_plan_gate_routes_to_the_durable_plan_approval_adapter(
         )
         assert decision.status_code == 202
         assert decision.json()["gate_id"] == "plan_scope_review"
+
+
+def test_governed_legacy_selection_uses_the_product_gate_authorization(
+    valid_plan: dict, valid_product_specification: dict
+) -> None:
+    """The compatibility route must not bypass the resolved product gate."""
+
+    app = _app(
+        roles=(
+            "cogito-product-manager", "cogito-policy-editor", "cogito-policy-publisher", "cogito-viewer",
+            "cogito-workflow-approver", "cogito-approver",
+        ),
+        valid_plan=valid_plan,
+        valid_product_specification=valid_product_specification,
+    )
+    with TestClient(app, headers={"Authorization": "Bearer operator-test-token"}) as client:
+        template = default_template().model_copy(
+            update={
+                "id": "restricted_product_review",
+                "version": "1.0.0",
+                "required_gates": [
+                    gate.model_copy(update={"approver_roles": ["security-reviewer"]})
+                    if gate.id == "product_specification_review"
+                    else gate
+                    for gate in default_template().required_gates
+                ],
+            }
+        )
+        assert client.post("/api/v1/workflow-templates", json=template.model_dump(mode="json")).status_code == 201
+        assert client.put(
+            "/api/v1/project-workflow-bindings/default",
+            json=_binding() | {"template_ref": "restricted_product_review@1.0.0"},
+        ).status_code == 200
+        run_id = client.post("/api/v1/projects/default/workflow-runs", json={"specification": _intake()}).json()["run_id"]
+        draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+        assert client.post(f"/api/v1/planning-runs/{run_id}/evaluate-product-specification").status_code == 200
+
+        response = client.post(
+            f"/api/v1/planning-runs/{run_id}/select-product-specification",
+            json={
+                "revision": draft["product_specification_revision"],
+                "artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            },
+            headers={"Idempotency-Key": "legacy-selection-is-governed"},
+        )
+
+        assert response.status_code == 403
+
+
+def test_admin_can_decide_a_default_governed_gate(
+    valid_plan: dict, valid_product_specification: dict
+) -> None:
+    app = _app(
+        roles=("cogito-product-manager", "cogito-policy-editor", "cogito-policy-publisher", "cogito-admin"),
+        valid_plan=valid_plan,
+        valid_product_specification=valid_product_specification,
+    )
+    with TestClient(app, headers={"Authorization": "Bearer operator-test-token"}) as client:
+        assert client.put("/api/v1/project-workflow-bindings/default", json=_binding()).status_code == 200
+        run_id = client.post("/api/v1/projects/default/workflow-runs", json={"specification": _intake()}).json()["run_id"]
+        draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+
+        accepted = client.post(
+            f"/api/v1/planning-runs/{run_id}/gates/product_specification_review",
+            json={
+                "decision": "approve",
+                "artifact_revision": draft["product_specification_revision"],
+                "artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            },
+            headers={"Idempotency-Key": "admin-product-gate"},
+        )
+
+        assert accepted.status_code == 200
