@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -11,6 +12,7 @@ from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySuper
 from .conftest import make_settings
 from cogito_api.main import create_app
 from cogito_api.models import AiPlan
+from cogito_api.planner import PlannerError, PlannerOutputError
 
 
 def _planning_request(valid_plan: dict) -> dict:
@@ -57,7 +59,26 @@ def test_submit_planning_run_persists_immutable_source_artifact_and_run(
     assert body["status"] == "planning"
     assert body["source_artifact"]["ref"].endswith(f"runs/{body['run_id']}/source-spec.json")
     assert len(body["source_artifact"]["sha256"]) == 64
-    assert store.source_specifications[body["run_id"]] == "Add a rate limiter with bounded, observable behavior."
+    source = json.loads(store.source_specifications[body["run_id"]])
+    assert source == {
+        "schema_version": "cogito.initial-specification/v1",
+        "goal": "Add a rate limiter with bounded, observable behavior.",
+        "repositories": [
+            {"ref": repository, "role": "primary_target"}
+            for repository in valid_plan["target_repos"]
+        ],
+        "specification_context": {"spec_set": valid_plan["spec_set"]},
+        "constraints": valid_plan["constraints"],
+        "priority": "normal",
+        "workflow_context": {
+            "project_id": "default",
+            "required_gates": [
+                "product_specification_review",
+                "plan_scope_review",
+                "delivery_review",
+            ],
+        },
+    }
     record = supervisor_store.planning_runs[body["run_id"]]
     assert record.source_artifact.sha256 == body["source_artifact"]["sha256"]
     assert record.target_repos == valid_plan["target_repos"]
@@ -248,7 +269,7 @@ def test_lifespan_dispatcher_generates_an_accepted_plan(
         assert len(starter.started_runs) == 1
 
 
-def test_accept_product_specification_returns_needs_refinement_without_selecting(
+def test_accept_product_specification_records_findings_and_selects_on_explicit_approval(
     client: TestClient, valid_plan: dict, valid_product_specification: dict
 ) -> None:
     run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
@@ -284,15 +305,15 @@ def test_accept_product_specification_returns_needs_refinement_without_selecting
 
     assert accepted.status_code == 200
     body = accepted.json()
-    assert body["outcome"] == "needs_refinement"
+    assert body["outcome"] == "accepted"
     assert body["specification_evaluation_readiness"] == "needs_revision"
     assert body["specification_evaluation_artifact"] is not None
-    assert body["selected_product_specification_artifact"] is None
+    assert body["selected_product_specification_artifact"]["sha256"] == revised["product_specification_artifact"]["sha256"]
     workbench = client.get(f"/api/v1/workbench/runs/{run_id}").json()
     states = {stage["stage_id"]: stage["state"] for stage in workbench["stages"]}
     assert states["product_specification"] == "completed"
-    assert states["specification_evaluation"] == "needs_revision"
-    assert states["planning"] == "needs_revision"
+    assert states["specification_evaluation"] == "completed"
+    assert states["planning"] == "queued"
     assert states["plan_approval"] == "unavailable"
 
 
@@ -399,8 +420,36 @@ def test_generate_product_specification_persists_an_immutable_draft(
         f"runs/{run_id}/product-specifications/1/{artifact['sha256']}/specification.json"
     )
     assert store.product_specifications[(run_id, 1)].title.text == "Rate limiting"
-    assert planner.product_specification_contexts[0].initial_specification == _planning_request(valid_plan)["initial_specification"]
+    source = json.loads(planner.product_specification_contexts[0].initial_specification)
+    assert source["schema_version"] == "cogito.initial-specification/v1"
+    assert source["goal"] == _planning_request(valid_plan)["initial_specification"]
+    assert source["repositories"] == [
+        {"ref": repository, "role": "primary_target"}
+        for repository in valid_plan["target_repos"]
+    ]
     assert supervisor_store.planning_runs[run_id].product_specification_artifact is not None
+
+
+def test_product_specification_generation_failure_is_recorded_in_the_workbench_timeline(
+    client: TestClient, valid_plan: dict, planner: FakePlanner
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+
+    async def fail_product_specification_generation(*_args: object) -> AiPlan:
+        raise PlannerError("LiteLLM product specification request failed")
+
+    planner.generate_product_specification = fail_product_specification_generation  # type: ignore[method-assign]
+    response = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification")
+
+    assert response.status_code == 502
+    timeline = client.get(f"/api/v1/workbench/runs/{run_id}/timeline")
+    assert timeline.status_code == 200
+    failure = next(item for item in timeline.json()["items"] if item["event_type"] == "product_specification_generation_failed")
+    assert failure["stage_ids"] == ["product_specification"]
+    assert failure["message"] == (
+        "Product specification generation failed because the configured model provider was unavailable or rejected "
+        "the request. Retry after platform configuration is restored."
+    )
 
 
 def test_generate_product_specification_retries_without_generating_a_second_draft(
@@ -474,7 +523,7 @@ def test_generated_plan_retains_its_selected_product_specification_binding(
     assert artifact.model_dump() == selected["selected_product_specification_artifact"]
 
 
-def test_human_revision_requires_fresh_selection_before_regenerating_a_plan(
+def test_human_revision_records_evaluation_selects_and_regenerates_a_plan(
     client: TestClient, valid_plan: dict, planner: FakePlanner, valid_product_specification: dict
 ) -> None:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
@@ -496,22 +545,8 @@ def test_human_revision_requires_fresh_selection_before_regenerating_a_plan(
     assert response.status_code == 200
     body = response.json()
     assert body["product_specification_revision"] == 2
-    assert body["selected_product_specification_artifact"] is None
-    assert client.post(f"/api/v1/planning-runs/{run_id}/generate-plan").status_code == 409
-    selected = client.post(
-        f"/api/v1/planning-runs/{run_id}/select-product-specification",
-        json={"revision": 2, "artifact_sha256": body["product_specification_artifact"]["sha256"]},
-        headers={"Idempotency-Key": "select-human-revision"},
-    )
-    assert selected.status_code == 409
-    evaluated = client.post(f"/api/v1/planning-runs/{run_id}/evaluate-product-specification")
-    assert evaluated.status_code == 200
-    selected = client.post(
-        f"/api/v1/planning-runs/{run_id}/select-product-specification",
-        json={"revision": 2, "artifact_sha256": body["product_specification_artifact"]["sha256"]},
-        headers={"Idempotency-Key": "select-human-revision"},
-    )
-    assert selected.status_code == 200
+    assert body["specification_evaluation_artifact"] is not None
+    assert body["selected_product_specification_artifact"] == body["product_specification_artifact"]
     assert client.post(f"/api/v1/planning-runs/{run_id}/generate-plan").status_code == 200
 
 
@@ -742,6 +777,24 @@ def test_generate_plan_rejects_a_planner_without_the_model_grant(
     assert response.json()["detail"] == "planner registry grant is unavailable"
     assert planner.contexts == []
     assert starter.started_runs == []
+
+
+def test_generate_plan_reports_invalid_model_output_without_a_retryable_status(
+    client: TestClient, valid_plan: dict, planner: FakePlanner
+) -> None:
+    """An accepted specification must not be retried forever for bad model output."""
+
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    _select_product_specification(client, run_id)
+
+    async def invalid_output(*_args: object) -> AiPlan:
+        raise PlannerOutputError("LiteLLM planner output failed contract validation after one repair attempt")
+
+    planner.generate = invalid_output  # type: ignore[method-assign]
+    response = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "planner output did not satisfy the approved planning contract"
 
 
 def test_generate_plan_retries_workflow_start_without_regenerating_artifact(

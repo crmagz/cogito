@@ -666,6 +666,19 @@ class InMemorySupervisorStore:
                 self.planning_runs[run_id], product_specification_generation_claimed_at=None
             )
 
+    async def record_product_specification_generation_failure(
+        self, run_id: str, generation_claim: str, message: str
+    ) -> None:
+        if self.product_specification_generation_claims.get(run_id) != generation_claim:
+            return
+        self._append_coordination_event(
+            run_id,
+            "product_specification_generation_failed",
+            stage_id="product_specification",
+            message=message,
+            attempt_id=generation_claim,
+        )
+
     async def record_specification_evaluation(
         self,
         run_id: str,
@@ -745,7 +758,6 @@ class InMemorySupervisorStore:
             or record.product_specification_revision != revision
             or artifact.sha256 != artifact_sha256
             or record.specification_evaluation_artifact is None
-            or record.specification_evaluation_readiness not in {"ready", "waived"}
         ):
             if (
                 record.selected_product_specification_revision == revision
@@ -1168,6 +1180,8 @@ class InMemorySupervisorStore:
         decision: str | None = None,
         lifecycle_status: str | None = None,
         stage_id: str | None = None,
+        message: str | None = None,
+        attempt_id: str | None = None,
     ) -> None:
         payload = {
             "schema_version": "1.0",
@@ -1178,6 +1192,8 @@ class InMemorySupervisorStore:
             "decision": decision,
             "lifecycle_status": lifecycle_status,
             "stage_id": stage_id,
+            "message": message[:512] if message else None,
+            "attempt_id": attempt_id,
             "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
             "action_url": f"/api/v1/coordination/runs/{run_id}/actions/{gate}" if gate else None,
         }

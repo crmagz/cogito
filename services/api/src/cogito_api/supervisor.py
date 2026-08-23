@@ -396,6 +396,10 @@ class SupervisorStore(Protocol):
 
     async def release_product_specification_generation(self, run_id: str, generation_claim: str) -> None: ...
 
+    async def record_product_specification_generation_failure(
+        self, run_id: str, generation_claim: str, message: str
+    ) -> None: ...
+
     async def attach_product_specification_revision(
         self,
         run_id: str,
@@ -1992,8 +1996,9 @@ class PostgresSupervisorStore:
                       AND run.selected_product_specification_revision IS NULL
                       AND run.product_specification_revision = :revision
                       AND run.product_specification_artifact_sha256 = :artifact_sha256
+                      -- Evaluation is mandatory evidence, but an explicit human approval
+                      -- owns the decision to proceed when it records findings.
                       AND run.specification_evaluation_artifact_sha256 IS NOT NULL
-                      AND run.specification_evaluation_readiness IN ('ready', 'waived')
                     RETURNING run.run_id, run.status, run.source_artifact_ref, run.source_artifact_sha256,
                               run.target_repos, run.spec_set, run.constraints, run.priority, run.submitted_at, run.submitted_by,
                               run.plan_artifact_ref, run.plan_artifact_sha256, run.planner_model, run.active_workflow_id, run.plan_revision,
@@ -2167,6 +2172,34 @@ class PostgresSupervisorStore:
                                                      product_specification_generation_claimed_at = NULL
                         WHERE run_id = :run_id AND product_specification_generation_claim = :claim"""),
                 {"run_id": run_id, "claim": generation_claim},
+            )
+
+    async def record_product_specification_generation_failure(
+        self, run_id: str, generation_claim: str, message: str
+    ) -> None:
+        """Record a retryable draft-generation failure without changing run eligibility."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT run_id FROM supervisor_runs
+                    WHERE run_id = :run_id AND status = 'planning'
+                      AND product_specification_artifact_ref IS NULL
+                      AND product_specification_generation_claim = :generation_claim
+                    """
+                ),
+                {"run_id": run_id, "generation_claim": generation_claim},
+            )
+            if result.scalar_one_or_none() is None:
+                return
+            await self._append_coordination_event(
+                connection,
+                run_id=run_id,
+                event_type="product_specification_generation_failed",
+                stage_id="product_specification",
+                message=message,
+                attempt_id=generation_claim,
             )
 
     async def attach_generated_plan(
@@ -2851,6 +2884,8 @@ class PostgresSupervisorStore:
         decision: str | None = None,
         lifecycle_status: str | None = None,
         stage_id: str | None = None,
+        message: str | None = None,
+        attempt_id: str | None = None,
     ) -> None:
         """Append one safe event and its generic notification delivery in the current transaction."""
 
@@ -2866,6 +2901,8 @@ class PostgresSupervisorStore:
             "decision": decision,
             "lifecycle_status": lifecycle_status,
             "stage_id": stage_id,
+            "message": message[:512] if message else None,
+            "attempt_id": attempt_id,
             "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
             "action_url": f"/api/v1/coordination/runs/{run_id}/actions/{gate}" if gate else None,
         }

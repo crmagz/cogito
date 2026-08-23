@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from enum import Enum, IntEnum, StrEnum
 from math import isfinite
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -578,6 +579,73 @@ class PlanningRunSubmission(BaseModel):
         default=False,
         description="Validate the planning request without persisting an artifact or run record",
     )
+
+
+class InitialSpecificationRepository(BaseModel):
+    """One authoritative repository the discovery and delivery agents may inspect."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str = Field(min_length=1, max_length=1_024)
+    role: Literal["primary_target", "related_context"] = "primary_target"
+
+
+class InitialSpecificationContext(BaseModel):
+    """The immutable specification set that defines the agent's contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec_set: str = Field(min_length=1, max_length=256)
+
+
+class InitialSpecificationWorkflowContext(BaseModel):
+    """Platform-owned workflow authority recorded alongside the product request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=128)
+    required_gates: list[str] = Field(min_length=3, max_length=32)
+    template_ref: str | None = Field(default=None, min_length=1, max_length=192)
+    policy_ref: str | None = Field(default=None, min_length=1, max_length=192)
+
+    @model_validator(mode="after")
+    def validate_required_gates(self) -> "InitialSpecificationWorkflowContext":
+        if len(set(self.required_gates)) != len(self.required_gates):
+            raise ValueError("initial specification workflow gates must be unique")
+        required = {"product_specification_review", "plan_scope_review", "delivery_review"}
+        if not required.issubset(self.required_gates):
+            raise ValueError("initial specification must include product, plan, and delivery review gates")
+        return self
+
+
+class InitialSpecificationContract(BaseModel):
+    """The complete, immutable agent-facing input for a workflow run.
+
+    Product managers provide the goal (or typed intake); the API adds the
+    authoritative repository, budget, and workflow selections.  This keeps a
+    single source document useful to people and agents without allowing the
+    request to override platform policy.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["cogito.initial-specification/v1"] = "cogito.initial-specification/v1"
+    goal: str = Field(min_length=1, max_length=100_000)
+    repositories: list[InitialSpecificationRepository] = Field(min_length=1, max_length=10)
+    specification_context: InitialSpecificationContext
+    constraints: PlanConstraints
+    priority: str = Field(min_length=1, max_length=32)
+    workflow_context: InitialSpecificationWorkflowContext
+    product_manager_intake: SpecificationIntake | None = None
+
+    @model_validator(mode="after")
+    def validate_contract_shape(self) -> "InitialSpecificationContract":
+        if not self.goal.strip():
+            raise ValueError("initial specification goal must be non-blank")
+        repository_refs = [repository.ref for repository in self.repositories]
+        if len(set(repository_refs)) != len(repository_refs):
+            raise ValueError("initial specification repositories must be unique")
+        return self
 
 
 class WorkflowRunSubmission(BaseModel):
@@ -1390,7 +1458,6 @@ class ProductSpecificationAcceptanceOutcome(StrEnum):
     """The operator-visible result of accepting a product specification."""
 
     ACCEPTED = "accepted"
-    NEEDS_REFINEMENT = "needs_refinement"
 
 
 class ProductSpecificationAcceptanceResponse(PlanningRunResponse):
@@ -1755,6 +1822,11 @@ class WorkbenchTimelineEvent(BaseModel):
     )
     decision: PlanApprovalDecision | None = Field(default=None, description="Recorded gate decision when available")
     lifecycle_status: AgentRunStatus | None = Field(default=None, description="Persisted lifecycle status when available")
+    message: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Bounded operator-safe explanation for this lifecycle update",
+    )
     delivered: bool = Field(description="Whether the configured delivery sink acknowledged the event")
     delivery_attempt_count: int = Field(ge=0, description="Bounded reconciliation attempt count")
 

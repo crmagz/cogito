@@ -84,7 +84,9 @@ class TemporalRunStarter:
             return False
         client = await self._get_client()
         handle = client.get_workflow_handle(workflow_id)
-        return await handle.execute_update("submit_workflow_gate", gate_id, decision, id=decision_id)
+        return await handle.execute_update(
+            "submit_workflow_gate", args=[gate_id, decision], id=decision_id
+        )
 
     async def get_terminal_outcome(self, workflow_id: str) -> str | None:
         """Return a recognized terminal workflow result, or ``None`` while it is live.

@@ -36,6 +36,10 @@ from .models import (
     ImplementationApprovalDecision,
     ImplementationApprovalRequest,
     ImplementationApprovalResponse,
+    InitialSpecificationContract,
+    InitialSpecificationContext,
+    InitialSpecificationRepository,
+    InitialSpecificationWorkflowContext,
     PlanApprovalDecision,
     PlanApprovalRequest,
     PlanApprovalResponse,
@@ -50,6 +54,7 @@ from .models import (
     ProductSpecificationSelectionRequest,
     SpecificationEvaluationReadiness,
     SpecificationEvaluationWaiverRequest,
+    SpecificationIntake,
     PlanningRunResponse,
     PlanningRunStatus,
     PlanningRunSubmission,
@@ -112,7 +117,14 @@ from .outbox import (
 )
 from .notifications import NotificationOutboxDispatcher, notification_sink, stop_notification_dispatcher
 from .observability import Telemetry, TelemetrySettings
-from .planner import LiteLLMPlanner, Planner, PlannerError, PlanningContext, ProductSpecificationContext
+from .planner import (
+    LiteLLMPlanner,
+    Planner,
+    PlannerError,
+    PlannerOutputError,
+    PlanningContext,
+    ProductSpecificationContext,
+)
 from .reconciliation import ReconciliationHealth, WorkflowProjectionReconciler, stop_reconciler
 from .storage import MinioPlanStore, PlanStore, PlanStoreUnavailableError
 from .registry import (
@@ -175,6 +187,49 @@ def _planning_run_response(record: PlanningRunRecord) -> PlanningRunResponse:
         plan_artifact=record.plan_artifact,
         implementation_artifact=record.implementation_artifact,
         submitted_at=record.submitted_at,
+    )
+
+
+def _source_specification_contract(
+    *,
+    goal: str,
+    target_repos: list[str],
+    spec_set: str,
+    constraints: PlanConstraints,
+    priority: str,
+    project_id: str,
+    template_ref: str | None = None,
+    policy_ref: str | None = None,
+    required_gates: list[str] | None = None,
+    product_manager_intake: SpecificationIntake | None = None,
+) -> str:
+    """Create the one structured source document agents receive for a run.
+
+    The caller's goal remains plainly visible, while repository and governance
+    fields come from validated API inputs and cannot be silently omitted from
+    discovery or product-specification generation.
+    """
+
+    contract = InitialSpecificationContract(
+        goal=goal,
+        repositories=[InitialSpecificationRepository(ref=repository) for repository in target_repos],
+        specification_context=InitialSpecificationContext(spec_set=spec_set),
+        constraints=constraints,
+        priority=priority,
+        workflow_context=InitialSpecificationWorkflowContext(
+            project_id=project_id,
+            template_ref=template_ref,
+            policy_ref=policy_ref,
+            required_gates=required_gates
+            or ["product_specification_review", "plan_scope_review", "delivery_review"],
+        ),
+        product_manager_intake=product_manager_intake,
+    )
+    return json.dumps(
+        contract.model_dump(mode="json", exclude_none=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
     )
 
 
@@ -778,7 +833,18 @@ def create_app(
                 },
             )
         submitted_at = datetime.now(timezone.utc).isoformat()
-        source_text = json.dumps(submission.specification.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        source_text = _source_specification_contract(
+            goal=submission.specification.objective,
+            target_repos=admission.binding.target_repos,
+            spec_set=admission.binding.spec_set,
+            constraints=constraints,
+            priority=submission.priority,
+            project_id=project_id,
+            template_ref=admission.binding.template_ref,
+            policy_ref=admission.binding.policy_ref or admission.template.default_policy_ref,
+            required_gates=[gate.id for gate in admission.template.required_gates],
+            product_manager_intake=submission.specification,
+        )
         try:
             source_artifact = store.put_source_specification(run_id, source_text)
         except PlanStoreUnavailableError as error:
@@ -887,7 +953,17 @@ def create_app(
             )
 
         try:
-            source_artifact = store.put_source_specification(run_id, submission.initial_specification)
+            source_artifact = store.put_source_specification(
+                run_id,
+                _source_specification_contract(
+                    goal=submission.initial_specification,
+                    target_repos=submission.target_repos,
+                    spec_set=submission.spec_set,
+                    constraints=submission.constraints,
+                    priority=submission.priority,
+                    project_id=settings.workbench_default_project_id,
+                ),
+            )
         except PlanStoreUnavailableError as error:
             raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
         await supervisor_store.create_agent_run(
@@ -987,6 +1063,25 @@ def create_app(
                                 status_code=409, detail="planning run changed while the product specification was generated"
                             ) from None
                         updated = latest
+                except HTTPException as error:
+                    if error.status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
+                        message = (
+                            "Product specification generation failed because the configured model provider was "
+                            "unavailable or rejected the request. Retry after platform configuration is restored."
+                            if error.status_code == status.HTTP_502_BAD_GATEWAY
+                            else "Product specification generation could not reach a required platform service. "
+                            "Retry after the service is restored."
+                        )
+                        try:
+                            await supervisor_store.record_product_specification_generation_failure(
+                                run_id, generation_claim, message
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Could not record product specification generation failure",
+                                extra={"run_id": run_id},
+                            )
+                    raise
                 finally:
                     await supervisor_store.release_product_specification_generation(run_id, generation_claim)
         elif record.product_specification_artifact is not None:
@@ -1067,6 +1162,11 @@ def create_app(
                     ),
                     planner_resolution.gateway,
                 )
+            except PlannerOutputError as error:
+                raise HTTPException(
+                    status_code=422,
+                    detail="planner output did not satisfy the approved planning contract",
+                ) from error
             except PlannerError as error:
                 raise HTTPException(status_code=502, detail="planner failed to produce a valid plan") from error
             try:
@@ -1405,13 +1505,10 @@ def create_app(
         ):
             raise HTTPException(status_code=409, detail="the displayed product specification is stale or ineligible for acceptance")
 
-        evaluated = await evaluate_current_product_specification(record)
-        if evaluated.specification_evaluation_readiness not in {"ready", "waived"}:
-            response = ProductSpecificationAcceptanceResponse(
-                **_planning_run_response(evaluated).model_dump(),
-                outcome=ProductSpecificationAcceptanceOutcome.NEEDS_REFINEMENT,
-            )
-            return JSONResponse(content=response.model_dump(mode="json"))
+        # The evaluation is mandatory review evidence, not an automated veto.  A
+        # human who explicitly confirms this gate may proceed with findings
+        # recorded; requesting a revision is the separate, explicit action.
+        await evaluate_current_product_specification(record)
         try:
             request_sha256 = sha256(
                 json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
@@ -1470,13 +1567,12 @@ def create_app(
         require_workbench_scope(record, principal)
         if (
             record.specification_evaluation_artifact is None
-            or record.specification_evaluation_readiness not in {"ready", "waived"}
             or record.product_specification_artifact is None
             or record.product_specification_artifact.sha256 != request_body.artifact_sha256
         ):
             raise HTTPException(
                 status_code=409,
-                detail="a matching ready or waived specification evaluation is required before selection",
+                detail="a matching recorded specification evaluation is required before selection",
             )
         try:
             request_sha256 = sha256(
@@ -1723,7 +1819,7 @@ def create_app(
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> JSONResponse:
-        """Persist one complete human-authored revision and require a fresh explicit selection."""
+        """Persist an explicitly requested revision, record its review, and continue planning."""
 
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
@@ -1755,6 +1851,30 @@ def create_app(
             )
         except (ValueError, ApprovalConflictError) as error:
             raise HTTPException(status_code=409, detail="product specification revision is stale or invalid") from error
+        # Saving an explicitly requested revision is itself the review decision:
+        # evaluate it for traceability and bind that exact immutable revision as
+        # the planning input.  The derived key makes an interrupted browser
+        # request safely replayable without colliding with the revision record.
+        evaluated = await evaluate_current_product_specification(updated)
+        selection_request = ProductSpecificationSelectionRequest(
+            revision=evaluated.product_specification_revision,
+            artifact_sha256=evaluated.product_specification_artifact.sha256,  # type: ignore[union-attr]
+        )
+        selection_request_sha256 = sha256(
+            json.dumps(selection_request.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        selection_key = f"revision-selection-{sha256(idempotency_key.encode()).hexdigest()}"
+        try:
+            updated = await supervisor_store.select_product_specification(
+                run_id,
+                selection_request.revision,
+                selection_request.artifact_sha256,
+                principal.subject,
+                selection_key,
+                selection_request_sha256,
+            )
+        except (ValueError, ApprovalConflictError) as error:
+            raise HTTPException(status_code=409, detail="revised product specification could not be accepted") from error
         response = _planning_run_response(updated)
         return JSONResponse(content=response.model_dump(mode="json"))
 
@@ -2501,6 +2621,8 @@ def create_app(
             return ["specification_evaluation"]
         if event_type == "specification_evaluation_waived":
             return ["specification_evaluation"]
+        if event_type == "product_specification_generation_failed":
+            return ["product_specification"]
         if event_type == "planning_started":
             return ["planning"]
         if event_type in {"planning_agent_started", "planning_agent_failed"}:
@@ -2537,6 +2659,7 @@ def create_app(
                     artifact_sha256=event.artifact_sha256,
                     decision=workbench_plan_decision(event.decision),
                     lifecycle_status=workbench_agent_status(event.lifecycle_status),
+                    message=event.payload.get("message") if isinstance(event.payload.get("message"), str) else None,
                     delivered=delivered,
                     delivery_attempt_count=attempts,
                 )

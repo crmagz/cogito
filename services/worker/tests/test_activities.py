@@ -41,6 +41,18 @@ async def test_load_plan_returns_plan_from_store(
     assert result == {"title": "Test plan"}
 
 
+async def test_load_resolved_workflow_returns_immutable_artifact_from_store(
+    env: ActivityEnvironment, activities: WorkerActivities, store: InMemoryRunStore
+):
+    workflow_ref = "s3://plan-snapshots/runs/run-1/resolved-workflow.json"
+    resolution = {"run_id": "run-1", "gates": [], "phases": []}
+    store.plans[workflow_ref] = resolution
+
+    result = await env.run(activities.load_resolved_workflow, workflow_ref)
+
+    assert result == resolution
+
+
 async def test_report_status_creates_status_when_none_exists(
     env: ActivityEnvironment, activities: WorkerActivities, store: InMemoryRunStore
 ):

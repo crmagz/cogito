@@ -140,6 +140,7 @@ async def main() -> None:
         workflows=[DeveloperRunWorkflow],
         activities=[
             activities.load_plan,
+            activities.load_resolved_workflow,
             activities.report_status,
             activities.freeze_implementation_artifact,
             activities.validate_implementation,

@@ -10,8 +10,15 @@ from cogito_api.temporal import TemporalRunStarter, _terminal_outcome
 class _FakeHandle:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any], str | None]] = []
+        self.gate_calls: list[tuple[str, list[Any], str | None]] = []
 
-    async def execute_update(self, name: str, decision: dict[str, Any], *, id: str | None = None) -> bool:
+    async def execute_update(
+        self, name: str, decision: dict[str, Any] | None = None, *, args: list[Any] | None = None, id: str | None = None
+    ) -> bool:
+        if args is not None:
+            self.gate_calls.append((name, args, id))
+            return True
+        assert decision is not None
         self.calls.append((name, decision, id))
         return True
 
@@ -60,6 +67,19 @@ async def test_temporal_mcp_selection_uses_the_versioned_worker_update() -> None
 
     assert await starter.submit_plan_approval("run-1:plan:1:abcdef", decision) is True
     assert handle.calls == [("submit_plan_approval_with_mcp_selection", decision, "decision-mcp-1")]
+
+
+@pytest.mark.asyncio
+async def test_temporal_resolved_gate_uses_the_sdk_multi_argument_shape() -> None:
+    handle = _FakeHandle()
+    starter = TemporalRunStarter("temporal:7233", "default", "tasks")
+    starter._client = _FakeClient(handle)  # type: ignore[assignment]
+    decision = {"decision_id": "decision-gate-1", "artifact_sha256": "a" * 64, "decision": "approve"}
+
+    assert await starter.submit_workflow_gate("run-1:plan:1:abcdef", "plan_scope_review", decision) is True
+    assert handle.gate_calls == [
+        ("submit_workflow_gate", ["plan_scope_review", decision], "decision-gate-1")
+    ]
 
 
 def test_terminal_outcome_accepts_only_known_reconcilable_results() -> None:
