@@ -581,6 +581,8 @@ class InMemorySupervisorStore:
 
     async def cancel_planning_run(self, run_id: str) -> PlanningRunRecord:
         record = self.planning_runs[run_id]
+        if record.status is PlanningRunStatus.CANCELLED:
+            return record
         if record.status is not PlanningRunStatus.PLANNING or record.plan_artifact is not None:
             raise ValueError("planning run is not eligible for cancellation")
         updated = replace(record, status=PlanningRunStatus.CANCELLED)
