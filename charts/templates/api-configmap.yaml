@@ -8,6 +8,7 @@
 {{- $oidcAuth := default (dict) $auth.oidc }}
 {{- $notifications := default (dict) .Values.api.notifications }}
 {{- $reconciliation := default (dict) .Values.api.reconciliation }}
+{{- $auditLogs := default (dict) .Values.api.auditLogs }}
 {{- $mcp := default (dict) .Values.mcp }}
 {{- $githubMcp := default (dict) $mcp.github }}
 {{- $githubApp := default (dict) $githubMcp.app }}
@@ -27,6 +28,9 @@
 {{- $telemetryEnabled := or .Values.observability.traces.enabled .Values.observability.metrics.enabled }}
 {{- if and $telemetryEnabled (not .Values.observability.otlp.endpoint) }}
 {{- fail "observability.otlp.endpoint is required when traces or metrics are enabled" }}
+{{- end }}
+{{- if and $auditLogs.enabled (not $auditLogs.lokiEndpoint) }}
+{{- fail "api.auditLogs.lokiEndpoint is required when api.auditLogs.enabled" }}
 {{- end }}
 apiVersion: v1
 kind: ConfigMap
@@ -87,6 +91,9 @@ data:
   COGITO_RECONCILIATION_POLL_SECONDS: {{ $reconciliationPollSeconds | quote }}
   COGITO_RECONCILIATION_BATCH_SIZE: {{ $reconciliationBatchSize | quote }}
   COGITO_RECONCILIATION_STALL_SECONDS: {{ $reconciliationStallSeconds | quote }}
+  COGITO_AUDIT_LOGS_ENABLED: {{ default false $auditLogs.enabled | quote }}
+  COGITO_AUDIT_LOGS_LOKI_ENDPOINT: {{ default "" $auditLogs.lokiEndpoint | quote }}
+  COGITO_AUDIT_LOGS_TIMEOUT_SECONDS: {{ default 3 $auditLogs.timeoutSeconds | quote }}
   COGITO_TELEMETRY_TRACES_ENABLED: {{ .Values.observability.traces.enabled | quote }}
   COGITO_TELEMETRY_METRICS_ENABLED: {{ .Values.observability.metrics.enabled | quote }}
   COGITO_TELEMETRY_SPAN_EVENTS_ENABLED: {{ .Values.observability.spanEvents.enabled | quote }}

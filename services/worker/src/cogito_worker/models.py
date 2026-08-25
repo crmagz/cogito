@@ -126,6 +126,7 @@ class ExecutionWorkspace:
     mcp_servers: list["McpServerConfiguration"] = field(default_factory=list)
     mcp_grants: list[McpToolGrant] = field(default_factory=list)
     mcp_selection_explicit: bool = False
+    audit_invocation_id: str = ""
 
 
 @dataclass(frozen=True)

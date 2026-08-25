@@ -133,12 +133,24 @@ class LiteLLMReviewHarness:
             },
         ]
         last_error: ReviewFormatError | None = None
-        for _ in range(_MAX_COMPLETION_ATTEMPTS):
+        for attempt in range(1, _MAX_COMPLETION_ATTEMPTS + 1):
             content = await self._completion(model, self._key_for_model(model), messages)
             try:
                 return _parse_findings(content, lens, model)
             except ReviewFormatError as error:
                 last_error = error
+                if attempt < _MAX_COMPLETION_ATTEMPTS:
+                    messages = [
+                        *messages,
+                        {
+                            "role": "user",
+                            "content": (
+                                "The prior findings candidate was rejected: "
+                                f"{error}. Return a complete replacement JSON object. Every file must be a "
+                                "non-empty repository-relative path without '..', a leading slash, or a backslash."
+                            ),
+                        },
+                    ]
         raise ReviewError("reviewer did not return valid findings JSON") from last_error
 
     async def _verify_finding(self, finding: ReviewFinding, diff: str) -> ReviewFinding:
@@ -235,7 +247,7 @@ def _parse_findings(content: str, lens: str, model: str) -> list[ReviewFinding]:
     findings: list[ReviewFinding] = []
     for value in values[:_MAX_FINDINGS_PER_LENS]:
         if not isinstance(value, dict):
-            raise ReviewError("reviewer finding is not an object")
+            raise ReviewFormatError("reviewer finding is not an object")
         severity = value.get("severity")
         file = value.get("file")
         line = value.get("line")
@@ -243,17 +255,17 @@ def _parse_findings(content: str, lens: str, model: str) -> list[ReviewFinding]:
         evidence = value.get("evidence")
         suggested_fix = value.get("suggested_fix")
         if severity not in {"blocking", "advisory", "nit"}:
-            raise ReviewError("reviewer finding has an unsupported severity")
+            raise ReviewFormatError("reviewer finding has an unsupported severity")
         if not isinstance(file, str) or not _safe_relative_path(file):
-            raise ReviewError("reviewer finding has an unsafe file path")
+            raise ReviewFormatError("reviewer finding has an unsafe file path")
         if line is not None and (not isinstance(line, int) or isinstance(line, bool) or line < 1):
-            raise ReviewError("reviewer finding has an invalid line")
+            raise ReviewFormatError("reviewer finding has an invalid line")
         if not isinstance(description, str) or not description.strip():
-            raise ReviewError("reviewer finding is missing a description")
+            raise ReviewFormatError("reviewer finding is missing a description")
         if evidence is not None and not isinstance(evidence, str):
-            raise ReviewError("reviewer finding has invalid evidence")
+            raise ReviewFormatError("reviewer finding has invalid evidence")
         if suggested_fix is not None and not isinstance(suggested_fix, str):
-            raise ReviewError("reviewer finding has an invalid suggested fix")
+            raise ReviewFormatError("reviewer finding has an invalid suggested fix")
         findings.append(
             ReviewFinding(
                 severity=severity,

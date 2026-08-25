@@ -80,6 +80,7 @@ class InMemoryExecutionJobClient:
         self.deleted: list[str] = []
         self.awaited: list[tuple[str, int]] = []
         self.executed: list[tuple[str, list[str], str]] = []
+        self.audit_invocation_ids: list[str] = []
 
     async def create_job(self, job_name: str, body: dict[str, object]) -> None:
         self.created.append((job_name, body))
@@ -97,8 +98,12 @@ class InMemoryExecutionJobClient:
         stdin: str,
         timeout_seconds: int,
         output_limit_bytes: int,
+        audit_invocation_id: str = "",
+        workspace_root: str = "",
     ) -> CommandResult:
+        del workspace_root
         self.executed.append((job_name, command, stdin))
+        self.audit_invocation_ids.append(audit_invocation_id)
         return CommandResult(exit_code=0, stdout="", stderr="")
 
 

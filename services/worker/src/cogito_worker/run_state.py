@@ -54,6 +54,19 @@ class RunStateReporter(Protocol):
         metadata: dict[str, Any] | None,
     ) -> None: ...
 
+    async def record_stage_invocation(
+        self,
+        run_id: str,
+        stage_id: str,
+        role: str,
+        attempt: int,
+        trace_context_available: bool,
+    ) -> None: ...
+
+    async def record_mcp_invocation_evidence(self, run_id: str, evidence: dict[str, object]) -> None: ...
+
+    async def record_execution_workspace_lifecycle(self, run_id: str, job_name: str, lifecycle: str) -> None: ...
+
 
 class NullRunStateReporter:
     async def report(
@@ -64,6 +77,30 @@ class NullRunStateReporter:
         metadata: dict[str, Any] | None,
     ) -> None:
         del run_id, status, failure_detail, metadata
+
+    async def record_stage_invocation(
+        self,
+        run_id: str,
+        stage_id: str,
+        role: str,
+        attempt: int,
+        trace_context_available: bool,
+    ) -> None:
+        del run_id, stage_id, role, attempt, trace_context_available
+
+    async def record_mcp_invocation_evidence(self, run_id: str, evidence: dict[str, object]) -> None:
+        del run_id, evidence
+
+    async def record_execution_workspace_lifecycle(self, run_id: str, job_name: str, lifecycle: str) -> None:
+        del run_id, job_name, lifecycle
+
+
+def stage_invocation_id(run_id: str, stage_id: str, role: str, attempt: int) -> str:
+    """Return the opaque, retry-stable identifier shared by audit and pod logs."""
+
+    if not run_id or not stage_id or not role or attempt < 1:
+        raise ValueError("stage invocation identity is invalid")
+    return sha256(f"stage-invocation-v1:{run_id}:{stage_id}:{role}:{attempt}".encode()).hexdigest()
 
 
 class PostgresRunStateReporter:
@@ -335,6 +372,163 @@ class PostgresRunStateReporter:
                     "to_status": target,
                     "occurred_at": now,
                     "metadata": json.dumps(safe_metadata),
+                },
+            )
+
+    async def record_stage_invocation(
+        self,
+        run_id: str,
+        stage_id: str,
+        role: str,
+        attempt: int,
+        trace_context_available: bool,
+    ) -> None:
+        """Append non-authoritative, correlation-only evidence for one phase attempt."""
+
+        invocation_id = stage_invocation_id(run_id, stage_id, role, attempt)
+        payload = {
+            "schema_version": "1.0",
+            "event_type": "stage_invocation_started",
+            "run_id": run_id,
+            "activity": {
+                "kind": "agent",
+                "actor_label": role.replace("_", " ").title(),
+                "log_evidence_available": True,
+            },
+            "invocation": {
+                "invocation_id": invocation_id,
+                "source": "worker_phase",
+                "stage_id": stage_id,
+                "role": role,
+                "attempt": attempt,
+                "trace_context_available": trace_context_available,
+            },
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO coordination_events (event_id, run_id, event_type, dedupe_key, payload, created_at)
+                    VALUES (:event_id, :run_id, 'stage_invocation_started', :dedupe_key,
+                            CAST(:payload AS jsonb), :created_at)
+                    ON CONFLICT (dedupe_key) DO NOTHING
+                    """
+                ),
+                {
+                    "event_id": str(uuid.uuid4()),
+                    "run_id": run_id,
+                    "dedupe_key": invocation_id,
+                    "payload": canonical,
+                    "created_at": datetime.now(timezone.utc),
+                },
+            )
+
+    async def record_mcp_invocation_evidence(self, run_id: str, evidence: dict[str, object]) -> None:
+        """Append safe, aggregate MCP observations without making gateway audit authoritative."""
+
+        events = evidence.get("events")
+        if evidence.get("status") != "observed" or not isinstance(events, list):
+            return
+        normalized: list[dict[str, object]] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            server_id = event.get("server_id")
+            server_version = event.get("server_version")
+            server_manifest_sha256 = event.get("server_manifest_sha256")
+            tool_name = event.get("tool_name")
+            input_schema_sha256 = event.get("input_schema_sha256")
+            outcome = event.get("outcome")
+            invocation_count = event.get("invocation_count")
+            if not (
+                all(isinstance(value, str) and value for value in (
+                    server_id, server_version, server_manifest_sha256, tool_name, input_schema_sha256, outcome
+                ))
+                and outcome in {"success", "failure"}
+                and isinstance(invocation_count, int)
+                and 1 <= invocation_count <= 100_000
+            ):
+                continue
+            normalized.append(
+                {
+                    "server_id": server_id,
+                    "server_version": server_version,
+                    "server_manifest_sha256": server_manifest_sha256,
+                    "tool_name": tool_name,
+                    "input_schema_sha256": input_schema_sha256,
+                    "outcome": outcome,
+                    "invocation_count": invocation_count,
+                }
+            )
+        if not normalized:
+            return
+        async with self._engine.begin() as connection:
+            for event in normalized:
+                canonical_event = json.dumps(event, sort_keys=True, separators=(",", ":"))
+                invocation_id = sha256(f"mcp-invocation-v1:{run_id}:{canonical_event}".encode()).hexdigest()
+                payload = {
+                    "schema_version": "1.0",
+                    "event_type": "mcp_invocation_observed",
+                    "run_id": run_id,
+                    "activity": {
+                        "kind": "mcp",
+                        "actor_label": f"{event['server_id']} / {event['tool_name']}",
+                        "log_evidence_available": False,
+                    },
+                    "mcp_invocation": {"invocation_id": invocation_id, **event},
+                }
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO coordination_events (event_id, run_id, event_type, dedupe_key, payload, created_at)
+                        VALUES (:event_id, :run_id, 'mcp_invocation_observed', :dedupe_key,
+                                CAST(:payload AS jsonb), :created_at)
+                        ON CONFLICT (dedupe_key) DO NOTHING
+                        """
+                    ),
+                    {
+                        "event_id": str(uuid.uuid4()),
+                        "run_id": run_id,
+                        "dedupe_key": invocation_id,
+                        "payload": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                        "created_at": datetime.now(timezone.utc),
+                    },
+                )
+
+    async def record_execution_workspace_lifecycle(self, run_id: str, job_name: str, lifecycle: str) -> None:
+        """Append opaque execution-pod lifecycle evidence without exposing its Kubernetes name."""
+
+        if not run_id or not job_name or lifecycle not in {"provisioned", "cleanup_started"}:
+            raise ValueError("execution workspace lifecycle is invalid")
+        workspace_id = sha256(f"execution-workspace-v1:{run_id}:{job_name}".encode()).hexdigest()
+        payload = {
+            "schema_version": "1.0",
+            "event_type": "execution_workspace_lifecycle",
+            "run_id": run_id,
+            "activity": {"kind": "event", "actor_label": None, "log_evidence_available": False},
+            "execution_workspace": {
+                "workspace_id": workspace_id,
+                "source": "execution_job",
+                "lifecycle": lifecycle,
+            },
+        }
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO coordination_events (event_id, run_id, event_type, dedupe_key, payload, created_at)
+                    VALUES (:event_id, :run_id, 'execution_workspace_lifecycle', :dedupe_key,
+                            CAST(:payload AS jsonb), :created_at)
+                    ON CONFLICT (dedupe_key) DO NOTHING
+                    """
+                ),
+                {
+                    "event_id": str(uuid.uuid4()),
+                    "run_id": run_id,
+                    "dedupe_key": sha256(f"{workspace_id}:{lifecycle}".encode()).hexdigest(),
+                    "payload": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                    "created_at": datetime.now(timezone.utc),
                 },
             )
 

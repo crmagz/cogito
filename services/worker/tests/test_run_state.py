@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -160,3 +161,112 @@ async def test_coordination_event_dedupe_keys_are_deterministic() -> None:
     assert "ON CONFLICT (dedupe_key) DO NOTHING" in lifecycle_statement
     assert gate_parameters["dedupe_key"] != gate_parameters["event_id"]
     assert lifecycle_parameters["dedupe_key"] != lifecycle_parameters["event_id"]
+
+
+async def test_stage_invocation_event_is_idempotent_and_correlation_only() -> None:
+    connection = _Connection(previous_status="RUNNING")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.record_stage_invocation("run-1", "implement-api", "developer", 2, True)
+
+    statement, parameters = connection.calls[0]
+    assert "INSERT INTO coordination_events" in statement
+    assert "ON CONFLICT (dedupe_key) DO NOTHING" in statement
+    assert parameters["dedupe_key"] != parameters["event_id"]
+    assert '"event_type":"stage_invocation_started"' in parameters["payload"]
+    assert '"attempt":2' in parameters["payload"]
+    assert json.loads(parameters["payload"])["activity"] == {
+        "kind": "agent",
+        "actor_label": "Developer",
+        "log_evidence_available": True,
+    }
+    assert "notification_outbox" not in statement
+
+
+async def test_mcp_invocation_event_persists_only_the_safe_aggregate() -> None:
+    connection = _Connection(previous_status="RUNNING")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.record_mcp_invocation_evidence(
+        "run-1",
+        {
+            "status": "observed",
+            "events": [
+                {
+                    "server_id": "readonly",
+                    "server_version": "1.0.0",
+                    "server_manifest_sha256": "b" * 64,
+                    "tool_name": "catalog_read",
+                    "input_schema_sha256": "c" * 64,
+                    "outcome": "success",
+                    "invocation_count": 2,
+                    "request_body": "must not be persisted",
+                }
+            ],
+        },
+    )
+
+    statement, parameters = connection.calls[0]
+    assert "INSERT INTO coordination_events" in statement
+    assert "ON CONFLICT (dedupe_key) DO NOTHING" in statement
+    assert '"event_type":"mcp_invocation_observed"' in parameters["payload"]
+    assert '"invocation_count":2' in parameters["payload"]
+    assert json.loads(parameters["payload"])["activity"] == {
+        "kind": "mcp",
+        "actor_label": "readonly / catalog_read",
+        "log_evidence_available": False,
+    }
+    assert "request_body" not in parameters["payload"]
+
+
+async def test_mcp_invocation_events_keep_each_observed_tool_as_the_actor() -> None:
+    connection = _Connection(previous_status="RUNNING")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.record_mcp_invocation_evidence(
+        "run-1",
+        {
+            "status": "observed",
+            "events": [
+                {
+                    "server_id": "catalog",
+                    "server_version": "1.0.0",
+                    "server_manifest_sha256": "b" * 64,
+                    "tool_name": "catalog_read",
+                    "input_schema_sha256": "c" * 64,
+                    "outcome": "success",
+                    "invocation_count": 1,
+                },
+                {
+                    "server_id": "github",
+                    "server_version": "1.0.0",
+                    "server_manifest_sha256": "d" * 64,
+                    "tool_name": "pull_request_read",
+                    "input_schema_sha256": "e" * 64,
+                    "outcome": "success",
+                    "invocation_count": 1,
+                },
+            ],
+        },
+    )
+
+    assert [json.loads(parameters["payload"])["activity"]["actor_label"] for _, parameters in connection.calls] == [
+        "catalog / catalog_read",
+        "github / pull_request_read",
+    ]
+
+
+async def test_execution_workspace_lifecycle_hides_the_job_name() -> None:
+    connection = _Connection(previous_status="RUNNING")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.record_execution_workspace_lifecycle("run-1", "cogito-execution-sensitive-name", "provisioned")
+
+    statement, parameters = connection.calls[0]
+    assert "INSERT INTO coordination_events" in statement
+    assert '"event_type":"execution_workspace_lifecycle"' in parameters["payload"]
+    assert "cogito-execution-sensitive-name" not in parameters["payload"]

@@ -1,0 +1,15 @@
+tempo:
+  reportingEnabled: false
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: tempo
+        endpoint: cogito-minio.cogito.svc.cluster.local:9000
+        access_key: minioadmin
+        secret_key: minioadmin
+        insecure: true
+
+persistence:
+  enabled: true
+  size: 5Gi

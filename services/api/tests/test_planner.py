@@ -27,6 +27,27 @@ def planner_gateway(**overrides: object) -> AgentGatewayResolution:
     return AgentGatewayResolution(**values)
 
 
+def planner_draft(plan: dict) -> dict:
+    """Return only the variable fields a planner is allowed to control."""
+
+    return {key: plan[key] for key in ("title", "summary", "phases", "review_profile") if key in plan}
+
+
+def assert_trusted_plan(plan: AiPlan, expected: dict) -> None:
+    """Assert that the platform restored its trusted envelope and ownership facts."""
+
+    expected_plan = AiPlan.model_validate(expected)
+    assert plan.model_dump(exclude={"phases"}) == expected_plan.model_dump(exclude={"phases"})
+    assert [phase.model_dump(exclude={"requirement_assignments"}) for phase in plan.phases] == [
+        phase.model_dump(exclude={"requirement_assignments"}) for phase in expected_plan.phases
+    ]
+    assert all(
+        assignment.relationship.value == "owns"
+        for phase in plan.phases
+        for assignment in phase.requirement_assignments
+    )
+
+
 async def test_litellm_planner_requests_json_with_dedicated_bearer_key(valid_plan: dict) -> None:
     captured: dict[str, object] = {}
 
@@ -35,7 +56,7 @@ async def test_litellm_planner_requests_json_with_dedicated_bearer_key(valid_pla
         captured["body"] = json.loads(request.content)
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(valid_plan)}}]},
+            json={"choices": [{"message": {"content": json.dumps(planner_draft(valid_plan))}}]},
         )
 
     planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
@@ -49,13 +70,16 @@ async def test_litellm_planner_requests_json_with_dedicated_bearer_key(valid_pla
         planner_gateway(),
     )
 
-    assert plan == AiPlan.model_validate(valid_plan)
+    assert_trusted_plan(plan, valid_plan)
     assert captured["authorization"] == "Bearer planner-test-key"
     assert captured["body"]["model"] == "balanced"  # type: ignore[index]
     assert captured["body"]["response_format"] == {"type": "json_object"}  # type: ignore[index]
     assert '"title"' in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert "product specification has already been accepted" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert "repository-relative paths" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    planner_input = json.loads(captured["body"]["messages"][1]["content"])  # type: ignore[index]
+    assert "target_repos" not in planner_input
+    assert "constraints" not in planner_input
 
 
 async def test_litellm_planner_retries_an_invalid_requirement_partition(valid_plan: dict) -> None:
@@ -65,7 +89,7 @@ async def test_litellm_planner_retries_an_invalid_requirement_partition(valid_pl
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(json.loads(request.content))
-        candidate = duplicate if len(requests) == 1 else valid_plan
+        candidate = planner_draft(duplicate) if len(requests) == 1 else planner_draft(valid_plan)
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(candidate)}}]})
 
     planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
@@ -80,7 +104,7 @@ async def test_litellm_planner_retries_an_invalid_requirement_partition(valid_pl
         planner_gateway(),
     )
 
-    assert plan == AiPlan.model_validate(valid_plan)
+    assert_trusted_plan(plan, valid_plan)
     assert len(requests) == 2
     assert requests[0]["messages"][1]["content"].find("required_requirement_ids") >= 0  # type: ignore[index]
     assert "prior candidate was rejected" in requests[1]["messages"][2]["content"]  # type: ignore[index]
@@ -97,7 +121,7 @@ async def test_litellm_planner_retries_requirement_partition_errors_rejected_by_
     async def handler(_: httpx.Request) -> httpx.Response:
         nonlocal requests
         requests += 1
-        candidate = invalid if requests == 1 else valid_plan
+        candidate = planner_draft(invalid) if requests == 1 else planner_draft(valid_plan)
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(candidate)}}]})
 
     planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
@@ -112,11 +136,11 @@ async def test_litellm_planner_retries_requirement_partition_errors_rejected_by_
         planner_gateway(),
     )
 
-    assert plan == AiPlan.model_validate(valid_plan)
+    assert_trusted_plan(plan, valid_plan)
     assert requests == 2
 
 
-async def test_litellm_planner_stops_after_one_requirement_partition_retry(valid_plan: dict) -> None:
+async def test_litellm_planner_stops_after_three_requirement_partition_attempts(valid_plan: dict) -> None:
     duplicate = json.loads(json.dumps(valid_plan))
     duplicate["phases"][1]["requirement_ids"] = ["functional-1"]
     requests = 0
@@ -124,7 +148,7 @@ async def test_litellm_planner_stops_after_one_requirement_partition_retry(valid
     async def handler(_: httpx.Request) -> httpx.Response:
         nonlocal requests
         requests += 1
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(duplicate)}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(planner_draft(duplicate))}}]})
 
     planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
     with pytest.raises(PlannerError, match="failed contract validation"):
@@ -139,10 +163,10 @@ async def test_litellm_planner_stops_after_one_requirement_partition_retry(valid
             planner_gateway(),
         )
 
-    assert requests == 2
+    assert requests == 3
 
 
-async def test_litellm_planner_rejects_model_output_that_changes_target_repositories(valid_plan: dict) -> None:
+async def test_litellm_planner_rejects_model_output_that_attempts_to_set_target_repositories(valid_plan: dict) -> None:
     changed = dict(valid_plan)
     changed["target_repos"] = ["https://github.com/acme/other.git#0123456789abcdef0123456789abcdef01234567"]
 
@@ -150,7 +174,7 @@ async def test_litellm_planner_rejects_model_output_that_changes_target_reposito
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(changed)}}]})
 
     planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
-    with pytest.raises(PlannerError, match="target_repos"):
+    with pytest.raises(PlannerError, match="invalid plan draft JSON"):
         await planner.generate(
             PlanningContext(
                 initial_specification="Add a rate limiter.",
@@ -170,7 +194,7 @@ async def test_litellm_planner_repairs_ephemeral_workspace_verification_paths(va
     async def handler(_: httpx.Request) -> httpx.Response:
         nonlocal requests
         requests += 1
-        candidate = invalid if requests == 1 else valid_plan
+        candidate = planner_draft(invalid) if requests == 1 else planner_draft(valid_plan)
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(candidate)}}]})
 
     planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
@@ -184,13 +208,13 @@ async def test_litellm_planner_repairs_ephemeral_workspace_verification_paths(va
         planner_gateway(),
     )
 
-    assert plan == AiPlan.model_validate(valid_plan)
+    assert_trusted_plan(plan, valid_plan)
     assert requests == 2
 
 
 async def test_litellm_planner_accepts_a_single_fenced_json_object(valid_plan: dict) -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"choices": [{"message": {"content": f"```json\n{json.dumps(valid_plan)}\n```"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": f"```json\n{json.dumps(planner_draft(valid_plan))}\n```"}}]})
 
     planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
     plan = await planner.generate(

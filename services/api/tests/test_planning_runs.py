@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySupervisorStore
 from .conftest import make_settings
 from cogito_api.main import create_app
-from cogito_api.models import AiPlan
+from cogito_api.models import AiPlan, PlanningFailureCode
 from cogito_api.planner import PlannerError, PlannerOutputError
 
 
@@ -269,7 +269,7 @@ def test_lifespan_dispatcher_generates_an_accepted_plan(
         assert len(starter.started_runs) == 1
 
 
-def test_accept_product_specification_records_findings_and_selects_on_explicit_approval(
+def test_accept_product_specification_requires_revision_when_evaluation_records_findings(
     client: TestClient, valid_plan: dict, valid_product_specification: dict
 ) -> None:
     run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
@@ -305,15 +305,18 @@ def test_accept_product_specification_records_findings_and_selects_on_explicit_a
 
     assert accepted.status_code == 200
     body = accepted.json()
-    assert body["outcome"] == "accepted"
+    assert body["outcome"] == "needs_revision"
     assert body["specification_evaluation_readiness"] == "needs_revision"
     assert body["specification_evaluation_artifact"] is not None
-    assert body["selected_product_specification_artifact"]["sha256"] == revised["product_specification_artifact"]["sha256"]
+    assert body["selected_product_specification_artifact"] is None
     workbench = client.get(f"/api/v1/workbench/runs/{run_id}").json()
     states = {stage["stage_id"]: stage["state"] for stage in workbench["stages"]}
     assert states["product_specification"] == "completed"
-    assert states["specification_evaluation"] == "completed"
-    assert states["planning"] == "queued"
+    assert states["specification_evaluation"] == "needs_revision"
+    assert states["planning"] == "needs_revision"
+    actions = {action["action_id"] for action in workbench["available_actions"]}
+    assert "accept_product_specification" not in actions
+    assert "refine_product_specification" in actions
     assert states["plan_approval"] == "unavailable"
 
 
@@ -795,6 +798,63 @@ def test_generate_plan_reports_invalid_model_output_without_a_retryable_status(
 
     assert response.status_code == 422
     assert response.json()["detail"] == "planner output did not satisfy the approved planning contract"
+
+
+def test_dispatcher_records_structured_planner_contract_failure_in_workbench_audit(
+    store: InMemoryPlanStore,
+    starter: FakeRunStarter,
+    supervisor_store: InMemorySupervisorStore,
+    planner: FakePlanner,
+    valid_plan: dict,
+) -> None:
+    """A rejected candidate yields actionable audit evidence without persisting its contents."""
+
+    async def invalid_output(*_args: object) -> AiPlan:
+        raise PlannerOutputError(
+            "plan does not assign owner phases for requirement IDs: functional-2",
+            code=PlanningFailureCode.REQUIREMENT_PARTITION,
+            requirement_ids=("functional-2",),
+        )
+
+    planner.generate = invalid_output  # type: ignore[method-assign]
+    app = create_app(
+        store=store,
+        settings=make_settings(),
+        starter=starter,
+        supervisor_store=supervisor_store,
+        planner=planner,
+    )
+    with TestClient(app, headers={"Authorization": "Bearer operator-test-token"}) as running_client:
+        run_id = running_client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+        draft = running_client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
+        assert running_client.post(
+            f"/api/v1/planning-runs/{run_id}/accept-product-specification",
+            json={
+                "revision": draft["product_specification_revision"],
+                "artifact_sha256": draft["product_specification_artifact"]["sha256"],
+            },
+            headers={"Idempotency-Key": "structured-planner-failure"},
+        ).status_code == 200
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            status = running_client.get(f"/api/v1/planning-runs/{run_id}").json()["status"]
+            if status == "planning_failed":
+                break
+            time.sleep(0.05)
+        assert status == "planning_failed"
+
+        timeline = running_client.get(f"/api/v1/workbench/runs/{run_id}/timeline").json()["items"]
+        failure = next(item for item in timeline if item["event_type"] == "planning_agent_failed")
+        assert failure["planning_failure"] == {
+            "contract_version": "plan-draft/v2",
+            "attempt_count": 1,
+            "code": "requirement_partition",
+            "message": "plan does not assign owner phases for requirement IDs: functional-2",
+            "requirement_ids": ["functional-2"],
+        }
+        assert "functional-2" in failure["message"]
+        assert store.plans == {}
 
 
 def test_generate_plan_retries_workflow_start_without_regenerating_artifact(

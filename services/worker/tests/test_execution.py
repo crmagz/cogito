@@ -27,6 +27,7 @@ from cogito_worker.execution import (
     ExecutionJobSettings,
     ExecutionWorkspaceService,
     KubernetesExecutionJobClient,
+    _audit_logged_command,
     _append_bounded_output,
     _bounded_output,
     build_execution_job,
@@ -962,6 +963,16 @@ def test_execution_failure_diagnostics_redact_sensitive_values() -> None:
     assert "gateway-key" not in output
     assert "bearer-key" not in output
     assert "[REDACTED]" in output
+
+
+def test_audit_log_wrapper_preserves_command_streams_for_the_redacting_pod_collector() -> None:
+    invocation_id = "a" * 64
+
+    command = _audit_logged_command(["echo", "agent output"], invocation_id, "/workspace")
+
+    assert command[:5] == ["python", "-m", "cogito_worker.audit_command", invocation_id, "/workspace"]
+    assert command[5] == "--"
+    assert command[-2:] == ["echo", "agent output"]
 
 
 def test_streamed_command_output_stays_within_its_memory_budget() -> None:

@@ -21,6 +21,7 @@ _SENSITIVE_DIAGNOSTIC_PATTERN = re.compile(
     r"(?i)(access[_ -]?key|secret(?:[_ -]?key)?|token|password|api[_ -]?key)[\"']?\s*[:=]\s*[\"']?[^\s,}\]\"']+"
 )
 _BEARER_TOKEN_PATTERN = re.compile(r"(?i)bearer\s+\S+")
+_AUDIT_INVOCATION_ID_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,8 @@ class ExecutionJobClient(Protocol):
         stdin: str,
         timeout_seconds: int,
         output_limit_bytes: int,
+        audit_invocation_id: str = "",
+        workspace_root: str = "",
     ) -> CommandResult:
         """Run one command inside the ready execution container."""
 
@@ -393,6 +396,8 @@ class KubernetesExecutionJobClient:
         stdin: str,
         timeout_seconds: int,
         output_limit_bytes: int,
+        audit_invocation_id: str = "",
+        workspace_root: str = "",
     ) -> CommandResult:
         """Run a command through the Kubernetes exec subresource for this run only."""
 
@@ -403,6 +408,10 @@ class KubernetesExecutionJobClient:
             # the child process receives EOF without closing stdout/stderr.
             command = ["/bin/sh", "-lc", f"printf '%s' {shlex.quote(stdin)} | exec {shlex.join(command)}"]
             stdin = ""
+        if audit_invocation_id:
+            if not _AUDIT_INVOCATION_ID_PATTERN.fullmatch(audit_invocation_id):
+                raise ValueError("execution audit invocation identifier is invalid")
+            command = _audit_logged_command(command, audit_invocation_id, workspace_root)
         return await asyncio.to_thread(
             self._execute_in_pod,
             pod_name,
@@ -411,6 +420,7 @@ class KubernetesExecutionJobClient:
             timeout_seconds,
             output_limit_bytes,
         )
+
 
     async def _running_pod_name(self, job_name: str) -> str:
         run_hash = job_name.removeprefix(_EXECUTION_JOB_PREFIX)
@@ -499,6 +509,12 @@ class KubernetesExecutionJobClient:
         except self._api_exception as error:
             return f"prepare-workspace logs unavailable (Kubernetes API status {error.status})"
         return _sanitize_diagnostics(log_output)
+
+
+def _audit_logged_command(command: list[str], invocation_id: str, workspace_root: str) -> list[str]:
+    """Capture one command's streams in a bounded file for the redacting pod collector."""
+
+    return ["python", "-m", "cogito_worker.audit_command", invocation_id, workspace_root, "--", *command]
 
 
 class ExecutionWorkspaceService:
@@ -689,6 +705,8 @@ class ExecutionWorkspaceService:
             stdin,
             timeout_seconds,
             self._settings.command_output_limit_bytes,
+            workspace.audit_invocation_id,
+            workspace.workspace_root,
         )
 
 

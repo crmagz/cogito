@@ -1,0 +1,36 @@
+ingress:
+  enabled: false
+service:
+  type: ClusterIP
+persistence:
+  enabled: true
+  size: 2Gi
+grafana.ini:
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Cogito Logs
+        uid: cogito-logs
+        type: loki
+        access: proxy
+        url: http://loki.loki.svc.cluster.local:3100
+        isDefault: true
+      - name: Cogito Metrics
+        uid: cogito-metrics
+        type: prometheus
+        access: proxy
+        url: http://mimir-gateway.mimir.svc.cluster.local/prometheus
+      - name: Cogito Traces
+        uid: cogito-traces
+        type: tempo
+        access: proxy
+        url: http://tempo.tempo.svc.cluster.local:3200
+        jsonData:
+          tracesToLogsV2:
+            datasourceUid: cogito-logs
+          tracesToMetrics:
+            datasourceUid: cogito-metrics

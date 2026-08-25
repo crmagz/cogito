@@ -119,14 +119,18 @@ async def test_review_harness_retries_one_malformed_completion_and_excludes_deve
     assert calls_by_lens == {"correctness": 2, "standards": 2, "blast_radius": 2}
 
 
-async def test_review_harness_rejects_unsafe_finding_path() -> None:
+async def test_review_harness_repairs_an_unsafe_finding_path() -> None:
+    calls_by_lens: dict[str, int] = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
-        del request
-        body = {
+        payload = json.loads(request.content)
+        lens = json.loads(payload["messages"][1]["content"])["lens"]
+        calls_by_lens[lens] = calls_by_lens.get(lens, 0) + 1
+        body: dict[str, list[dict[str, object]]] = {
             "findings": [
                 {
                     "severity": "blocking",
-                    "file": "../secret",
+                    "file": "../secret" if calls_by_lens[lens] == 1 else "src/main.py",
                     "line": 1,
                     "description": "unsafe",
                 }
@@ -144,8 +148,10 @@ async def test_review_harness_rejects_unsafe_finding_path() -> None:
         transport=httpx.MockTransport(handler),
     )
 
-    with pytest.raises(ReviewError, match="unsafe file path"):
-        await harness.review(_request())
+    result = await harness.review(_request())
+
+    assert calls_by_lens == {"correctness": 2, "standards": 2, "blast_radius": 2}
+    assert all(finding.file == "src/main.py" for finding in result.findings)
 
 
 async def test_review_harness_surfaces_failed_phase_verification_without_a_model_judgment() -> None:

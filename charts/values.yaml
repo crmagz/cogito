@@ -104,6 +104,24 @@ minio:
     - name: specs
       policy: none
       purge: false
+    # The embedded Grafana OSS stack uses these when enabled through the
+    # checked-in Kind profile. Keeping them here makes the buckets durable
+    # across a Helm upgrade while MinIO's PVC is retained.
+    - name: loki
+      policy: none
+      purge: false
+    - name: tempo
+      policy: none
+      purge: false
+    - name: mimir-blocks
+      policy: none
+      purge: false
+    - name: mimir-ruler
+      policy: none
+      purge: false
+    - name: mimir-alertmanager
+      policy: none
+      purge: false
   ## @param minio.service.type Kubernetes service type
   ## @param minio.service.port MinIO API port
   ##
@@ -142,9 +160,13 @@ repositoryPolicy:
     - github.com
 
 ## @section Observability
-## Cogito exports OTLP only. It never deploys a collector, backend, scraper, profiler, or log agent.
+## Cogito exports OTLP to an operator-provided collector. The optional
+## observability platform is installed as independent Helm releases; see
+## deploy/observability/kind/ for the local Kind composition.
 observability:
   traces:
+    enabled: false
+  logs:
     enabled: false
   metrics:
     enabled: false
@@ -494,6 +516,14 @@ api:
     pollSeconds: 5
     batchSize: 100
     stallSeconds: 30
+  ## @param api.auditLogs.enabled Enable server-authorized, bounded audit-log lookup.
+  ## @param api.auditLogs.lokiEndpoint Internal Loki endpoint; never exposed to browsers.
+  ## @param api.auditLogs.timeoutSeconds Maximum Loki query duration.
+  ##
+  auditLogs:
+    enabled: false
+    lokiEndpoint: ""
+    timeoutSeconds: 3
   ## @param api.temporal.host Temporal frontend address (host:port) the API connects to when starting workflows
   ## @param api.temporal.namespace Temporal namespace
   ## @param api.temporal.taskQueue Task queue the DeveloperRunWorkflow is started on (must match worker.temporal.taskQueue)

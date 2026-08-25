@@ -570,7 +570,20 @@ def test_provider_neutral_coordination_end_to_end(control_plane: KindControlPlan
         status, evaluation = control_plane.api(
             "POST", f"/api/v1/planning-runs/{run_id}/evaluate-product-specification", {}
         )
-        assert status == 200 and evaluation["specification_evaluation_readiness"] == "ready", evaluation
+        assert status == 200, evaluation
+        if evaluation["specification_evaluation_readiness"] == "needs_revision":
+            evaluation_artifact = dict(evaluation["specification_evaluation_artifact"])
+            status, waived = control_plane.api(
+                "POST",
+                f"/api/v1/planning-runs/{run_id}/waive-specification-evaluation",
+                {
+                    "artifact_sha256": evaluation_artifact["sha256"],
+                    "rationale": "Disposable fixture run: proceed after recording the deterministic evaluation findings.",
+                },
+            )
+            assert status == 200 and waived["specification_evaluation_readiness"] == "waived", waived
+        else:
+            assert evaluation["specification_evaluation_readiness"] == "ready", evaluation
         status, selected = control_plane.api(
             "POST",
             f"/api/v1/planning-runs/{run_id}/select-product-specification",

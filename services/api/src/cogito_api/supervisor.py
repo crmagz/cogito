@@ -24,6 +24,7 @@ from .models import (
     McpToolSelection,
     PlanApprovalDecision,
     PlanConstraints,
+    PlanningFailureEvidence,
     PlanningRunStatus,
     RegistrationManifest,
     RegistrationReference,
@@ -67,6 +68,20 @@ class PlanningRunRecord:
     specification_evaluation_artifact: ArtifactReference | None = None
     specification_evaluation_readiness: str | None = None
     selected_specification_evaluation_artifact: ArtifactReference | None = None
+
+
+@dataclass(frozen=True)
+class SourceOnlySpecificationRecord:
+    """Durable source-only product draft that cannot become a planning run."""
+
+    specification_id: str
+    project_id: str
+    status: str
+    source_artifact: ArtifactReference
+    product_specification_artifact: ArtifactReference | None
+    submitted_at: str
+    submitted_by: str
+    planner_model: str | None
 
 
 @dataclass(frozen=True)
@@ -374,10 +389,39 @@ def _planning_run_record(row: Mapping[str, Any]) -> PlanningRunRecord:
     )
 
 
+def _source_only_specification_record(row: Mapping[str, Any]) -> SourceOnlySpecificationRecord:
+    """Materialize a source-only draft without a planning-run projection."""
+
+    return SourceOnlySpecificationRecord(
+        specification_id=row["specification_id"],
+        project_id=row["project_id"],
+        status=row["status"],
+        source_artifact=ArtifactReference(ref=row["source_artifact_ref"], sha256=row["source_artifact_sha256"]),
+        product_specification_artifact=(
+            ArtifactReference(
+                ref=row["product_specification_artifact_ref"], sha256=row["product_specification_artifact_sha256"]
+            )
+            if row["product_specification_artifact_ref"] is not None
+            else None
+        ),
+        submitted_at=row["submitted_at"].isoformat(),
+        submitted_by=row["submitted_by"],
+        planner_model=row["planner_model"],
+    )
+
+
 class SupervisorStore(Protocol):
     """Durable source of truth for supervisor run state."""
 
     async def create_planning_run(self, record: PlanningRunRecord) -> None: ...
+
+    async def create_source_only_specification(self, record: SourceOnlySpecificationRecord) -> None: ...
+
+    async def get_source_only_specification(self, specification_id: str) -> SourceOnlySpecificationRecord | None: ...
+
+    async def list_source_only_specifications(
+        self, *, project_ids: frozenset[str], limit: int = 50
+    ) -> list[SourceOnlySpecificationRecord]: ...
 
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None: ...
 
@@ -516,7 +560,13 @@ class SupervisorStore(Protocol):
     async def renew_planning_generation_delivery(self, run_id: str, claim_id: str) -> bool: ...
 
     async def record_planning_agent_terminal(
-        self, run_id: str, claim_id: str, *, succeeded: bool, error_summary: str | None = None
+        self,
+        run_id: str,
+        claim_id: str,
+        *,
+        succeeded: bool,
+        error_summary: str | None = None,
+        failure_evidence: PlanningFailureEvidence | None = None,
     ) -> None: ...
 
     async def list_workbench_agents(
@@ -671,6 +721,90 @@ class PostgresSupervisorStore:
                 event_type="planning_started",
                 artifact=record.source_artifact,
             )
+
+    async def create_source_only_specification(self, record: SourceOnlySpecificationRecord) -> None:
+        """Persist a completed draft independently of supervisor run state."""
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO source_only_specifications (
+                        specification_id, project_id, source_artifact_ref, source_artifact_sha256,
+                        product_specification_artifact_ref, product_specification_artifact_sha256,
+                        status, submitted_at, submitted_by, planner_model
+                    ) VALUES (
+                        :specification_id, :project_id, :source_artifact_ref, :source_artifact_sha256,
+                        :product_specification_artifact_ref, :product_specification_artifact_sha256,
+                        :status, CAST(:submitted_at AS timestamptz), :submitted_by, :planner_model
+                    )
+                    """
+                ),
+                {
+                    "specification_id": record.specification_id,
+                    "project_id": record.project_id,
+                    "source_artifact_ref": record.source_artifact.ref,
+                    "source_artifact_sha256": record.source_artifact.sha256,
+                    "product_specification_artifact_ref": (
+                        record.product_specification_artifact.ref
+                        if record.product_specification_artifact is not None
+                        else None
+                    ),
+                    "product_specification_artifact_sha256": (
+                        record.product_specification_artifact.sha256
+                        if record.product_specification_artifact is not None
+                        else None
+                    ),
+                    "status": record.status,
+                    "submitted_at": record.submitted_at,
+                    "submitted_by": record.submitted_by,
+                    "planner_model": record.planner_model,
+                },
+            )
+
+    async def get_source_only_specification(self, specification_id: str) -> SourceOnlySpecificationRecord | None:
+        """Return one source-only draft without consulting planning-run tables."""
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT specification_id, project_id, status, source_artifact_ref, source_artifact_sha256,
+                           product_specification_artifact_ref, product_specification_artifact_sha256,
+                           submitted_at, submitted_by, planner_model
+                    FROM source_only_specifications
+                    WHERE specification_id = :specification_id
+                    """
+                ),
+                {"specification_id": specification_id},
+            )
+            row = result.mappings().one_or_none()
+        return _source_only_specification_record(row) if row is not None else None
+
+    async def list_source_only_specifications(
+        self, *, project_ids: frozenset[str], limit: int = 50
+    ) -> list[SourceOnlySpecificationRecord]:
+        """List persisted source-only drafts visible to the caller's project scope."""
+
+        if not project_ids:
+            return []
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT specification_id, project_id, status, source_artifact_ref, source_artifact_sha256,
+                           product_specification_artifact_ref, product_specification_artifact_sha256,
+                           submitted_at, submitted_by, planner_model
+                    FROM source_only_specifications
+                    WHERE project_id = ANY(CAST(:project_ids AS text[]))
+                    ORDER BY submitted_at DESC, specification_id DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"project_ids": list(project_ids), "limit": limit},
+            )
+            rows = result.mappings().all()
+        return [_source_only_specification_record(row) for row in rows]
 
     async def create_agent_run(self, record: AgentRunRecord) -> None:
         async with self._engine.begin() as connection:
@@ -830,7 +964,13 @@ class PostgresSupervisorStore:
             return result.scalar_one_or_none() is not None
 
     async def record_planning_agent_terminal(
-        self, run_id: str, claim_id: str, *, succeeded: bool, error_summary: str | None = None
+        self,
+        run_id: str,
+        claim_id: str,
+        *,
+        succeeded: bool,
+        error_summary: str | None = None,
+        failure_evidence: PlanningFailureEvidence | None = None,
     ) -> None:
         """Persist one terminal planner result and never leave a failed attempt live."""
 
@@ -867,7 +1007,12 @@ class PostgresSupervisorStore:
                     {"run_id": run_id},
                 )
                 await self._append_coordination_event(
-                    connection, run_id=run_id, event_type="planning_agent_failed", lifecycle_status="FAILED"
+                    connection,
+                    run_id=run_id,
+                    event_type="planning_agent_failed",
+                    lifecycle_status="FAILED",
+                    message=error_summary,
+                    planning_failure=failure_evidence,
                 )
             await connection.execute(
                 text(
@@ -1996,9 +2141,8 @@ class PostgresSupervisorStore:
                       AND run.selected_product_specification_revision IS NULL
                       AND run.product_specification_revision = :revision
                       AND run.product_specification_artifact_sha256 = :artifact_sha256
-                      -- Evaluation is mandatory evidence, but an explicit human approval
-                      -- owns the decision to proceed when it records findings.
                       AND run.specification_evaluation_artifact_sha256 IS NOT NULL
+                      AND run.specification_evaluation_readiness IN ('ready', 'waived')
                     RETURNING run.run_id, run.status, run.source_artifact_ref, run.source_artifact_sha256,
                               run.target_repos, run.spec_set, run.constraints, run.priority, run.submitted_at, run.submitted_by,
                               run.plan_artifact_ref, run.plan_artifact_sha256, run.planner_model, run.active_workflow_id, run.plan_revision,
@@ -2886,16 +3030,23 @@ class PostgresSupervisorStore:
         stage_id: str | None = None,
         message: str | None = None,
         attempt_id: str | None = None,
+        planning_failure: PlanningFailureEvidence | None = None,
     ) -> None:
         """Append one safe event and its generic notification delivery in the current transaction."""
 
         artifact_payload = (
             {"ref": artifact.ref, "sha256": artifact.sha256} if artifact is not None and artifact.ref else None
         )
+        activity: dict[str, object] = {
+            "kind": "agent" if event_type in {"planning_agent_started", "planning_agent_failed"} else "event",
+            "actor_label": "Planner" if event_type in {"planning_agent_started", "planning_agent_failed"} else None,
+            "log_evidence_available": False,
+        }
         payload: dict[str, object] = {
             "schema_version": "1.0",
             "event_type": event_type,
             "run_id": run_id,
+            "activity": activity,
             "gate": gate,
             "artifact": artifact_payload,
             "decision": decision,
@@ -2903,6 +3054,7 @@ class PostgresSupervisorStore:
             "stage_id": stage_id,
             "message": message[:512] if message else None,
             "attempt_id": attempt_id,
+            "planning_failure": planning_failure.model_dump(mode="json") if planning_failure is not None else None,
             "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
             "action_url": f"/api/v1/coordination/runs/{run_id}/actions/{gate}" if gate else None,
         }
