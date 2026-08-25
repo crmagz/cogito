@@ -6,6 +6,7 @@
       "type": "object",
       "properties": {
         "traces": { "$ref": "#/definitions/toggle" },
+        "logs": { "$ref": "#/definitions/toggle" },
         "metrics": { "$ref": "#/definitions/toggle" },
         "spanEvents": { "$ref": "#/definitions/toggle" },
         "otlp": {

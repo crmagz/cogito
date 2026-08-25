@@ -38,6 +38,100 @@ def test_coordination_detail_exposes_safe_plan_gate_event(client, valid_plan: di
     assert "payload" not in event
 
 
+def test_coordination_detail_exposes_only_the_stage_invocation_envelope(
+    client, valid_plan: dict, supervisor_store
+) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store._append_coordination_event(
+        run_id,
+        "stage_invocation_started",
+        invocation={
+            "invocation_id": "a" * 64,
+            "source": "worker_phase",
+            "stage_id": "implement-api",
+            "role": "developer",
+            "attempt": 1,
+            "trace_context_available": True,
+            "unexpected": "must not be exposed",
+        },
+    )
+
+    response = client.get(f"/api/v1/planning-runs/{run_id}/coordination", headers=_headers())
+
+    assert response.status_code == 200
+    event = next(item for item in response.json()["events"] if item["event_type"] == "stage_invocation_started")
+    assert event["invocation"] == {
+        "invocation_id": "a" * 64,
+        "source": "worker_phase",
+        "stage_id": "implement-api",
+        "role": "developer",
+        "attempt": 1,
+        "trace_context_available": True,
+    }
+
+
+def test_coordination_detail_exposes_only_the_aggregate_mcp_envelope(
+    client, valid_plan: dict, supervisor_store
+) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store._append_coordination_event(
+        run_id,
+        "mcp_invocation_observed",
+        mcp_invocation={
+            "invocation_id": "a" * 64,
+            "server_id": "readonly",
+            "server_version": "1.0.0",
+            "server_manifest_sha256": "b" * 64,
+            "tool_name": "catalog_read",
+            "input_schema_sha256": "c" * 64,
+            "outcome": "success",
+            "invocation_count": 2,
+            "request_body": "must not be exposed",
+        },
+    )
+
+    response = client.get(f"/api/v1/planning-runs/{run_id}/coordination", headers=_headers())
+
+    assert response.status_code == 200
+    event = next(item for item in response.json()["events"] if item["event_type"] == "mcp_invocation_observed")
+    assert event["mcp_invocation"] == {
+        "invocation_id": "a" * 64,
+        "server_id": "readonly",
+        "server_version": "1.0.0",
+        "server_manifest_sha256": "b" * 64,
+        "tool_name": "catalog_read",
+        "input_schema_sha256": "c" * 64,
+        "outcome": "success",
+        "invocation_count": 2,
+    }
+
+
+def test_coordination_detail_exposes_an_opaque_execution_workspace_lifecycle(
+    client, valid_plan: dict, supervisor_store
+) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store._append_coordination_event(
+        run_id,
+        "execution_workspace_lifecycle",
+        execution_workspace={
+            "workspace_id": "a" * 64,
+            "source": "execution_job",
+            "lifecycle": "provisioned",
+            "job_name": "must not be exposed",
+        },
+    )
+
+    response = client.get(f"/api/v1/planning-runs/{run_id}/coordination", headers=_headers())
+
+    assert response.status_code == 200
+    event = next(item for item in response.json()["events"] if item["event_type"] == "execution_workspace_lifecycle")
+    assert event["execution_workspace"] == {
+        "workspace_id": "a" * 64,
+        "source": "execution_job",
+        "lifecycle": "provisioned",
+    }
+
+
 def test_normalized_plan_action_reuses_existing_digest_bound_authority(client, valid_plan: dict, starter) -> None:
     run_id, digest = _awaiting_plan(client, valid_plan)
     payload = {"decision": "approve", "artifact_sha256": digest}

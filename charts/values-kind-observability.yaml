@@ -1,0 +1,36 @@
+# Local Kind overlay that connects Cogito to the separately installed Grafana
+# OSS platform in deploy/observability/kind/. It intentionally does not deploy
+# observability resources into the Cogito release namespace.
+#
+# Use with the normal values file:
+#   helm upgrade --install cogito charts/ \
+#     -f charts/values.yaml \
+#     -f charts/values-kind-observability.yaml \
+#     --namespace cogito --create-namespace
+
+# Grafana platform data uses the existing Cogito MinIO instance as an
+# S3-compatible store. Keep its local data persistent in Kind. This must match
+# an existing Kind PVC because the default local provisioner cannot resize it.
+minio:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 5Gi
+
+observability:
+  traces:
+    enabled: true
+  logs:
+    enabled: true
+  metrics:
+    enabled: true
+  otlp:
+    endpoint: http://alloy.alloy.svc.cluster.local:4318
+    protocol: http/protobuf
+    insecure: true
+
+api:
+  auditLogs:
+    enabled: true
+    lokiEndpoint: http://loki.loki.svc.cluster.local:3100
+    timeoutSeconds: 3

@@ -70,6 +70,9 @@ class Settings:
     reconciliation_poll_seconds: int
     reconciliation_batch_size: int
     reconciliation_stall_seconds: int
+    audit_logs_enabled: bool
+    audit_logs_loki_endpoint: str
+    audit_logs_timeout_seconds: float
 
     @property
     def supervisor_database_url(self) -> str:
@@ -179,6 +182,9 @@ def load_settings() -> Settings:
         reconciliation_poll_seconds=int(os.environ.get("COGITO_RECONCILIATION_POLL_SECONDS", "5")),
         reconciliation_batch_size=int(os.environ.get("COGITO_RECONCILIATION_BATCH_SIZE", "100")),
         reconciliation_stall_seconds=int(os.environ.get("COGITO_RECONCILIATION_STALL_SECONDS", "30")),
+        audit_logs_enabled=os.environ.get("COGITO_AUDIT_LOGS_ENABLED", "false").lower() == "true",
+        audit_logs_loki_endpoint=os.environ.get("COGITO_AUDIT_LOGS_LOKI_ENDPOINT", ""),
+        audit_logs_timeout_seconds=float(os.environ.get("COGITO_AUDIT_LOGS_TIMEOUT_SECONDS", "3")),
     )
     _validate_auth_configuration(settings)
     return settings
@@ -248,6 +254,16 @@ def _validate_auth_configuration(settings: Settings) -> None:
         raise ValueError("COGITO_RECONCILIATION_BATCH_SIZE must be between 1 and 1000")
     if settings.reconciliation_stall_seconds < settings.reconciliation_poll_seconds * 2:
         raise ValueError("COGITO_RECONCILIATION_STALL_SECONDS must be at least twice the poll interval")
+    if settings.audit_logs_timeout_seconds <= 0 or settings.audit_logs_timeout_seconds > 30:
+        raise ValueError("COGITO_AUDIT_LOGS_TIMEOUT_SECONDS must be greater than zero and at most 30")
+    if settings.audit_logs_enabled:
+        parsed_loki = urlparse(settings.audit_logs_loki_endpoint)
+        if parsed_loki.username or parsed_loki.password or not parsed_loki.hostname or parsed_loki.fragment:
+            raise ValueError("COGITO_AUDIT_LOGS_LOKI_ENDPOINT must be an absolute URL without credentials or a fragment")
+        if settings.deployment_mode == "production" and parsed_loki.scheme != "https":
+            raise ValueError("production audit log endpoint must use HTTPS")
+        if settings.deployment_mode == "development" and parsed_loki.scheme not in {"http", "https"}:
+            raise ValueError("development audit log endpoint must use HTTP or HTTPS")
     if not settings.notification_enabled:
         return
     if not settings.notification_webhook_hmac_secret:

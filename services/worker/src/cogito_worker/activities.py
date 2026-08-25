@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from typing import Any
 
 from temporalio import activity
@@ -25,8 +27,10 @@ from .models import (
 )
 from .observability import WorkerTelemetry
 from .review import LiteLLMReviewHarness
-from .run_state import NullRunStateReporter, RunStateReporter
+from .run_state import NullRunStateReporter, RunStateReporter, stage_invocation_id
 from .storage import RunStore, now_iso
+
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
 
 
 def _mcp_grant_evidence(grant: McpToolGrant, role: str = "developer") -> dict[str, str]:
@@ -43,6 +47,57 @@ def _mcp_grant_evidence(grant: McpToolGrant, role: str = "developer") -> dict[st
     if grant.repository_scope is not None:
         evidence["repository_scope"] = grant.repository_scope
     return evidence
+
+
+def _safe_mcp_invocation_evidence(value: object) -> dict[str, object]:
+    """Keep only the closed aggregate gateway-audit contract for durable evidence."""
+
+    if not isinstance(value, dict):
+        return {"version": 1, "status": "unavailable", "events": []}
+    if value.get("status") != "observed" or not isinstance(value.get("events"), list):
+        status = value.get("status")
+        return {
+            "version": 1,
+            "status": status if status in {"not_applicable", "unavailable"} else "unavailable",
+            "events": [],
+        }
+    events: list[dict[str, object]] = []
+    for event in value["events"]:
+        if not isinstance(event, dict):
+            continue
+        server_id = event.get("server_id")
+        server_version = event.get("server_version")
+        server_manifest_sha256 = event.get("server_manifest_sha256")
+        tool_name = event.get("tool_name")
+        input_schema_sha256 = event.get("input_schema_sha256")
+        outcome = event.get("outcome")
+        invocation_count = event.get("invocation_count")
+        if not (
+            all(
+                isinstance(item, str) and 1 <= len(item) <= 256
+                for item in (server_id, server_version, tool_name)
+            )
+            and isinstance(server_manifest_sha256, str)
+            and _SHA256.fullmatch(server_manifest_sha256)
+            and isinstance(input_schema_sha256, str)
+            and _SHA256.fullmatch(input_schema_sha256)
+            and outcome in {"success", "failure"}
+            and isinstance(invocation_count, int)
+            and 1 <= invocation_count <= 100_000
+        ):
+            continue
+        events.append(
+            {
+                "server_id": server_id,
+                "server_version": server_version,
+                "server_manifest_sha256": server_manifest_sha256,
+                "tool_name": tool_name,
+                "input_schema_sha256": input_schema_sha256,
+                "outcome": outcome,
+                "invocation_count": invocation_count,
+            }
+        )
+    return {"version": 1, "status": "observed", "events": events}
 
 
 class WorkerActivities:
@@ -105,14 +160,21 @@ class WorkerActivities:
         frozen_evidence = dict(evidence)
         if workspace is not None and (workspace.mcp_grants or workspace.mcp_selection_explicit):
             invocation_evidence = await self._execution_workspaces.collect_mcp_invocations(workspace)
+            safe_invocation_evidence = (
+                _safe_mcp_invocation_evidence(invocation_evidence)
+                if invocation_evidence is not None
+                else {"version": 1, "status": "not_applicable", "events": []}
+            )
             frozen_evidence["mcp_invocations"] = {
-                **(
-                    invocation_evidence
-                    if invocation_evidence is not None
-                    else {"version": 1, "status": "not_applicable", "events": []}
-                ),
+                **safe_invocation_evidence,
                 "selected_grants": [_mcp_grant_evidence(grant) for grant in workspace.mcp_grants],
             }
+            try:
+                await self._run_state.record_mcp_invocation_evidence(workspace.run_id, safe_invocation_evidence)
+            except Exception:
+                # Gateway audit remains evidence only; an unavailable or
+                # malformed observation must not block artifact freezing.
+                activity.logger.warning("MCP invocation audit evidence unavailable", extra={"run_id": workspace.run_id})
         return self._store.put_implementation_artifact(run_id, frozen_evidence)
 
     @activity.defn
@@ -152,7 +214,14 @@ class WorkerActivities:
         """Create the isolated execution Job for this run."""
 
         activity.logger.info("provisioning execution workspace", extra={"run_id": request.run_id})
-        return await self._execution_workspaces.provision(request)
+        workspace = await self._execution_workspaces.provision(request)
+        try:
+            await self._run_state.record_execution_workspace_lifecycle(
+                workspace.run_id, workspace.job_name, "provisioned"
+            )
+        except Exception:
+            activity.logger.warning("execution workspace audit evidence unavailable", extra={"run_id": workspace.run_id})
+        return workspace
 
     @activity.defn
     async def cleanup_execution_workspace(self, workspace: ExecutionWorkspace) -> None:
@@ -162,6 +231,12 @@ class WorkerActivities:
             "cleaning execution workspace",
             extra={"run_id": workspace.run_id, "job_name": workspace.job_name},
         )
+        try:
+            await self._run_state.record_execution_workspace_lifecycle(
+                workspace.run_id, workspace.job_name, "cleanup_started"
+            )
+        except Exception:
+            activity.logger.warning("execution workspace audit evidence unavailable", extra={"run_id": workspace.run_id})
         await self._execution_workspaces.cleanup(workspace)
 
     @activity.defn
@@ -171,6 +246,29 @@ class WorkerActivities:
         activity.logger.info(
             "running approved plan phase",
             extra={"run_id": request.workspace.run_id, "phase_id": request.phase.id},
+        )
+        invocation_id = stage_invocation_id(
+            request.workspace.run_id, request.phase.id, "developer", activity.info().attempt
+        )
+        try:
+            await self._run_state.record_stage_invocation(
+                request.workspace.run_id,
+                request.phase.id,
+                "developer",
+                activity.info().attempt,
+                request.traceparent is not None,
+            )
+        except Exception:
+            # Correlation evidence must never become workflow authority. A
+            # failed append leaves the phase result and Temporal retry policy
+            # unchanged; a later log lookup can report it as unavailable.
+            activity.logger.warning(
+                "stage invocation audit evidence unavailable",
+                extra={"run_id": request.workspace.run_id, "phase_id": request.phase.id},
+            )
+        request = replace(
+            request,
+            workspace=replace(request.workspace, audit_invocation_id=invocation_id),
         )
         with self._telemetry.span("cogito.worker.phase", request.traceparent, request.tracestate):
             return await self._harness.execute_phase(request)

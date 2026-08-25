@@ -5,7 +5,15 @@ from temporalio.testing import ActivityEnvironment
 
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.execution import ExecutionJobSettings, ExecutionWorkspaceService
-from cogito_worker.models import ExecutionRequest, ExecutionWorkspace, McpToolGrant, ValidationRequest
+from cogito_worker.models import (
+    ExecutionRequest,
+    ExecutionWorkspace,
+    McpToolGrant,
+    PhaseExecutionRequest,
+    PlanPhase,
+    ValidationRequest,
+)
+from cogito_worker.run_state import stage_invocation_id
 from cogito_worker.run_state import RunStateReporter
 
 from .fakes import (
@@ -89,6 +97,86 @@ async def test_report_status_forwards_only_bounded_transition_metadata(env: Acti
     assert reporter.calls == [("run-1", "completed", None, {"phase_result": {"summary": "secret"}})]
 
 
+async def test_run_phase_records_safe_stage_invocation_before_harness_execution(
+    env: ActivityEnvironment, store: InMemoryRunStore
+) -> None:
+    class RecordingRunStateReporter:
+        calls: list[tuple[str, str, str, int, bool]] = []
+
+        async def report(self, run_id: str, status: str, failure_detail: str | None, metadata: dict | None) -> None:
+            del run_id, status, failure_detail, metadata
+
+        async def record_stage_invocation(
+            self, run_id: str, stage_id: str, role: str, attempt: int, trace_context_available: bool
+        ) -> None:
+            self.calls.append((run_id, stage_id, role, attempt, trace_context_available))
+
+    reporter: RunStateReporter = RecordingRunStateReporter()
+    harness = InMemoryHarness()
+    activities = WorkerActivities(store, InMemoryExecutionWorkspaces(), harness, run_state=reporter)
+    request = PhaseExecutionRequest(
+        phase=PlanPhase(
+            id="implement-api",
+            name="Implement API",
+            description="Safe test phase",
+            tasks=["implement"],
+            acceptance_criteria=["passes"],
+            verification=["pytest"],
+        ),
+        workspace=ExecutionWorkspace(run_id="run-1", job_name="cogito-execution-run-1", workspace_root="/workspace"),
+        max_turns=3,
+        timeout_seconds=60,
+        traceparent="00-" + "a" * 32 + "-" + "b" * 16 + "-01",
+    )
+
+    await env.run(activities.run_phase, request)
+
+    assert reporter.calls == [("run-1", "implement-api", "developer", 1, True)]
+    assert len(harness.requests) == 1
+    assert harness.requests[0].workspace.audit_invocation_id == stage_invocation_id(
+        "run-1", "implement-api", "developer", 1
+    )
+    assert request.workspace.audit_invocation_id == ""
+
+
+async def test_run_phase_continues_when_stage_invocation_evidence_is_unavailable(
+    env: ActivityEnvironment, store: InMemoryRunStore
+) -> None:
+    class UnavailableRunStateReporter:
+        async def report(self, run_id: str, status: str, failure_detail: str | None, metadata: dict | None) -> None:
+            del run_id, status, failure_detail, metadata
+
+        async def record_stage_invocation(
+            self, run_id: str, stage_id: str, role: str, attempt: int, trace_context_available: bool
+        ) -> None:
+            del run_id, stage_id, role, attempt, trace_context_available
+            raise RuntimeError("database unavailable")
+
+    harness = InMemoryHarness()
+    activities = WorkerActivities(store, InMemoryExecutionWorkspaces(), harness, run_state=UnavailableRunStateReporter())
+    request = PhaseExecutionRequest(
+        phase=PlanPhase(
+            id="implement-api",
+            name="Implement API",
+            description="Safe test phase",
+            tasks=["implement"],
+            acceptance_criteria=["passes"],
+            verification=["pytest"],
+        ),
+        workspace=ExecutionWorkspace(run_id="run-1", job_name="cogito-execution-run-1", workspace_root="/workspace"),
+        max_turns=3,
+        timeout_seconds=60,
+    )
+
+    result = await env.run(activities.run_phase, request)
+
+    assert result.succeeded is True
+    assert len(harness.requests) == 1
+    assert harness.requests[0].workspace.audit_invocation_id == stage_invocation_id(
+        "run-1", "implement-api", "developer", 1
+    )
+
+
 async def test_validator_accepts_converged_evidence_with_passing_verification(
     env: ActivityEnvironment, activities: WorkerActivities
 ) -> None:
@@ -163,6 +251,79 @@ async def test_freeze_implementation_artifact_adds_only_bounded_mcp_evidence(
     }
 
 
+async def test_freeze_implementation_artifact_reports_aggregate_mcp_evidence_without_raw_content(
+    env: ActivityEnvironment, store: InMemoryRunStore
+) -> None:
+    class ObservedWorkspaces(InMemoryExecutionWorkspaces):
+        async def collect_mcp_invocations(self, workspace: ExecutionWorkspace) -> dict[str, object] | None:
+            del workspace
+            return {
+                "version": 1,
+                "status": "observed",
+                "events": [
+                    {
+                        "server_id": "readonly",
+                        "server_version": "1.0.0",
+                        "server_manifest_sha256": "b" * 64,
+                        "tool_name": "catalog_read",
+                        "input_schema_sha256": "c" * 64,
+                        "outcome": "success",
+                        "invocation_count": 2,
+                        "request_body": "never persisted in audit evidence",
+                    }
+                ],
+            }
+
+    class RecordingRunStateReporter:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        async def report(self, run_id: str, status: str, failure_detail: str | None, metadata: dict | None) -> None:
+            del run_id, status, failure_detail, metadata
+
+        async def record_stage_invocation(
+            self, run_id: str, stage_id: str, role: str, attempt: int, trace_context_available: bool
+        ) -> None:
+            del run_id, stage_id, role, attempt, trace_context_available
+
+        async def record_mcp_invocation_evidence(self, run_id: str, evidence: dict[str, object]) -> None:
+            self.calls.append((run_id, evidence))
+
+    reporter: RunStateReporter = RecordingRunStateReporter()
+    activities = WorkerActivities(store, ObservedWorkspaces(), InMemoryHarness(), run_state=reporter)
+    workspace = ExecutionWorkspace(
+        run_id="run-1",
+        job_name="cogito-execution-example",
+        workspace_root="/workspace",
+        mcp_grants=[
+            McpToolGrant(
+                server_id="readonly",
+                server_version="1.0.0",
+                server_manifest_sha256="b" * 64,
+                tool_name="catalog_read",
+                input_schema_sha256="c" * 64,
+            )
+        ],
+    )
+
+    await env.run(activities.freeze_implementation_artifact, "run-1", {"review": {}}, workspace)
+
+    assert reporter.calls[0][0] == "run-1"
+    assert reporter.calls[0][1]["events"] == [
+        {
+            "server_id": "readonly",
+            "server_version": "1.0.0",
+            "server_manifest_sha256": "b" * 64,
+            "tool_name": "catalog_read",
+            "input_schema_sha256": "c" * 64,
+            "outcome": "success",
+            "invocation_count": 2,
+        }
+    ]
+    assert "request_body" not in store.implementation_artifacts[next(iter(store.implementation_artifacts))]["mcp_invocations"][
+        "events"
+    ][0]
+
+
 async def test_freeze_implementation_artifact_records_an_explicit_empty_mcp_selection(
     env: ActivityEnvironment, activities: WorkerActivities, store: InMemoryRunStore
 ) -> None:
@@ -186,6 +347,24 @@ async def test_freeze_implementation_artifact_records_an_explicit_empty_mcp_sele
 async def test_execution_workspace_activities_manage_only_the_current_run(
     env: ActivityEnvironment, store: InMemoryRunStore
 ):
+    class RecordingRunStateReporter:
+        workspace_calls: list[tuple[str, str, str]] = []
+
+        async def report(self, run_id: str, status: str, failure_detail: str | None, metadata: dict | None) -> None:
+            del run_id, status, failure_detail, metadata
+
+        async def record_stage_invocation(
+            self, run_id: str, stage_id: str, role: str, attempt: int, trace_context_available: bool
+        ) -> None:
+            del run_id, stage_id, role, attempt, trace_context_available
+
+        async def record_mcp_invocation_evidence(self, run_id: str, evidence: dict[str, object]) -> None:
+            del run_id, evidence
+
+        async def record_execution_workspace_lifecycle(self, run_id: str, job_name: str, lifecycle: str) -> None:
+            self.workspace_calls.append((run_id, job_name, lifecycle))
+
+    reporter: RunStateReporter = RecordingRunStateReporter()
     jobs = InMemoryExecutionJobClient()
     activities = WorkerActivities(
         store,
@@ -224,6 +403,7 @@ async def test_execution_workspace_activities_manage_only_the_current_run(
             jobs,
         ),
         InMemoryHarness(),
+        run_state=reporter,
     )
 
     workspace = await env.run(
@@ -235,3 +415,7 @@ async def test_execution_workspace_activities_manage_only_the_current_run(
     assert [job_name for job_name, _ in jobs.created] == [workspace.job_name]
     assert jobs.awaited == [(workspace.job_name, 30)]
     assert jobs.deleted == [workspace.job_name]
+    assert reporter.workspace_calls == [
+        ("run-1", workspace.job_name, "provisioned"),
+        ("run-1", workspace.job_name, "cleanup_started"),
+    ]

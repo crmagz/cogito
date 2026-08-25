@@ -69,12 +69,37 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo add temporal https://go.temporal.io/helm-charts
           helm repo add minio https://charts.min.io/
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo add grafana-community https://grafana-community.github.io/helm-charts
       - name: Build chart dependencies
         run: helm dependency build charts
       - name: Lint chart
         run: helm lint charts
       - name: Render default values
         run: helm template cogito charts > /dev/null
+      - name: Render Kind observability profile
+        run: |
+          rendered="$(mktemp)"
+          helm template cogito charts -f charts/values-kind-observability.yaml > "$rendered"
+          grep -Fq 'COGITO_TELEMETRY_OTLP_ENDPOINT: "http://alloy.alloy.svc.cluster.local:4318"' "$rendered"
+          grep -Fq 'COGITO_AUDIT_LOGS_LOKI_ENDPOINT: "http://loki.loki.svc.cluster.local:3100"' "$rendered"
+          grep -Fq 'name: cogito-minio' "$rendered"
+          deploy/observability/kind/install.sh render > "$rendered"
+          grep -Fq 'name: alloy' "$rendered"
+          grep -Fq 'namespace: loki' "$rendered"
+          grep -Fq 'name: tempo' "$rendered"
+          grep -Fq 'name: mimir-gateway' "$rendered"
+          grep -Fq 'name: grafana' "$rendered"
+          grep -Fq 'loki.process "redact"' "$rendered"
+          grep -Fq 'disk_full_threshold: 0.98' "$rendered"
+          if grep -Fq 'name: mimir-kafka' "$rendered"; then
+            echo "Kind observability profile must not render Kafka"
+            exit 1
+          fi
+          if grep -q '^kind: Ingress$' "$rendered"; then
+            echo "Kind observability profile must not render an Ingress"
+            exit 1
+          fi
       - name: Render governed MCP overrides
         run: |
           rendered="$(mktemp)"

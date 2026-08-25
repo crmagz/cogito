@@ -1,0 +1,116 @@
+# A single deployment receives Cogito OTLP and reads application pod logs
+# through the Kubernetes API. It needs no host-path mount, gateway, or ingress.
+controller:
+  type: deployment
+  replicas: 1
+
+alloy:
+  enableReporting: false
+  extraPorts:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+  configMap:
+    content: |-
+      otelcol.receiver.otlp "cogito" {
+        grpc { endpoint = "0.0.0.0:4317" }
+        http { endpoint = "0.0.0.0:4318" }
+        output {
+          metrics = [otelcol.processor.batch.default.input]
+          logs    = [otelcol.processor.batch.default.input]
+          traces  = [otelcol.processor.batch.default.input]
+        }
+      }
+
+      otelcol.processor.batch "default" {
+        output {
+          metrics = [otelcol.exporter.prometheus.default.input]
+          logs    = [otelcol.exporter.loki.default.input]
+          traces  = [otelcol.exporter.otlp.tempo.input]
+        }
+      }
+
+      otelcol.exporter.otlp "tempo" {
+        client {
+          endpoint = "tempo.tempo.svc.cluster.local:4317"
+          tls { insecure = true }
+        }
+      }
+
+      otelcol.exporter.loki "default" {
+        forward_to = [loki.process.redact.receiver]
+      }
+
+      loki.write "default" {
+        endpoint { url = "http://loki.loki.svc.cluster.local:3100/loki/api/v1/push" }
+      }
+
+      loki.process "redact" {
+        forward_to = [loki.write.default.receiver]
+
+        stage.replace {
+          expression = `(?i)(authorization:\\s*bearer\\s+)[^\\s]+`
+          replace    = `${1}[REDACTED]`
+        }
+
+        stage.replace {
+          expression = `(?i)((?:api[_ -]?key|access[_ -]?key|secret(?:[_ -]?key)?|token|password)["']?\\s*[:=]\\s*["']?)[^\\s,}"']+`
+          replace    = `${1}[REDACTED]`
+        }
+      }
+
+      loki.relabel "cogito_pods" {
+        forward_to = [loki.process.redact.receiver]
+
+        rule {
+          source_labels = ["instance"]
+          regex         = "([^/]+)/.*"
+          target_label  = "namespace"
+        }
+
+        rule {
+          source_labels = ["instance"]
+          regex         = "[^/]+/([^:]+):.*"
+          target_label  = "pod"
+        }
+      }
+
+      otelcol.exporter.prometheus "default" {
+        forward_to = [prometheus.remote_write.mimir.receiver]
+      }
+
+      prometheus.remote_write "mimir" {
+        endpoint { url = "http://mimir-gateway.mimir.svc.cluster.local/api/v1/push" }
+      }
+
+      discovery.kubernetes "cogito_pods" {
+        role = "pod"
+        namespaces { names = ["cogito", "cogito-executions"] }
+      }
+
+      discovery.relabel "cogito_pods" {
+        targets = discovery.kubernetes.cogito_pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+      }
+
+      loki.source.kubernetes "cogito_pods" {
+        targets    = discovery.relabel.cogito_pods.output
+        forward_to = [loki.relabel.cogito_pods.receiver]
+      }
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi

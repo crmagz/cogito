@@ -20,17 +20,23 @@ from opentelemetry.context import attach, detach
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import ApprovalAuthenticator, Principal
+from .audit_logs import AuditLogReader, DisabledAuditLogReader, LokiAuditLogReader
 from .config import Settings, load_settings
 from .dag import validate_constraints, validate_phase_dag, validate_spec_reference, validate_target_repositories
 from .models import (
     AgentRunResponse,
     AgentRunStatus,
     ArtifactReference,
+    AuditLogLineResponse,
+    AuditLogResponse,
     CoordinationApprovalActionRequest,
     CoordinationArtifactReference,
     CoordinationDeliveryResponse,
     CoordinationEventResponse,
+    CoordinationExecutionWorkspaceSummary,
     CoordinationGate,
+    CoordinationInvocationSummary,
+    CoordinationMcpInvocationSummary,
     CoordinationRunListResponse,
     CoordinationRunResponse,
     ImplementationApprovalDecision,
@@ -55,8 +61,11 @@ from .models import (
     SpecificationEvaluationReadiness,
     SpecificationEvaluationWaiverRequest,
     SpecificationIntake,
+    SourceOnlySpecificationResponse,
+    SourceOnlySpecificationSubmission,
     PlanningRunResponse,
     PlanningRunStatus,
+    PlanningFailureEvidence,
     PlanningRunSubmission,
     ProjectWorkflowBinding,
     ResolvedWorkflow,
@@ -142,6 +151,7 @@ from .supervisor import (
     PostgresSupervisorStore,
     RegistryConflictError,
     SupervisorStore,
+    SourceOnlySpecificationRecord,
 )
 from .temporal import RunStarter, TemporalRunStarter
 from .workflow_control import (
@@ -187,6 +197,19 @@ def _planning_run_response(record: PlanningRunRecord) -> PlanningRunResponse:
         selected_specification_evaluation_artifact=record.selected_specification_evaluation_artifact,
         plan_artifact=record.plan_artifact,
         implementation_artifact=record.implementation_artifact,
+        submitted_at=record.submitted_at,
+    )
+
+
+def _source_only_specification_response(record: SourceOnlySpecificationRecord) -> SourceOnlySpecificationResponse:
+    """Serialize an immutable draft without exposing it as a planning resource."""
+
+    return SourceOnlySpecificationResponse(
+        specification_id=record.specification_id,
+        status=record.status,
+        project_id=record.project_id,
+        source_artifact=record.source_artifact,
+        product_specification_artifact=record.product_specification_artifact,
         submitted_at=record.submitted_at,
     )
 
@@ -304,6 +327,7 @@ def create_app(
     supervisor_store: SupervisorStore | None = None,
     planner: Planner | None = None,
     workflow_configuration_store: WorkflowConfigurationStore | None = None,
+    audit_log_reader: AuditLogReader | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     uses_in_memory_supervisor = supervisor_store is not None
@@ -328,6 +352,11 @@ def create_app(
         else PostgresWorkflowConfigurationStore(settings.supervisor_database_url)
     )
     planner = planner or LiteLLMPlanner(settings)
+    audit_log_reader = audit_log_reader or (
+        LokiAuditLogReader(settings.audit_logs_loki_endpoint, settings.audit_logs_timeout_seconds)
+        if settings.audit_logs_enabled
+        else DisabledAuditLogReader()
+    )
     catalog = load_component_catalog(Path(settings.registry_catalog_path))
     if settings.mcp_github_enabled and not settings.mcp_enabled:
         raise ValueError("COGITO_MCP_GITHUB_ENABLED requires COGITO_MCP_ENABLED")
@@ -891,6 +920,68 @@ def create_app(
         telemetry.transition(AgentRunStatus.QUEUED.value, "planner")
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=_planning_run_response(record).model_dump(mode="json"))
 
+    @app.post("/api/v1/projects/{project_id}/source-only-specifications")
+    async def create_source_only_specification(
+        project_id: str,
+        submission: SourceOnlySpecificationSubmission,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Generate one persisted draft that has no planning or execution authority."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_product_manager(principal)
+        if project_id not in principal.projects:
+            raise HTTPException(status_code=403, detail="operator is not authorized for the target project")
+        specification_id = str(uuid.uuid4())
+        submitted_at = datetime.now(timezone.utc).isoformat()
+        try:
+            source_artifact = store.put_source_only_specification(specification_id, submission.initial_specification)
+        except PlanStoreUnavailableError as error:
+            raise HTTPException(status_code=503, detail="source-only specification storage is temporarily unavailable") from error
+        record = SourceOnlySpecificationRecord(
+            specification_id=specification_id,
+            project_id=project_id,
+            status="source_recorded",
+            source_artifact=source_artifact,
+            product_specification_artifact=None,
+            submitted_at=submitted_at,
+            submitted_by=principal.subject,
+            planner_model=None,
+        )
+        await supervisor_store.create_source_only_specification(record)
+        return JSONResponse(
+            status_code=status.HTTP_201_CREATED,
+            content=_source_only_specification_response(record).model_dump(mode="json"),
+        )
+
+    @app.get("/api/v1/projects/{project_id}/source-only-specifications")
+    async def list_source_only_specifications(
+        project_id: str, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        """List source-only drafts without mixing them into Workbench planning runs."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        if project_id not in principal.projects:
+            raise HTTPException(status_code=403, detail="operator is not authorized for the target project")
+        records = await supervisor_store.list_source_only_specifications(project_ids=frozenset({project_id}))
+        return JSONResponse(content=[_source_only_specification_response(record).model_dump(mode="json") for record in records])
+
+    @app.get("/api/v1/projects/{project_id}/source-only-specifications/{specification_id}")
+    async def get_source_only_specification(
+        project_id: str, specification_id: str, authorization: str | None = Header(default=None)
+    ) -> JSONResponse:
+        """Return one scoped source-only draft; planning routes cannot address it."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        if project_id not in principal.projects:
+            raise HTTPException(status_code=403, detail="operator is not authorized for the target project")
+        record = await supervisor_store.get_source_only_specification(specification_id)
+        if record is None or record.project_id != project_id:
+            raise HTTPException(status_code=404, detail="source-only specification not found")
+        return JSONResponse(content=_source_only_specification_response(record).model_dump(mode="json"))
+
     @app.post("/api/v1/runs")
     async def submit_run(
         submission: RunSubmission,
@@ -1152,7 +1243,28 @@ def create_app(
                 )
                 selected_specification = ProductSpecification.model_validate_json(specification_bytes)
                 initial_specification = json.dumps(
-                    selected_specification.model_dump(mode="json"),
+                    {
+                        "title": selected_specification.title.text,
+                        "problem_statement": selected_specification.problem_statement.text,
+                        "in_scope": [statement.text for statement in selected_specification.in_scope],
+                        "constraints": [statement.text for statement in selected_specification.constraints],
+                        "dependencies": [statement.text for statement in selected_specification.dependencies],
+                        "requirements": [
+                            {"id": statement.id, "text": statement.text}
+                            for statement in [
+                                *selected_specification.functional_requirements,
+                                *selected_specification.non_functional_requirements,
+                            ]
+                        ],
+                        "acceptance_criteria": [
+                            {
+                                "id": statement.id,
+                                "text": statement.text,
+                                "requirement_ids": statement.requirement_ids,
+                            }
+                            for statement in selected_specification.acceptance_criteria
+                        ],
+                    },
                     sort_keys=True,
                     separators=(",", ":"),
                     ensure_ascii=False,
@@ -1171,10 +1283,12 @@ def create_app(
                     planner_resolution.gateway,
                 )
             except PlannerOutputError as error:
-                raise HTTPException(
+                failure = HTTPException(
                     status_code=422,
                     detail="planner output did not satisfy the approved planning contract",
-                ) from error
+                )
+                failure.planning_failure_evidence = error.evidence()  # type: ignore[attr-defined]
+                raise failure from error
             except PlannerError as error:
                 raise HTTPException(status_code=502, detail="planner failed to produce a valid plan") from error
             try:
@@ -1465,8 +1579,20 @@ def create_app(
                     extra={"run_id": delivery.run_id, "status_code": error.status_code},
                 )
                 return False
+            evidence = getattr(error, "planning_failure_evidence", None)
+            if not isinstance(evidence, PlanningFailureEvidence):
+                evidence = None
+            summary = (
+                f"Plan generation rejected ({evidence.code.value}): {evidence.message}"
+                if evidence is not None
+                else f"Plan generation failed: {detail[:512]}"
+            )
             await supervisor_store.record_planning_agent_terminal(
-                delivery.run_id, delivery.claim_id, succeeded=False, error_summary=f"Plan generation failed: {detail[:512]}"
+                delivery.run_id,
+                delivery.claim_id,
+                succeeded=False,
+                error_summary=summary[:512],
+                failure_evidence=evidence,
             )
             logger.warning("Automatic plan generation failed", extra={"run_id": delivery.run_id, "status_code": error.status_code})
         except Exception:
@@ -1525,10 +1651,13 @@ def create_app(
         ):
             raise HTTPException(status_code=409, detail="the displayed product specification is stale or ineligible for acceptance")
 
-        # The evaluation is mandatory review evidence, not an automated veto.  A
-        # human who explicitly confirms this gate may proceed with findings
-        # recorded; requesting a revision is the separate, explicit action.
-        await evaluate_current_product_specification(record)
+        evaluated = await evaluate_current_product_specification(record)
+        if evaluated.specification_evaluation_readiness not in {"ready", "waived"}:
+            response = ProductSpecificationAcceptanceResponse(
+                **_planning_run_response(evaluated).model_dump(),
+                outcome=ProductSpecificationAcceptanceOutcome.NEEDS_REVISION,
+            )
+            return JSONResponse(content=response.model_dump(mode="json"))
         try:
             request_sha256 = sha256(
                 json.dumps(request_body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
@@ -1900,11 +2029,12 @@ def create_app(
             )
         except (ValueError, ApprovalConflictError) as error:
             raise HTTPException(status_code=409, detail="product specification revision is stale or invalid") from error
-        # Saving an explicitly requested revision is itself the review decision:
-        # evaluate it for traceability and bind that exact immutable revision as
-        # the planning input.  The derived key makes an interrupted browser
-        # request safely replayable without colliding with the revision record.
+        # A revision is evaluated before it can become a planning input. A
+        # failing evaluation remains an explicit Workbench refinement state;
+        # only a separately audited waiver can authorize an exception.
         evaluated = await evaluate_current_product_specification(updated)
+        if evaluated.specification_evaluation_readiness not in {"ready", "waived"}:
+            return JSONResponse(content=_planning_run_response(evaluated).model_dump(mode="json"))
         selection_request = ProductSpecificationSelectionRequest(
             revision=evaluated.product_specification_revision,
             artifact_sha256=evaluated.product_specification_artifact.sha256,  # type: ignore[union-attr]
@@ -1930,6 +2060,50 @@ def create_app(
     async def coordination_response(record: PlanningRunRecord) -> CoordinationRunResponse:
         """Build a bounded authenticated projection without exposing artifact contents."""
 
+        def invocation_summary(payload: dict[str, object]) -> CoordinationInvocationSummary | None:
+            """Expose only the closed, versioned invocation envelope to operators."""
+
+            invocation = payload.get("invocation")
+            if not isinstance(invocation, dict):
+                return None
+            try:
+                return CoordinationInvocationSummary.model_validate(invocation)
+            except ValueError:
+                return None
+
+        def mcp_invocation_summary(payload: dict[str, object]) -> CoordinationMcpInvocationSummary | None:
+            """Expose the typed aggregate MCP audit envelope and nothing else."""
+
+            invocation = payload.get("mcp_invocation")
+            if not isinstance(invocation, dict):
+                return None
+            try:
+                return CoordinationMcpInvocationSummary.model_validate(invocation)
+            except ValueError:
+                return None
+
+        def execution_workspace_summary(payload: dict[str, object]) -> CoordinationExecutionWorkspaceSummary | None:
+            """Expose opaque pod lifecycle facts, never a Kubernetes object name."""
+
+            workspace = payload.get("execution_workspace")
+            if not isinstance(workspace, dict):
+                return None
+            try:
+                return CoordinationExecutionWorkspaceSummary.model_validate(workspace)
+            except ValueError:
+                return None
+
+        def planning_failure_summary(payload: dict[str, object]) -> PlanningFailureEvidence | None:
+            """Expose bounded planner validation facts, never rejected model content."""
+
+            failure = payload.get("planning_failure")
+            if not isinstance(failure, dict):
+                return None
+            try:
+                return PlanningFailureEvidence.model_validate(failure)
+            except ValueError:
+                return None
+
         events = await supervisor_store.list_coordination_events(record.run_id)
         event_responses = []
         for event, delivered, attempts, last_error in events:
@@ -1948,6 +2122,10 @@ def create_app(
                     artifact=artifact,
                     decision=PlanApprovalDecision(event.decision) if event.decision else None,
                     lifecycle_status=AgentRunStatus(event.lifecycle_status) if event.lifecycle_status else None,
+                    invocation=invocation_summary(event.payload),
+                    mcp_invocation=mcp_invocation_summary(event.payload),
+                    execution_workspace=execution_workspace_summary(event.payload),
+                    planning_failure=planning_failure_summary(event.payload),
                     delivery=CoordinationDeliveryResponse(
                         delivered=delivered,
                         attempt_count=attempts,
@@ -2193,6 +2371,8 @@ def create_app(
             )
         )
         if record.selected_product_specification_artifact is None:
+            if record.specification_evaluation_readiness == "needs_revision":
+                return actions
             actions.insert(
                 0,
                 WorkbenchActionSummary(
@@ -2657,6 +2837,34 @@ def create_app(
         except ValueError:
             return None
 
+    def workbench_activity(event_type: str, payload: dict[str, object]) -> tuple[str, str | None, bool]:
+        """Project one server-owned activity classification without exposing correlation identifiers."""
+
+        persisted = payload.get("activity")
+        if isinstance(persisted, dict):
+            kind = persisted.get("kind")
+            actor_label = persisted.get("actor_label")
+            log_evidence_available = persisted.get("log_evidence_available")
+            if kind in {"event", "agent", "mcp"} and isinstance(log_evidence_available, bool):
+                return kind, actor_label[:384] if isinstance(actor_label, str) else None, log_evidence_available
+
+        if event_type == "stage_invocation_started":
+            invocation = payload.get("invocation")
+            role = invocation.get("role") if isinstance(invocation, dict) else None
+            invocation_id = invocation.get("invocation_id") if isinstance(invocation, dict) else None
+            actor_label = role.replace("_", " ").title() if isinstance(role, str) else "Agent"
+            return "agent", actor_label, isinstance(invocation_id, str) and len(invocation_id) == 64
+        if event_type in {"planning_agent_started", "planning_agent_failed"}:
+            return "agent", "Planner", False
+        if event_type == "mcp_invocation_observed":
+            invocation = payload.get("mcp_invocation")
+            server_id = invocation.get("server_id") if isinstance(invocation, dict) else None
+            tool_name = invocation.get("tool_name") if isinstance(invocation, dict) else None
+            if isinstance(server_id, str) and isinstance(tool_name, str):
+                return "mcp", f"{server_id} / {tool_name}"[:384], False
+            return "mcp", "MCP", False
+        return "event", None, False
+
     def workbench_stage_ids(event_type: str, payload: dict[str, object], decision: str | None) -> list[str]:
         """Project all materially affected, canonical stages into the Workbench timeline contract."""
 
@@ -2699,14 +2907,29 @@ def create_app(
     async def workbench_timeline_response(record: PlanningRunRecord) -> WorkbenchTimelineResponse:
         """Build a bounded timeline without exposing storage references or sink errors."""
 
+        def planning_failure_summary(payload: dict[str, object]) -> PlanningFailureEvidence | None:
+            """Expose bounded planner validation facts, never rejected model content."""
+
+            failure = payload.get("planning_failure")
+            if not isinstance(failure, dict):
+                return None
+            try:
+                return PlanningFailureEvidence.model_validate(failure)
+            except ValueError:
+                return None
+
         events = await supervisor_store.list_coordination_events(record.run_id, limit=100)
         items = []
         for event, delivered, attempts, _last_error in events:
             stage_ids = workbench_stage_ids(event.event_type, event.payload, event.decision)
+            activity_kind, actor_label, log_evidence_available = workbench_activity(event.event_type, event.payload)
             items.append(
                 WorkbenchTimelineEvent(
                     event_id=event.event_id,
                     event_type=event.event_type,
+                    activity_kind=activity_kind,
+                    actor_label=actor_label,
+                    log_evidence_available=log_evidence_available,
                     occurred_at=event.occurred_at,
                     stage_id=stage_ids[-1] if stage_ids else None,
                     stage_ids=stage_ids,
@@ -2715,6 +2938,7 @@ def create_app(
                     decision=workbench_plan_decision(event.decision),
                     lifecycle_status=workbench_agent_status(event.lifecycle_status),
                     message=event.payload.get("message") if isinstance(event.payload.get("message"), str) else None,
+                    planning_failure=planning_failure_summary(event.payload),
                     delivered=delivered,
                     delivery_attempt_count=attempts,
                 )
@@ -2955,6 +3179,44 @@ def create_app(
         if workbench_etag_matches(if_none_match, response.revision):
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": response.revision})
         return JSONResponse(content=response.model_dump(mode="json"), headers={"ETag": response.revision})
+
+    @app.get("/api/v1/workbench/runs/{run_id}/timeline/{event_id}/logs")
+    async def get_workbench_audit_logs(
+        run_id: str,
+        event_id: str,
+        cursor: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Return bounded, redacted logs for exactly one authorized invocation event."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_viewer(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        event = next(
+            (
+                item
+                for item, _delivered, _attempts, _error in await supervisor_store.list_coordination_events(run_id, limit=100)
+                if item.event_id == event_id
+            ),
+            None,
+        )
+        if event is None:
+            raise HTTPException(status_code=404, detail="audit event not found")
+        invocation = event.payload.get("invocation")
+        invocation_id = invocation.get("invocation_id") if isinstance(invocation, dict) else None
+        if event.event_type != "stage_invocation_started" or not isinstance(invocation_id, str):
+            return JSONResponse(content=AuditLogResponse(availability="not_available", lines=[]).model_dump(mode="json"))
+        page = await audit_log_reader.read_invocation(invocation_id, cursor, occurred_at=event.occurred_at)
+        return JSONResponse(
+            content=AuditLogResponse(
+                availability=page.availability,
+                lines=[AuditLogLineResponse(**line.__dict__) for line in page.lines],
+                next_cursor=page.next_cursor,
+            ).model_dump(mode="json")
+        )
 
     @app.post("/api/v1/workbench/runs/{run_id}/feedback", status_code=status.HTTP_202_ACCEPTED)
     async def record_workbench_feedback(

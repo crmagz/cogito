@@ -184,6 +184,42 @@ class AiPlan(BaseModel):
     )
 
 
+class PlanningFailureCode(StrEnum):
+    """Stable categories for a rejected planner candidate."""
+
+    INVALID_JSON = "invalid_json"
+    CONTRACT_VIOLATION = "contract_violation"
+    REQUIREMENT_PARTITION = "requirement_partition"
+
+
+class PlanningFailureEvidence(BaseModel):
+    """Bounded, operator-safe evidence for a planner contract rejection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Version of the planner output contract that rejected the candidate",
+    )
+    attempt_count: int = Field(ge=1, le=3, description="Bounded planner attempts made for this immutable input")
+    code: PlanningFailureCode = Field(description="Stable rejection category")
+    message: str = Field(min_length=1, max_length=512, description="Redacted, operator-safe rejection explanation")
+    requirement_ids: list[str] = Field(
+        default_factory=list,
+        max_length=256,
+        description="Selected requirement IDs directly implicated by the rejection when known",
+    )
+
+    @model_validator(mode="after")
+    def validate_requirement_ids(self) -> "PlanningFailureEvidence":
+        """Keep the operator-visible requirement list stable and bounded."""
+
+        if len(set(self.requirement_ids)) != len(self.requirement_ids):
+            raise ValueError("planning failure evidence requirement IDs must be unique")
+        return self
+
+
 class ProductSpecificationStatementKind(StrEnum):
     """Whether a product-specification statement is sourced or explicitly uncertain."""
 
@@ -1467,6 +1503,41 @@ class PlanningRunResponse(BaseModel):
     submitted_at: str = Field(description="ISO 8601 submission timestamp")
 
 
+class SourceOnlySpecificationSubmission(BaseModel):
+    """Unstructured product input that must remain outside any workflow run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    initial_specification: str = Field(
+        min_length=1,
+        max_length=96 * 1024,
+        description="Product-manager source text used only to draft a product specification",
+    )
+
+    @model_validator(mode="after")
+    def require_nonblank_initial_specification(self) -> "SourceOnlySpecificationSubmission":
+        """Reject whitespace-only source text before immutable storage."""
+
+        if not self.initial_specification.strip():
+            raise ValueError("initial_specification must contain non-whitespace text")
+        return self
+
+
+class SourceOnlySpecificationResponse(BaseModel):
+    """Persisted product-specification draft with no planning lifecycle."""
+
+    specification_id: str = Field(description="Stable source-only specification identifier")
+    status: str = Field(default="source_recorded", description="Source-only specification lifecycle state")
+    project_id: str = Field(description="Project scope authorized to read this draft")
+    source_artifact: ArtifactReference = Field(description="Immutable source-only intake artifact")
+    product_specification_artifact: ArtifactReference | None = Field(
+        default=None,
+        description="Immutable product-specification draft when separately generated",
+    )
+    product_specification_revision: int = Field(default=0, ge=0, description="Generated draft revision")
+    submitted_at: str = Field(description="ISO 8601 creation timestamp")
+
+
 class ProductSpecificationSelectionRequest(BaseModel):
     """Digest-bound explicit promotion of one reviewed product-specification draft."""
 
@@ -1489,6 +1560,7 @@ class ProductSpecificationAcceptanceOutcome(StrEnum):
     """The operator-visible result of accepting a product specification."""
 
     ACCEPTED = "accepted"
+    NEEDS_REVISION = "needs_revision"
 
 
 class ProductSpecificationAcceptanceResponse(PlanningRunResponse):
@@ -1838,6 +1910,17 @@ class WorkbenchTimelineEvent(BaseModel):
 
     event_id: str = Field(description="Immutable coordination event identifier")
     event_type: str = Field(description="Versioned lifecycle or approval event kind")
+    activity_kind: Literal["event", "agent", "mcp"] = Field(
+        description="Server-classified audit activity: lifecycle event, agent workload, or MCP workload"
+    )
+    actor_label: str | None = Field(
+        default=None,
+        max_length=384,
+        description="Bounded human-readable agent role or MCP server/tool label when this is a workload",
+    )
+    log_evidence_available: bool = Field(
+        description="Whether this exact immutable audit event has a safe correlated pod-log stream"
+    )
     occurred_at: str = Field(description="Authoritative ISO 8601 event timestamp")
     stage_id: str | None = Field(
         default=None,
@@ -1857,6 +1940,9 @@ class WorkbenchTimelineEvent(BaseModel):
         default=None,
         max_length=512,
         description="Bounded operator-safe explanation for this lifecycle update",
+    )
+    planning_failure: PlanningFailureEvidence | None = Field(
+        default=None, description="Bounded planner-contract failure evidence for this audit event"
     )
     delivered: bool = Field(description="Whether the configured delivery sink acknowledged the event")
     delivery_attempt_count: int = Field(ge=0, description="Bounded reconciliation attempt count")
@@ -2136,6 +2222,40 @@ class CoordinationDeliveryResponse(BaseModel):
     last_error: str | None = Field(default=None, description="Bounded non-secret failure category")
 
 
+class CoordinationInvocationSummary(BaseModel):
+    """Correlation-only identity for a non-authoritative stage invocation."""
+
+    invocation_id: str = Field(
+        pattern=r"^[a-f0-9]{64}$", description="Opaque deterministic identifier for this stage attempt"
+    )
+    source: str = Field(pattern=r"^worker_phase$", description="Trusted component that emitted the event")
+    stage_id: str = Field(min_length=1, max_length=256, description="Canonical immutable plan stage identifier")
+    role: str = Field(pattern=r"^developer$", description="Pinned execution role")
+    attempt: int = Field(ge=1, description="Temporal activity attempt number")
+    trace_context_available: bool = Field(description="Whether W3C trace context was available at invocation start")
+
+
+class CoordinationMcpInvocationSummary(BaseModel):
+    """Closed aggregate MCP observation, excluding request and response content."""
+
+    invocation_id: str = Field(pattern=r"^[a-f0-9]{64}$", description="Opaque deterministic observation identifier")
+    server_id: str = Field(min_length=1, max_length=256, description="Pinned MCP server registration")
+    server_version: str = Field(min_length=1, max_length=128, description="Pinned MCP server version")
+    server_manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$", description="Pinned server manifest digest")
+    tool_name: str = Field(min_length=1, max_length=256, description="Approved MCP tool name")
+    input_schema_sha256: str = Field(pattern=r"^[a-f0-9]{64}$", description="Pinned tool input schema digest")
+    outcome: str = Field(pattern=r"^(success|failure)$", description="Aggregate gateway outcome class")
+    invocation_count: int = Field(ge=1, le=100_000, description="Bounded aggregate count for this outcome")
+
+
+class CoordinationExecutionWorkspaceSummary(BaseModel):
+    """Opaque lifecycle evidence for the run-scoped execution pod."""
+
+    workspace_id: str = Field(pattern=r"^[a-f0-9]{64}$", description="Opaque deterministic execution workspace identifier")
+    source: str = Field(pattern=r"^execution_job$", description="Trusted source of execution lifecycle evidence")
+    lifecycle: str = Field(pattern=r"^(provisioned|cleanup_started)$", description="Non-authoritative workspace lifecycle")
+
+
 class CoordinationEventResponse(BaseModel):
     """Provider-neutral authoritative event safe for authenticated operator reads."""
 
@@ -2150,6 +2270,18 @@ class CoordinationEventResponse(BaseModel):
     decision: PlanApprovalDecision | None = Field(default=None, description="Recorded approval decision when applicable")
     lifecycle_status: AgentRunStatus | None = Field(
         default=None, description="Canonical lifecycle state when the event is a status transition"
+    )
+    invocation: CoordinationInvocationSummary | None = Field(
+        default=None, description="Safe phase-attempt correlation when this event starts a stage invocation"
+    )
+    mcp_invocation: CoordinationMcpInvocationSummary | None = Field(
+        default=None, description="Safe aggregate MCP observation when this event records a gateway audit"
+    )
+    execution_workspace: CoordinationExecutionWorkspaceSummary | None = Field(
+        default=None, description="Safe opaque execution-pod lifecycle evidence"
+    )
+    planning_failure: PlanningFailureEvidence | None = Field(
+        default=None, description="Bounded planner-contract failure evidence when planning did not produce a plan"
     )
     delivery: CoordinationDeliveryResponse = Field(description="Notification reconciliation state")
 
@@ -2176,6 +2308,22 @@ class CoordinationRunListResponse(BaseModel):
     """Bounded authenticated run queue for a future Operator Workbench."""
 
     items: list[CoordinationRunResponse] = Field(description="Newest-first authoritative coordination summaries")
+
+
+class AuditLogLineResponse(BaseModel):
+    """One bounded, redacted audit log line."""
+
+    timestamp: str
+    stream: str = Field(max_length=256)
+    message: str = Field(max_length=4096)
+
+
+class AuditLogResponse(BaseModel):
+    """Event-scoped log evidence returned only by the Cogito authorization boundary."""
+
+    availability: str = Field(pattern=r"^(available|disabled|unavailable|not_available)$")
+    lines: list[AuditLogLineResponse] = Field(default_factory=list, max_length=200)
+    next_cursor: str | None = None
 
 
 class RunEnvelope(BaseModel):

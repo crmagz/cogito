@@ -30,8 +30,14 @@ class PlanStore(Protocol):
 
     def put_source_specification(self, run_id: str, initial_specification: str) -> ArtifactReference: ...
 
+    def put_source_only_specification(self, specification_id: str, initial_specification: str) -> ArtifactReference: ...
+
     def put_product_specification(
         self, run_id: str, revision: int, specification: ProductSpecification
+    ) -> ArtifactReference: ...
+
+    def put_source_only_product_specification(
+        self, specification_id: str, specification: ProductSpecification
     ) -> ArtifactReference: ...
 
     def put_specification_evaluation(
@@ -138,6 +144,16 @@ class MinioPlanStore:
             sha256=sha256(data).hexdigest(),
         )
 
+    def put_source_only_specification(self, specification_id: str, initial_specification: str) -> ArtifactReference:
+        """Store source-only intake outside the planning-run object hierarchy."""
+
+        data = source_specification_bytes(initial_specification)
+        object_name = f"source-only-specifications/{specification_id}/source.json"
+        self._put_snapshot(object_name, data)
+        return ArtifactReference(
+            ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=sha256(data).hexdigest()
+        )
+
     def put_product_specification(
         self, run_id: str, revision: int, specification: ProductSpecification
     ) -> ArtifactReference:
@@ -148,6 +164,17 @@ class MinioPlanStore:
         data = product_specification_bytes(specification)
         digest = sha256(data).hexdigest()
         object_name = f"runs/{run_id}/product-specifications/{revision}/{digest}/specification.json"
+        self._put_snapshot(object_name, data)
+        return ArtifactReference(ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=digest)
+
+    def put_source_only_product_specification(
+        self, specification_id: str, specification: ProductSpecification
+    ) -> ArtifactReference:
+        """Store a source-only draft without creating a planning-run artifact."""
+
+        data = product_specification_bytes(specification)
+        digest = sha256(data).hexdigest()
+        object_name = f"source-only-specifications/{specification_id}/product-specifications/1/{digest}/specification.json"
         self._put_snapshot(object_name, data)
         return ArtifactReference(ref=f"s3://{self._plan_snapshots_bucket}/{object_name}", sha256=digest)
 

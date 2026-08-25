@@ -30,6 +30,45 @@ Cogito deploys as an umbrella Helm chart with the following components:
 | API | local template (`services/api`) | Plan submission REST API: schema/DAG/constraint validation, plan storage |
 | Worker | local template (`services/worker`) | Temporal workflow worker: loads persisted plans and reports run status |
 
+### Local Kind observability
+
+`charts/values-kind-observability.yaml` connects Cogito to the local Grafana
+OSS platform. The platform is deliberately composed from independent Helm
+releases, because Helm dependencies always inherit their parent's namespace.
+The Kind profile retains MinIO data on a 5 Gi PVC and uses the same
+in-cluster MinIO service as an S3-compatible store for Loki, Tempo, and Mimir.
+It is intentionally ClusterIP-only: it creates no Ingress or gateway
+requirement.
+
+Install Cogito as `cogito` in the `cogito` namespace:
+
+```sh
+helm upgrade --install cogito charts/ \
+  -f charts/values.yaml \
+  -f charts/values-kind-observability.yaml \
+  --namespace cogito --create-namespace
+```
+
+Then install the separately namespaced observability platform:
+
+```sh
+KUBE_CONTEXT=kind-cogito-observability \
+  deploy/observability/kind/install.sh install
+```
+
+Open Grafana without an ingress controller:
+
+```sh
+kubectl -n grafana port-forward service/grafana 3000:80
+```
+
+The default local Grafana administrator password is managed by the Grafana
+release Secret; retrieve it rather than placing it in values. See the
+[Kind platform contract](deploy/observability/kind/README.md) for the release
+and namespace map.
+The Kind profile is for local development only: production must provide
+separate buckets, credentials, retention, and workload-identity policy.
+
 ### Production
 
 `charts/values-production.yaml` is a non-deployable contract template, not a

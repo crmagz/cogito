@@ -12,6 +12,7 @@ from cogito_api.models import (
     ImplementationApprovalDecision,
     PlanApprovalDecision,
     PlanningRunStatus,
+    PlanningFailureEvidence,
     ProductSpecification,
     ResolvedWorkflow,
     SpecificationEvaluation,
@@ -43,6 +44,7 @@ from cogito_api.supervisor import (
     OutboxDelivery,
     PlanningGenerationDelivery,
     PlanningRunRecord,
+    SourceOnlySpecificationRecord,
     WorkbenchAgentGatewayRouteRecord,
     WorkbenchAgentInvocationRecord,
     WorkbenchAgentLifecycleTransitionRecord,
@@ -98,6 +100,14 @@ class InMemoryPlanStore:
             sha256=sha256(source_specification_bytes(initial_specification)).hexdigest(),
         )
 
+    def put_source_only_specification(self, specification_id: str, initial_specification: str) -> ArtifactReference:
+        from hashlib import sha256
+
+        data = source_specification_bytes(initial_specification)
+        ref = f"s3://plan-snapshots/source-only-specifications/{specification_id}/source.json"
+        self.artifacts[ref] = data
+        return ArtifactReference(ref=ref, sha256=sha256(data).hexdigest())
+
     def put_product_specification(
         self, run_id: str, revision: int, specification: ProductSpecification
     ) -> ArtifactReference:
@@ -110,6 +120,20 @@ class InMemoryPlanStore:
             ref=f"s3://plan-snapshots/runs/{run_id}/product-specifications/{revision}/{digest}/specification.json",
             sha256=digest,
         )
+
+    def put_source_only_product_specification(
+        self, specification_id: str, specification: ProductSpecification
+    ) -> ArtifactReference:
+        from hashlib import sha256
+
+        data = product_specification_bytes(specification)
+        digest = sha256(data).hexdigest()
+        ref = (
+            f"s3://plan-snapshots/source-only-specifications/{specification_id}/"
+            f"product-specifications/1/{digest}/specification.json"
+        )
+        self.artifacts[ref] = data
+        return ArtifactReference(ref=ref, sha256=digest)
 
     def put_specification_evaluation(
         self, run_id: str, specification_revision: int, evaluation: SpecificationEvaluation
@@ -176,6 +200,7 @@ class InMemoryPlanStore:
 class InMemorySupervisorStore:
     def __init__(self) -> None:
         self.planning_runs: dict[str, PlanningRunRecord] = {}
+        self.source_only_specifications: dict[str, SourceOnlySpecificationRecord] = {}
         self.product_specification_generation_claims: dict[str, str] = {}
         self.product_specification_generation_claimed_at: dict[str, datetime] = {}
         self.specification_evaluation_generation_claims: dict[str, str] = {}
@@ -253,7 +278,13 @@ class InMemorySupervisorStore:
         return True
 
     async def record_planning_agent_terminal(
-        self, run_id: str, claim_id: str, *, succeeded: bool, error_summary: str | None = None
+        self,
+        run_id: str,
+        claim_id: str,
+        *,
+        succeeded: bool,
+        error_summary: str | None = None,
+        failure_evidence: PlanningFailureEvidence | None = None,
     ) -> None:
         if self.planning_generation_claims.get(run_id) != claim_id:
             return
@@ -269,7 +300,13 @@ class InMemorySupervisorStore:
             run = self.planning_runs.get(run_id)
             if run is not None and run.status in {PlanningRunStatus.PLANNING, PlanningRunStatus.AWAITING_PLAN_APPROVAL}:
                 self.planning_runs[run_id] = replace(run, status=PlanningRunStatus.PLANNING_FAILED)
-            self._append_coordination_event(run_id, "planning_agent_failed", lifecycle_status="FAILED")
+            self._append_coordination_event(
+                run_id,
+                "planning_agent_failed",
+                lifecycle_status="FAILED",
+                message=error_summary,
+                planning_failure=failure_evidence,
+            )
 
     async def list_workbench_agents(
         self, *, project_id: str, policy_revision: str, limit: int = 50
@@ -587,6 +624,25 @@ class InMemorySupervisorStore:
         )
         self._append_coordination_event(record.run_id, "planning_started", artifact=record.source_artifact)
 
+    async def create_source_only_specification(self, record: SourceOnlySpecificationRecord) -> None:
+        self.source_only_specifications[record.specification_id] = record
+
+    async def get_source_only_specification(self, specification_id: str) -> SourceOnlySpecificationRecord | None:
+        return self.source_only_specifications.get(specification_id)
+
+    async def list_source_only_specifications(
+        self, *, project_ids: frozenset[str], limit: int = 50
+    ) -> list[SourceOnlySpecificationRecord]:
+        return [
+            record
+            for record in sorted(
+                self.source_only_specifications.values(),
+                key=lambda item: (item.submitted_at, item.specification_id),
+                reverse=True,
+            )
+            if record.project_id in project_ids
+        ][:limit]
+
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         return self.planning_runs.get(run_id)
 
@@ -758,6 +814,7 @@ class InMemorySupervisorStore:
             or record.product_specification_revision != revision
             or artifact.sha256 != artifact_sha256
             or record.specification_evaluation_artifact is None
+            or record.specification_evaluation_readiness not in {"ready", "waived"}
         ):
             if (
                 record.selected_product_specification_revision == revision
@@ -1182,6 +1239,10 @@ class InMemorySupervisorStore:
         stage_id: str | None = None,
         message: str | None = None,
         attempt_id: str | None = None,
+        invocation: dict[str, object] | None = None,
+        mcp_invocation: dict[str, object] | None = None,
+        execution_workspace: dict[str, object] | None = None,
+        planning_failure: PlanningFailureEvidence | None = None,
     ) -> None:
         payload = {
             "schema_version": "1.0",
@@ -1194,6 +1255,10 @@ class InMemorySupervisorStore:
             "stage_id": stage_id,
             "message": message[:512] if message else None,
             "attempt_id": attempt_id,
+            "invocation": invocation,
+            "mcp_invocation": mcp_invocation,
+            "execution_workspace": execution_workspace,
+            "planning_failure": planning_failure.model_dump(mode="json") if planning_failure is not None else None,
             "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
             "action_url": f"/api/v1/coordination/runs/{run_id}/actions/{gate}" if gate else None,
         }

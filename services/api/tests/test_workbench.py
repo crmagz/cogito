@@ -537,6 +537,50 @@ def test_workbench_timeline_does_not_guess_a_stage_for_unknown_events(client, va
     assert unknown["stage_ids"] == []
 
 
+def test_workbench_timeline_classifies_lifecycle_agent_and_mcp_activity(client, valid_plan, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store._append_coordination_event(
+        run_id,
+        "stage_invocation_started",
+        invocation={
+            "invocation_id": "a" * 64,
+            "source": "worker_phase",
+            "stage_id": "implementation",
+            "role": "developer",
+            "attempt": 1,
+            "trace_context_available": True,
+        },
+    )
+    supervisor_store._append_coordination_event(
+        run_id,
+        "mcp_invocation_observed",
+        mcp_invocation={
+            "invocation_id": "b" * 64,
+            "server_id": "github-readonly",
+            "server_version": "1.0.0",
+            "server_manifest_sha256": "c" * 64,
+            "tool_name": "catalog_read",
+            "input_schema_sha256": "d" * 64,
+            "outcome": "success",
+            "invocation_count": 1,
+        },
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}/timeline", headers=_headers())
+
+    assert response.status_code == 200
+    events_by_type = {item["event_type"]: item for item in response.json()["items"]}
+    assert events_by_type["plan_approval_requested"]["activity_kind"] == "event"
+    assert events_by_type["plan_approval_requested"]["actor_label"] is None
+    assert events_by_type["plan_approval_requested"]["log_evidence_available"] is False
+    assert events_by_type["stage_invocation_started"]["activity_kind"] == "agent"
+    assert events_by_type["stage_invocation_started"]["actor_label"] == "Developer"
+    assert events_by_type["stage_invocation_started"]["log_evidence_available"] is True
+    assert events_by_type["mcp_invocation_observed"]["activity_kind"] == "mcp"
+    assert events_by_type["mcp_invocation_observed"]["actor_label"] == "github-readonly / catalog_read"
+    assert events_by_type["mcp_invocation_observed"]["log_evidence_available"] is False
+
+
 def test_workbench_timeline_tolerates_unknown_persisted_enum_values(client, valid_plan, supervisor_store) -> None:
     run_id, _ = _awaiting_plan(client, valid_plan)
     event_id, event = next(iter(supervisor_store.coordination_events.items()))
