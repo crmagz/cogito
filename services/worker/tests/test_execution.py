@@ -975,6 +975,20 @@ def test_audit_log_wrapper_preserves_command_streams_for_the_redacting_pod_colle
     assert command[-2:] == ["echo", "agent output"]
 
 
+async def test_execution_rejects_an_audited_command_without_an_absolute_workspace_root() -> None:
+    client = object.__new__(KubernetesExecutionJobClient)
+
+    async def unexpected_pod_lookup(_: str) -> str:
+        raise AssertionError("invalid audit workspace must fail before Kubernetes access")
+
+    client._running_pod_name = unexpected_pod_lookup
+
+    with pytest.raises(ValueError, match="workspace root"):
+        await client.execute(
+            "job-1", ["echo", "agent output"], "", 30, 1024, audit_invocation_id="a" * 64, workspace_root=""
+        )
+
+
 def test_streamed_command_output_stays_within_its_memory_budget() -> None:
     parts: list[str] = []
     size, truncated = _append_bounded_output(parts, "x" * 10, 0, 4, False)

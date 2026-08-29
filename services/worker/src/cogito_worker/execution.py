@@ -8,6 +8,7 @@ import re
 import shlex
 import time
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Protocol
 
 from .execution_prepare import feature_branch_name, repository_clone_url, repository_directory_name
@@ -401,7 +402,6 @@ class KubernetesExecutionJobClient:
     ) -> CommandResult:
         """Run a command through the Kubernetes exec subresource for this run only."""
 
-        pod_name = await self._running_pod_name(job_name)
         if stdin:
             # The pinned Kubernetes WebSocket client cannot half-close stdin.
             # Feed trusted command input through the remote shell instead, so
@@ -411,7 +411,10 @@ class KubernetesExecutionJobClient:
         if audit_invocation_id:
             if not _AUDIT_INVOCATION_ID_PATTERN.fullmatch(audit_invocation_id):
                 raise ValueError("execution audit invocation identifier is invalid")
+            if not workspace_root or not Path(workspace_root).is_absolute():
+                raise ValueError("execution audit workspace root must be an absolute path")
             command = _audit_logged_command(command, audit_invocation_id, workspace_root)
+        pod_name = await self._running_pod_name(job_name)
         return await asyncio.to_thread(
             self._execute_in_pod,
             pod_name,

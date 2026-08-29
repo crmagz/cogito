@@ -1243,28 +1243,7 @@ def create_app(
                 )
                 selected_specification = ProductSpecification.model_validate_json(specification_bytes)
                 initial_specification = json.dumps(
-                    {
-                        "title": selected_specification.title.text,
-                        "problem_statement": selected_specification.problem_statement.text,
-                        "in_scope": [statement.text for statement in selected_specification.in_scope],
-                        "constraints": [statement.text for statement in selected_specification.constraints],
-                        "dependencies": [statement.text for statement in selected_specification.dependencies],
-                        "requirements": [
-                            {"id": statement.id, "text": statement.text}
-                            for statement in [
-                                *selected_specification.functional_requirements,
-                                *selected_specification.non_functional_requirements,
-                            ]
-                        ],
-                        "acceptance_criteria": [
-                            {
-                                "id": statement.id,
-                                "text": statement.text,
-                                "requirement_ids": statement.requirement_ids,
-                            }
-                            for statement in selected_specification.acceptance_criteria
-                        ],
-                    },
+                    selected_specification.model_dump(mode="json"),
                     sort_keys=True,
                     separators=(",", ":"),
                     ensure_ascii=False,
