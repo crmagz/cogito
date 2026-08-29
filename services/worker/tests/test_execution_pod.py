@@ -23,3 +23,23 @@ def test_audit_output_redacts_all_authorization_schemes(tmp_path: Path, capsys) 
     assert "json-token" not in output
     assert "standalone-token" not in output
     assert "[REDACTED]" in output
+
+
+def test_audit_output_waits_for_a_complete_line_before_redacting(tmp_path: Path, capsys) -> None:
+    invocation_id = "a" * 64
+    audit_dir = tmp_path / ".cogito" / "audit"
+    audit_dir.mkdir(parents=True)
+    path = audit_dir / f"{invocation_id}.stdout.capture"
+    path.write_text("Authorization: Bearer sec", encoding="utf-8")
+    offsets: dict[Path, int] = {}
+
+    _emit_audit_output(audit_dir, offsets)
+
+    assert capsys.readouterr().out == ""
+    assert offsets == {}
+    path.write_text("Authorization: Bearer secret-token\n", encoding="utf-8")
+    _emit_audit_output(audit_dir, offsets)
+
+    output = capsys.readouterr().out
+    assert "secret-token" not in output
+    assert "[REDACTED]" in output

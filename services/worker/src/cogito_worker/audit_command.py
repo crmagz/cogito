@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import subprocess
 import sys
 import threading
@@ -11,6 +12,7 @@ from typing import BinaryIO
 
 _AUDIT_OUTPUT_LIMIT_BYTES = 64 * 1024
 _TRUNCATION_MARKER = b"\n[audit output truncated]\n"
+_AUDIT_INVOCATION_ID = re.compile(r"^[a-f0-9]{64}$")
 
 
 def _binary_stream(stream: object) -> BinaryIO:
@@ -23,6 +25,8 @@ def _capture_stream(source: BinaryIO, destination: object, audit_path: Path) -> 
     existing = audit_path.read_bytes() if audit_path.exists() else b""
     retained = min(len(existing), _AUDIT_OUTPUT_LIMIT_BYTES)
     truncated = _TRUNCATION_MARKER in existing
+    wrote_audit_output = False
+    retained_ends_with_newline = existing.endswith(b"\n")
     with audit_path.open("ab") as audit:
         while chunk := source.read(8192):
             output = _binary_stream(destination)
@@ -33,9 +37,15 @@ def _capture_stream(source: BinaryIO, destination: object, audit_path: Path) -> 
                 kept = chunk[:remaining]
                 audit.write(kept)
                 retained += len(kept)
+                wrote_audit_output = True
+                retained_ends_with_newline = kept.endswith(b"\n")
             if len(chunk) > remaining and not truncated:
                 audit.write(_TRUNCATION_MARKER)
                 truncated = True
+        if wrote_audit_output and not truncated and not retained_ends_with_newline:
+            # Finalize a stream record so the polling collector never has to
+            # emit an unterminated credential fragment.
+            audit.write(b"\n")
 
 
 def main(arguments: list[str] | None = None) -> int:
@@ -45,6 +55,10 @@ def main(arguments: list[str] | None = None) -> int:
     if len(values) < 4 or values[2] != "--":
         raise ValueError("audit command requires an invocation, workspace, and command")
     invocation_id, workspace_root = values[:2]
+    if not _AUDIT_INVOCATION_ID.fullmatch(invocation_id):
+        raise ValueError("audit command invocation identifier is invalid")
+    if not workspace_root or not Path(workspace_root).is_absolute():
+        raise ValueError("audit command workspace root must be an absolute path")
     command = values[3:]
     audit_dir = Path(workspace_root) / ".cogito" / "audit"
     audit_dir.mkdir(parents=True, exist_ok=True)

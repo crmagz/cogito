@@ -14,8 +14,8 @@ _SENSITIVE_VALUE = re.compile(
 )
 
 
-def _emit_audit_output(audit_dir: Path, offsets: dict[Path, int]) -> None:
-    """Copy appended invocation output to pod stdout/stderr with redaction."""
+def _emit_audit_output(audit_dir: Path, offsets: dict[Path, int], *, final: bool = False) -> None:
+    """Copy complete appended lines to pod output without splitting secrets across polls."""
 
     for path in sorted(audit_dir.glob("*.*")):
         match = _AUDIT_LOG_FILE.fullmatch(path.name)
@@ -30,6 +30,11 @@ def _emit_audit_output(audit_dir: Path, offsets: dict[Path, int]) -> None:
             continue
         if not data:
             continue
+        if not final:
+            final_newline = data.rfind(b"\n")
+            if final_newline < 0:
+                continue
+            data = data[: final_newline + 1]
         offsets[path] = offset + len(data)
         stream = sys.stderr if match.group("stream") == "stderr" else sys.stdout
         invocation_id = match.group("invocation_id")
@@ -60,7 +65,7 @@ def main() -> None:
     while not stopping and time.monotonic() < deadline:
         _emit_audit_output(audit_dir, audit_offsets)
         time.sleep(1)
-    _emit_audit_output(audit_dir, audit_offsets)
+    _emit_audit_output(audit_dir, audit_offsets, final=True)
 
 
 if __name__ == "__main__":

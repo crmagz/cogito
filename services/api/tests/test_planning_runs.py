@@ -508,7 +508,16 @@ def test_selected_product_specification_is_the_only_plan_input(
 
     assert planned.status_code == 200
     assert selected["selected_product_specification_revision"] == 1
-    assert planner.contexts[0].initial_specification.startswith('{"acceptance_criteria":')
+    selected_specification = json.loads(planner.contexts[0].initial_specification)
+    assert selected_specification["out_of_scope"] == [{
+        "id": "scope-out-1",
+        "kind": "source",
+        "requirement_ids": [],
+        "source_segment_ids": ["source-1"],
+        "text": "Changing authentication",
+    }]
+    assert selected_specification["risks"][0]["id"] == "risk-1"
+    assert selected_specification["desired_outcomes"][0]["id"] == "outcome-1"
     assert "Add a rate limiter with bounded, observable behavior." not in planner.contexts[0].initial_specification
 
 
