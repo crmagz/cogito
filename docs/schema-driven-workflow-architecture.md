@@ -7,7 +7,7 @@ authority to change workflow policy or execution permissions.
 
 ## Design principles
 
-- Product managers submit one product specification through Cogito's API and
+- Product managers submit one Work Specification through Cogito's API and
   Workbench. They do not select a workflow policy, model, agent, MCP tool, or
   budget ceiling.
 - Platform owners configure workflow templates and policies through Cogito's
@@ -30,12 +30,12 @@ authority to change workflow policy or execution permissions.
 
 ```mermaid
 flowchart TD
-    A[Operator submits\ninitial_specification string] --> B[Cogito API]
+    A[Operator submits\nWork Specification] --> B[Cogito API]
     B --> C[Immutable source artifact\nSHA-256]
     C --> D[Planner model\nfixed planner route]
     D --> E[ProductSpecification v2\ndraft revision]
     E --> F[Deterministic specification\nevaluation]
-    F -->|needs revision| G[Operator edits complete\nproduct specification]
+    F -->|needs revision| G[Operator revises\nWork Specification]
     G --> E
     F -->|ready or waived| H[Operator accepts\nselected specification]
 
@@ -81,15 +81,15 @@ flowchart TD
     end
 
     subgraph Submission[Product-manager submission]
-        R[SpecificationIntake\none product specification]
+        R[WorkSpecification\none product/Jira intent]
     end
 
     R --> API[Cogito API]
     PUB --> API
 
-    API --> INTAKE[Immutable SpecificationIntake]
-    INTAKE --> PSGEN[Product specification generation]
-    PSGEN --> PS[ProductSpecification\nrequirements and acceptance criteria]
+    API --> INTAKE[Immutable WorkSpecification]
+    INTAKE --> PSGEN[Requirements normalization]
+    PSGEN --> PS[Normalized requirements contract\nrequirements and acceptance criteria]
     PS --> EVAL[Deterministic evaluation]
     EVAL -->|needs revision| EDIT[Operator refinement]
     EDIT --> PS
@@ -124,13 +124,14 @@ flowchart TD
 
 ## Contract model
 
-The platform should use separate versioned contracts. The product manager's
-single specification is composed with platform-owned published contracts by
-the resolver; it does not embed or select unrestricted policy.
+The platform uses separate versioned contracts, but presents one editable
+**Work Specification** to a product manager or Jira integration. Cogito
+composes that specification with platform-owned published contracts; it never
+lets request content embed or select unrestricted policy.
 
 | Contract | Purpose | Authority |
 | --- | --- | --- |
-| `SpecificationIntake` | One product-manager-owned product request: objective, scope, actors, expected outcomes, constraints, and unknowns | Product manager |
+| `WorkSpecification` | One product/Jira-owned request: objective, scope, actors, expected outcomes, constraints, and unknowns | Product manager or Jira integration |
 | `WorkflowTemplate` | Available phase graph, dependencies, activation points, typed inputs/outputs, gates, and a required `default_policy_ref` | Platform owner |
 | `WorkflowPolicy` | Project eligibility, mandatory phases, approval rules, retry limits, risk thresholds, and budget caps | Platform owner |
 | `ProjectWorkflowBinding` | The approved template for a project or product area; prevents an ordinary submitter from choosing a template | Platform owner |
@@ -143,7 +144,7 @@ the resolver; it does not embed or select unrestricted policy.
 
 ```yaml
 apiVersion: cogito.dev/v1alpha1
-kind: SpecificationIntake
+kind: WorkSpecification
 spec:
   objective: Add rate limiting to public API endpoints
   actors: [API consumer, platform operator]
@@ -166,10 +167,14 @@ then its required default policy. It determines whether `security_review` or
 another optional phase is required from typed product facts and policy. A
 product manager can describe risk or compliance needs in the one specification,
 but cannot choose the policy, model tier, MCP profile, or effective budget.
+The model-generated product specification remains immutable derived evidence:
+it supplies traceable requirement IDs, provenance, assumptions, questions, and
+acceptance coverage inside the one Work Specification workspace. It is not a
+second product-manager-authored workflow document.
 
 ## Mandatory product-manager inputs and gates
 
-The product manager completes one `SpecificationIntake`, but it must be a real
+The product manager completes one `WorkSpecification`, but it must be a real
 contract rather than an unconstrained text box. The API rejects a submission
 unless it contains the following fields:
 
@@ -225,7 +230,7 @@ appropriately qualified product role.
 
 These requirements are enforced at four boundaries:
 
-1. **Schema validation:** `SpecificationIntake.required` fields and
+1. **Schema validation:** `WorkSpecification.required` fields and
    `WorkflowTemplate.required_gates` are required by their schemas.
 2. **Publish validation:** a template cannot be published unless its default
    policy, required gates, approver roles, artifact contracts, and phase graph
@@ -269,7 +274,7 @@ they already resolved.
 
 | Role | Permitted actions |
 | --- | --- |
-| Product manager | Create and revise their `SpecificationIntake`; view their run and provide required product decisions |
+| Product manager | Create and revise their `WorkSpecification`; view their run and provide required product decisions |
 | Workflow approver | Approve/reject product, plan, or implementation gates only where project policy grants it |
 | Platform policy editor | Draft workflow policies, templates, model-tier profiles, capability profiles, and project bindings |
 | Platform policy publisher | Validate and publish approved platform configuration; separate this role from editing in production |
@@ -380,7 +385,7 @@ platform editor    -> PUT  /api/v1/project-workflow-bindings/{project_id}
 product manager    -> POST /api/v1/projects/{project_id}/workflow-runs
 ```
 
-`workflow-runs` accepts only `SpecificationIntake` plus priority. The project
+`workflow-runs` accepts only `WorkSpecification` plus priority. The project
 binding supplies target repositories, the specification set, and constraints;
 the template supplies its default policy unless the platform binding explicitly
 selects another published policy. A submission is rejected if the binding

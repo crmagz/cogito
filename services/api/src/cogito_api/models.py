@@ -90,8 +90,12 @@ class PlanConstraints(BaseModel):
         return self
 
 
-class SpecificationIntake(BaseModel):
-    """The only product-manager authored input to a governed workflow run."""
+class WorkSpecification(BaseModel):
+    """The canonical product-authored intent for a governed workflow run.
+
+    Jira and Workbench may supply this product contract, but it cannot select
+    platform-owned templates, policies, agents, tools, or execution limits.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -116,7 +120,7 @@ class SpecificationIntake(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_non_blank_values(self) -> "SpecificationIntake":
+    def validate_non_blank_values(self) -> "WorkSpecification":
         fields = (
             self.actors,
             self.desired_outcomes,
@@ -132,6 +136,10 @@ class SpecificationIntake(BaseModel):
         if len(set(repository_ids)) != len(repository_ids):
             raise ValueError("repository candidates must be unique")
         return self
+
+
+# Backwards-compatible request name during the Work Specification migration.
+SpecificationIntake = WorkSpecification
 
 
 class RepositoryDiscoveryPreference(StrEnum):
@@ -673,7 +681,7 @@ class InitialSpecificationContract(BaseModel):
     constraints: PlanConstraints
     priority: str = Field(min_length=1, max_length=32)
     workflow_context: InitialSpecificationWorkflowContext
-    product_manager_intake: SpecificationIntake | None = None
+    work_specification: WorkSpecification | None = None
 
     @model_validator(mode="after")
     def validate_contract_shape(self) -> "InitialSpecificationContract":
@@ -694,9 +702,23 @@ class WorkflowRunSubmission(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    specification: SpecificationIntake
+    work_specification: WorkSpecification | None = Field(default=None, description="Canonical Work Specification")
+    specification: WorkSpecification | None = Field(
+        default=None,
+        description="Deprecated alias for work_specification",
+    )
     priority: str = Field(default="normal", min_length=1, max_length=32)
     dry_run: bool = False
+
+    @model_validator(mode="after")
+    def validate_work_specification(self) -> "WorkflowRunSubmission":
+        if (self.work_specification is None) == (self.specification is None):
+            raise ValueError("exactly one of work_specification or specification is required")
+        return self
+
+    @property
+    def resolved_work_specification(self) -> WorkSpecification:
+        return self.work_specification or self.specification  # type: ignore[return-value]
 
 
 class ArtifactReference(BaseModel):
@@ -1726,6 +1748,7 @@ class WorkbenchArtifactKind(StrEnum):
     """Server-owned evidence kinds available to an authorized Workbench."""
 
     SOURCE = "source"
+    WORK_SPECIFICATION = "work_specification"
     PRODUCT_SPECIFICATION = "product_specification"
     SPECIFICATION_EVALUATION = "specification_evaluation"
     PLAN = "plan"
@@ -2138,6 +2161,7 @@ class WorkbenchFeedbackIntent(StrEnum):
 class WorkbenchFeedbackStage(StrEnum):
     """Current server-owned stages eligible for immutable review context."""
 
+    WORK_SPECIFICATION = "work_specification"
     SPECIFICATION = "specification"
     PRODUCT_SPECIFICATION = "product_specification"
     PLANNING = "planning"

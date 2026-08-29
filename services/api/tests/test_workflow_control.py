@@ -146,7 +146,7 @@ def test_product_manager_can_submit_only_structured_intake_after_platform_bindin
     with TestClient(app, headers={"Authorization": "Bearer operator-test-token"}) as client:
         binding = client.put("/api/v1/project-workflow-bindings/default", json=_binding())
         assert binding.status_code == 200
-        response = client.post("/api/v1/projects/default/workflow-runs", json={"specification": _intake()})
+        response = client.post("/api/v1/projects/default/workflow-runs", json={"work_specification": _intake()})
         assert response.status_code == 202
         body = response.json()
         assert body["status"] == "planning"
@@ -167,11 +167,44 @@ def test_product_manager_can_submit_only_structured_intake_after_platform_bindin
                 "delivery_review",
             ],
         }
-        assert source["product_manager_intake"] == _intake() | {
+        assert source["work_specification"] == _intake() | {
             "schema_version": 1,
             "repository_candidates": [],
             "discovery_preference": "supplied_first",
         }
+
+
+def test_legacy_specification_field_remains_compatible_during_work_specification_migration(
+    valid_plan: dict, valid_product_specification: dict
+) -> None:
+    app = _app(
+        roles=("cogito-product-manager", "cogito-policy-editor", "cogito-policy-publisher"),
+        valid_plan=valid_plan,
+        valid_product_specification=valid_product_specification,
+    )
+    with TestClient(app, headers={"Authorization": "Bearer operator-test-token"}) as client:
+        assert client.put("/api/v1/project-workflow-bindings/default", json=_binding()).status_code == 200
+        response = client.post("/api/v1/projects/default/workflow-runs", json={"specification": _intake()})
+        assert response.status_code == 202
+        source = json.loads(app.state.test_plan_store.source_specifications[response.json()["run_id"]])
+        assert source["work_specification"]["objective"] == _intake()["objective"]
+
+
+def test_workflow_run_rejects_ambiguous_work_specification_input(
+    valid_plan: dict, valid_product_specification: dict
+) -> None:
+    app = _app(
+        roles=("cogito-product-manager", "cogito-policy-editor", "cogito-policy-publisher"),
+        valid_plan=valid_plan,
+        valid_product_specification=valid_product_specification,
+    )
+    with TestClient(app, headers={"Authorization": "Bearer operator-test-token"}) as client:
+        assert client.put("/api/v1/project-workflow-bindings/default", json=_binding()).status_code == 200
+        response = client.post(
+            "/api/v1/projects/default/workflow-runs",
+            json={"work_specification": _intake(), "specification": _intake()},
+        )
+        assert response.status_code == 422
 
 
 def test_product_manager_cannot_modify_project_binding(valid_plan: dict, valid_product_specification: dict) -> None:

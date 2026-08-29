@@ -875,6 +875,7 @@ class InMemorySupervisorStore:
                 raise ApprovalConflictError("idempotency key was reused with different feedback")
             return existing
         expected_artifact = {
+            "work_specification": run.source_artifact if run is not None else None,
             "specification": run.source_artifact if run is not None else None,
             "product_specification": run.product_specification_artifact if run is not None else None,
             "planning": run.plan_artifact if run is not None else None,
