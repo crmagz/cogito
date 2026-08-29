@@ -1,21 +1,22 @@
 # Specification evaluation lifecycle
 
-This guide explains the product-specification gate: which API call is expected
-next, what Cogito persists, and what the Workbench should show. The workflow
-does not automatically move from a generated specification to implementation.
-Each gate needs durable evidence and, where marked, an authenticated operator
-action.
+This guide explains the Work Specification gate: which API call is expected
+next, what Cogito persists, and what the Workbench should show. The Workbench
+has one Work Specification workspace, backed by source, normalized
+requirements, and evaluation evidence. The workflow does not automatically
+move from specification approval to implementation. Each gate needs durable
+evidence and, where marked, an authenticated operator action.
 
 ## Lifecycle
 
 ```mermaid
 stateDiagram-v2
-    [*] --> SourceRecorded: submit planning run
-    SourceRecorded --> NoDraft
-    NoDraft --> ReviewReady: Generate product specification
-    ReviewReady --> Confirming: Accept specification
+    [*] --> Submitted: submit Work Specification
+    Submitted --> Normalizing: Derive normalized requirements
+    Normalizing --> ReviewReady
+    ReviewReady --> Confirming: Approve Work Specification
     ReviewReady --> Editing: Needs refinement
-    Editing --> ReviewReady: Save refined specification
+    Editing --> ReviewReady: Save refined Work Specification
     Confirming --> Accepting: Confirm specification
     Accepting --> Accepted: evaluation ready + select revision
     Accepting --> RefinementRequired: evaluation needs revision
@@ -31,10 +32,11 @@ transition. A failed evaluation persists evidence but never selects that
 revision; the operator returns to editing. An explicit waiver remains an
 exceptional, separately explained API action rather than an accept outcome.
 
-The product specification is a model-generated, source-provenanced proposal,
-not boilerplate. The planner infers fields such as requirements, actors,
-assumptions, risks, and journeys from the recorded source. The operator is
-accountable for reviewing, correcting, and accepting the resulting contract.
+The normalized requirements contract is model-generated, source-provenanced
+evidence, not a second configuration form. The planner infers requirements,
+actors, assumptions, risks, and journeys from the recorded Work Specification.
+The operator reviews one Work Specification workspace and approves the
+resulting contract for discovery and planning.
 
 The Workbench presents only these normal review actions:
 
@@ -72,17 +74,18 @@ no planner or worker is executing and a specification revision is required.
 
 ## Workbench integration
 
-The Workbench now provides a centralized workflow-specification workspace for
-the whole run rather than duplicating a dossier in every stage. It places the
-current phase, source and product-specification artifact references (including
-their SHA-256 digests), the editable product-specification JSON, workflow
-actions, and the durable workflow audit activity in one operator form.
+The Workbench provides a centralized Work Specification workspace for the
+whole run rather than duplicating a dossier in every stage. It places the
+current phase, Work Specification and derived-evidence references (including
+their SHA-256 digests), allowed revision controls, workflow actions, and the
+durable workflow audit activity in one operator form.
 
-The workspace renders only the current source and product-specification
-references; it does not treat browser content as evidence authority. Existing
-detail routes retain the full immutable-evidence viewer for other artifact
-kinds, including evaluation and plan evidence. A product-specification edit
-creates a new immutable revision; acceptance is confirmed separately. If the
+The workspace renders the current Work Specification and its normalized
+requirements evidence; it does not treat browser content as evidence
+authority. Existing detail routes retain the full immutable-evidence viewer
+for other artifact kinds, including evaluation and plan evidence. A Work
+Specification edit creates a new immutable revision; acceptance is confirmed
+separately. If the
 authoritative run refreshes to a newer revision while an edit is open,
 Workbench preserves the draft as stale and requires an explicit reload before
 it can be submitted.
@@ -179,7 +182,7 @@ Expected: HTTP `202`, a new run ID, and one immutable source artifact.
 
 ```sh
 curl --fail-with-body --silent --show-error \
-  --request POST "http://127.0.0.1:8000/api/v1/planning-runs/$RUN_ID/generate-product-specification" \
+  --request POST "http://127.0.0.1:8000/api/v1/planning-runs/$RUN_ID/generate-work-specification" \
   --header "Authorization: Bearer $COGITO_AUTH_TOKEN" \
   --header "Content-Type: application/json" \
   --data '{}' | jq
@@ -197,7 +200,7 @@ SPECIFICATION_JSON="$(
 )"
 
 curl --fail-with-body --silent --show-error \
-  --request POST "http://127.0.0.1:8000/api/v1/planning-runs/$RUN_ID/accept-product-specification" \
+  --request POST "http://127.0.0.1:8000/api/v1/planning-runs/$RUN_ID/accept-work-specification" \
   --header "Authorization: Bearer $COGITO_AUTH_TOKEN" \
   --header "Content-Type: application/json" \
   --header "Idempotency-Key: accept-$RUN_ID" \
@@ -255,7 +258,7 @@ typed structure, stable IDs, and source provenance. Then submit it:
 
 ```sh
 curl --fail-with-body --silent --show-error \
-  --request POST "http://127.0.0.1:8000/api/v1/planning-runs/$RUN_ID/revise-product-specification" \
+  --request POST "http://127.0.0.1:8000/api/v1/planning-runs/$RUN_ID/revise-work-specification" \
   --header "Authorization: Bearer $COGITO_AUTH_TOKEN" \
   --header "Content-Type: application/json" \
   --header "Idempotency-Key: revise-$RUN_ID-1" \
@@ -339,7 +342,7 @@ execution blocked.
 
 Cogito keeps evidence instead of relying on browser state:
 
-- Source, product specification, evaluation, and plan JSON are content
+- Work Specification, derived requirements, evaluation, and plan JSON are content
   addressed in object storage and SHA-256 verified before reuse.
 - The planning-run record carries the selected specification/evaluation
   pointers; a new specification revision clears them.

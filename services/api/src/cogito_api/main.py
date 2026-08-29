@@ -225,7 +225,7 @@ def _source_specification_contract(
     template_ref: str | None = None,
     policy_ref: str | None = None,
     required_gates: list[str] | None = None,
-    product_manager_intake: SpecificationIntake | None = None,
+    work_specification: SpecificationIntake | None = None,
 ) -> str:
     """Create the one structured source document agents receive for a run.
 
@@ -247,7 +247,7 @@ def _source_specification_contract(
             required_gates=required_gates
             or ["product_specification_review", "plan_scope_review", "delivery_review"],
         ),
-        product_manager_intake=product_manager_intake,
+        work_specification=work_specification,
     )
     return json.dumps(
         contract.model_dump(mode="json", exclude_none=True),
@@ -870,7 +870,7 @@ def create_app(
             )
         submitted_at = datetime.now(timezone.utc).isoformat()
         source_text = _source_specification_contract(
-            goal=submission.specification.objective,
+            goal=submission.resolved_work_specification.objective,
             target_repos=admission.binding.target_repos,
             spec_set=admission.binding.spec_set,
             constraints=constraints,
@@ -879,7 +879,7 @@ def create_app(
             template_ref=admission.binding.template_ref,
             policy_ref=admission.binding.policy_ref or admission.template.default_policy_ref,
             required_gates=[gate.id for gate in admission.template.required_gates],
-            product_manager_intake=submission.specification,
+            work_specification=submission.resolved_work_specification,
         )
         try:
             source_artifact = store.put_source_specification(run_id, source_text)
@@ -1098,14 +1098,15 @@ def create_app(
         response = _planning_run_response(record)
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump(mode="json"))
 
-    @app.post("/api/v1/planning-runs/{run_id}/generate-product-specification")
+    @app.post("/api/v1/planning-runs/{run_id}/generate-work-specification")
+    @app.post("/api/v1/planning-runs/{run_id}/generate-product-specification", deprecated=True)
     async def generate_product_specification(
         run_id: str,
         authorization: str | None = Header(default=None),
     ) -> JSONResponse:
-        """Generate and retain one immutable tool-free product-specification draft.
+        """Generate and retain one immutable normalized Work Specification.
 
-        The generated draft is review context only in this release. It neither
+        The generated requirements contract is review context only. It neither
         changes plan input nor starts Temporal; a later selection gate must
         explicitly bind one revision before it can authorize implementation planning.
         """
@@ -1590,14 +1591,15 @@ def create_app(
         supervisor_store, generate_plan_after_specification_acceptance
     )
 
-    @app.post("/api/v1/planning-runs/{run_id}/accept-product-specification")
+    @app.post("/api/v1/planning-runs/{run_id}/accept-work-specification")
+    @app.post("/api/v1/planning-runs/{run_id}/accept-product-specification", deprecated=True)
     async def accept_product_specification(
         run_id: str,
         request_body: ProductSpecificationAcceptanceRequest,
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> JSONResponse:
-        """Validate and select one current product specification through a single operator command."""
+        """Validate and select one current Work Specification through one operator command."""
 
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
@@ -1724,7 +1726,8 @@ def create_app(
         response = _planning_run_response(updated)
         return JSONResponse(content=response.model_dump(mode="json"))
 
-    @app.post("/api/v1/planning-runs/{run_id}/evaluate-product-specification")
+    @app.post("/api/v1/planning-runs/{run_id}/evaluate-work-specification")
+    @app.post("/api/v1/planning-runs/{run_id}/evaluate-product-specification", deprecated=True)
     async def evaluate_product_specification(
         run_id: str,
         authorization: str | None = Header(default=None),
@@ -1964,14 +1967,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="resolved workflow is not available")
         return JSONResponse(content=resolved_workflow.model_dump(mode="json"))
 
-    @app.post("/api/v1/planning-runs/{run_id}/revise-product-specification")
+    @app.post("/api/v1/planning-runs/{run_id}/revise-work-specification")
+    @app.post("/api/v1/planning-runs/{run_id}/revise-product-specification", deprecated=True)
     async def revise_product_specification(
         run_id: str,
         request_body: ProductSpecificationRevisionRequest,
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> JSONResponse:
-        """Persist an explicitly requested revision, record its review, and continue planning."""
+        """Persist an explicitly requested Work Specification revision and continue planning."""
 
         if not idempotency_key or len(idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key header is required and must be at most 256 characters")
@@ -2224,7 +2228,12 @@ def create_app(
 
     async def workbench_response(record: PlanningRunRecord, principal) -> WorkbenchRunResponse:
         require_workbench_scope(record, principal)
-        artifacts = [WorkbenchArtifactSummary(kind=WorkbenchArtifactKind.SOURCE, sha256=record.source_artifact.sha256)]
+        artifacts = [
+            WorkbenchArtifactSummary(
+                kind=WorkbenchArtifactKind.WORK_SPECIFICATION,
+                sha256=record.source_artifact.sha256,
+            )
+        ]
         if record.product_specification_artifact is not None:
             artifacts.append(
                 WorkbenchArtifactSummary(
@@ -2261,7 +2270,7 @@ def create_app(
             settings.auth_oidc_admin_role,
         } & principal.roles:
             abilities.append("approve")
-        workflow = ["specification", "product_specification", "specification_evaluation", "planning"]
+        workflow = ["work_specification", "planning"]
         if record.plan_artifact is not None:
             workflow.append("plan")
         if record.implementation_artifact is not None:
@@ -2316,13 +2325,13 @@ def create_app(
             return [
                 WorkbenchActionSummary(
                     action_id=WorkbenchActionId.GENERATE_PRODUCT_SPECIFICATION,
-                    stage_id="product_specification",
+                    stage_id="work_specification",
                     label="Proceed",
-                    description="Create the structured product specification from the submitted source specification.",
+                    description="Derive the normalized requirements and acceptance contract from this Work Specification.",
                 ),
                 WorkbenchActionSummary(
                     action_id=WorkbenchActionId.CANCEL_PLANNING_RUN,
-                    stage_id="product_specification",
+                    stage_id="work_specification",
                     label="Cancel",
                     description="Stop this run before a plan is generated.",
                     requires_confirmation=True,
@@ -2331,19 +2340,19 @@ def create_app(
         actions = [
             WorkbenchActionSummary(
                 action_id=WorkbenchActionId.REFINE_PRODUCT_SPECIFICATION,
-                stage_id="product_specification",
+                stage_id="work_specification",
                 label="Needs refinement",
                 description=(
-                    "Edit the specification to resolve gaps, questions, or incorrect assumptions."
+                    "Revise the Work Specification to resolve gaps, questions, or incorrect assumptions."
                     if record.selected_product_specification_artifact is None
-                    else "Create a new revision; this resets specification acceptance."
+                    else "Create a new Work Specification revision; this resets specification acceptance."
                 ),
             )
         ]
         actions.append(
             WorkbenchActionSummary(
                 action_id=WorkbenchActionId.CANCEL_PLANNING_RUN,
-                stage_id="product_specification",
+                stage_id="work_specification",
                 label="Cancel",
                 description="Stop this run before a plan is generated.",
                 requires_confirmation=True,
@@ -2356,9 +2365,9 @@ def create_app(
                 0,
                 WorkbenchActionSummary(
                     action_id=WorkbenchActionId.ACCEPT_PRODUCT_SPECIFICATION,
-                    stage_id="product_specification",
+                    stage_id="work_specification",
                     label="Accept",
-                    description="Record this reviewed revision as the contract for planning.",
+                    description="Approve this Work Specification as the contract for discovery and planning.",
                     requires_confirmation=True,
                 ),
             )
@@ -2385,7 +2394,7 @@ def create_app(
                     WorkbenchWorkflowNodeType.GATE
                     if stage.stage_id.endswith("_approval")
                     else WorkbenchWorkflowNodeType.QUEUE
-                    if stage.stage_id in {"specification", "product_specification", "specification_evaluation"}
+                    if stage.stage_id == "work_specification"
                     else WorkbenchWorkflowNodeType.AGENT
                 ),
             )
@@ -2488,18 +2497,14 @@ def create_app(
         )
         return [
             WorkbenchStageSummary(
-                stage_id="specification",
-                label="Specification",
-                state=WorkbenchStageState.COMPLETED,
-                availability=WorkbenchStageAvailability.AUTHORITATIVE,
-                reason="An immutable submitted specification is recorded.",
-                artifact_kind=WorkbenchArtifactKind.SOURCE,
-            ),
-            WorkbenchStageSummary(
-                stage_id="product_specification",
-                label="Product specification",
+                stage_id="work_specification",
+                label="Work specification",
                 state=(
                     WorkbenchStageState.COMPLETED
+                    if record.selected_product_specification_artifact is not None
+                    else WorkbenchStageState.NEEDS_REVISION
+                    if record.specification_evaluation_readiness == "needs_revision"
+                    else WorkbenchStageState.AWAITING_OPERATOR
                     if record.product_specification_artifact is not None
                     else WorkbenchStageState.IN_PROGRESS
                     if record.product_specification_generation_claimed_at is not None
@@ -2507,50 +2512,17 @@ def create_app(
                 ),
                 availability=WorkbenchStageAvailability.AUTHORITATIVE,
                 reason=(
-                    "An operator selected this immutable product specification as the planning input."
+                    "The approved Work Specification is the contract for discovery and planning."
                     if record.selected_product_specification_artifact is not None
-                    else "A generated immutable product specification is complete and ready for evaluation."
+                    else "The normalized requirements found gaps that require a Work Specification revision."
+                    if record.specification_evaluation_readiness == "needs_revision"
+                    else "The normalized requirements and acceptance contract is ready for approval."
                     if record.product_specification_artifact is not None
-                    else "The planner agent is generating the product specification."
+                    else "Cogito is deriving normalized requirements from the Work Specification."
                     if record.product_specification_generation_claimed_at is not None
-                    else "No immutable product specification draft is available yet."
+                    else "The submitted Work Specification is ready to be normalized."
                 ),
-                artifact_kind=(
-                    WorkbenchArtifactKind.PRODUCT_SPECIFICATION
-                    if record.product_specification_artifact is not None
-                    else None
-                ),
-            ),
-            WorkbenchStageSummary(
-                stage_id="specification_evaluation",
-                label="Specification evaluation",
-                state=(
-                    WorkbenchStageState.COMPLETED
-                    if record.selected_product_specification_artifact is not None
-                    or record.specification_evaluation_readiness in {"ready", "waived"}
-                    else WorkbenchStageState.NEEDS_REVISION
-                    if record.specification_evaluation_readiness == "needs_revision"
-                    else WorkbenchStageState.AWAITING_OPERATOR
-                    if record.product_specification_artifact is not None
-                    else WorkbenchStageState.UNAVAILABLE
-                ),
-                availability=WorkbenchStageAvailability.AUTHORITATIVE,
-                reason=(
-                    "The immutable evaluation was recorded with the operator-accepted specification."
-                    if record.selected_product_specification_artifact is not None
-                    else "The immutable evaluation authorizes planning."
-                    if record.specification_evaluation_readiness in {"ready", "waived"}
-                    else "The immutable evaluation recorded findings for operator review."
-                    if record.specification_evaluation_readiness == "needs_revision"
-                    else "An operator must request immutable specification evaluation."
-                    if record.product_specification_artifact is not None
-                    else "No immutable product specification is available to evaluate."
-                ),
-                artifact_kind=(
-                    WorkbenchArtifactKind.SPECIFICATION_EVALUATION
-                    if record.specification_evaluation_artifact is not None
-                    else None
-                ),
+                artifact_kind=WorkbenchArtifactKind.WORK_SPECIFICATION,
             ),
             WorkbenchStageSummary(
                 stage_id="planning",
@@ -2849,22 +2821,24 @@ def create_app(
 
         explicit_stage = payload.get("stage_id")
         if explicit_stage in {
+            "work_specification",
             "specification",
+            "product_specification",
             "specification_evaluation",
             "planning",
             "plan_approval",
             "implementation",
             "implementation_approval",
         }:
-            return [explicit_stage]
+            return ["work_specification" if explicit_stage in {"specification", "specification_evaluation", "product_specification"} else explicit_stage]
         if event_type == "specification_recorded":
-            return ["specification"]
+            return ["work_specification"]
         if event_type == "specification_evaluated":
-            return ["specification_evaluation"]
+            return ["work_specification"]
         if event_type == "specification_evaluation_waived":
-            return ["specification_evaluation"]
+            return ["work_specification"]
         if event_type == "product_specification_generation_failed":
-            return ["product_specification"]
+            return ["work_specification"]
         if event_type == "planning_started":
             return ["planning"]
         if event_type in {"planning_agent_started", "planning_agent_failed"}:
@@ -3116,6 +3090,7 @@ def create_app(
             authenticator.require_approver(principal)
         artifact = {
             WorkbenchArtifactKind.SOURCE: record.source_artifact,
+            WorkbenchArtifactKind.WORK_SPECIFICATION: record.source_artifact,
             WorkbenchArtifactKind.PRODUCT_SPECIFICATION: record.product_specification_artifact,
             WorkbenchArtifactKind.SPECIFICATION_EVALUATION: record.specification_evaluation_artifact,
             WorkbenchArtifactKind.PLAN: record.plan_artifact,

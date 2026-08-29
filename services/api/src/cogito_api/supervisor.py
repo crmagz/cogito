@@ -3226,6 +3226,7 @@ class PostgresSupervisorStore:
                     raise ApprovalConflictError("idempotency key was reused with different feedback")
                 return _workbench_feedback_record(existing)
             expected_artifact = {
+                "work_specification": (run["source_artifact_ref"], run["source_artifact_sha256"]),
                 "specification": (run["source_artifact_ref"], run["source_artifact_sha256"]),
                 "product_specification": (
                     run["product_specification_artifact_ref"],

@@ -144,7 +144,7 @@ def test_workbench_detail_and_evidence_are_scope_and_digest_bound(client, valid_
 
     assert detail.status_code == 200
     assert detail.json()["artifacts"] == [
-        {"kind": "source", "sha256": supervisor_store.planning_runs[run_id].source_artifact.sha256},
+        {"kind": "work_specification", "sha256": supervisor_store.planning_runs[run_id].source_artifact.sha256},
         {
             "kind": "product_specification",
             "sha256": supervisor_store.planning_runs[run_id].product_specification_artifact.sha256,
@@ -170,26 +170,25 @@ def test_workbench_projects_permitted_product_specification_actions(client, vali
 
     assert review.status_code == 200
     review_stages = {item["stage_id"]: item for item in review.json()["stages"]}
-    assert review_stages["product_specification"]["state"] == "completed"
-    assert review_stages["specification_evaluation"]["state"] == "awaiting_operator"
+    assert review_stages["work_specification"]["state"] == "awaiting_operator"
     assert review.json()["available_actions"] == [
         {
             "action_id": "accept_product_specification",
-            "stage_id": "product_specification",
+            "stage_id": "work_specification",
             "label": "Accept",
-            "description": "Record this reviewed revision as the contract for planning.",
+            "description": "Approve this Work Specification as the contract for discovery and planning.",
             "requires_confirmation": True,
         },
         {
             "action_id": "refine_product_specification",
-            "stage_id": "product_specification",
+            "stage_id": "work_specification",
             "label": "Needs refinement",
-            "description": "Edit the specification to resolve gaps, questions, or incorrect assumptions.",
+            "description": "Revise the Work Specification to resolve gaps, questions, or incorrect assumptions.",
             "requires_confirmation": False,
         },
         {
             "action_id": "cancel_planning_run",
-            "stage_id": "product_specification",
+            "stage_id": "work_specification",
             "label": "Cancel",
             "description": "Stop this run before a plan is generated.",
             "requires_confirmation": True,
@@ -218,6 +217,24 @@ def test_workbench_projects_permitted_product_specification_actions(client, vali
     selected_stages = {item["stage_id"]: item for item in selected.json()["stages"]}
     assert selected_stages["planning"]["state"] == "queued"
     assert selected_stages["plan_approval"]["state"] == "unavailable"
+
+
+def test_workbench_exposes_one_work_specification_and_canonical_route_aliases(client, valid_plan) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+    detail = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert [stage["stage_id"] for stage in detail.json()["stages"]][:2] == ["work_specification", "planning"]
+    work_specification = next(artifact for artifact in detail.json()["artifacts"] if artifact["kind"] == "work_specification")
+    evidence = client.get(
+        f"/api/v1/workbench/runs/{run_id}/evidence/work_specification",
+        params={"artifact_sha256": work_specification["sha256"]},
+        headers=_headers(),
+    )
+    generated = client.post(f"/api/v1/planning-runs/{run_id}/generate-work-specification")
+
+    assert evidence.status_code == 200
+    assert evidence.json()["kind"] == "work_specification"
+    assert generated.status_code == 200
 
 
 def test_workbench_exposes_a_sanitized_failure_summary_for_a_failed_run(client, valid_plan, supervisor_store) -> None:
@@ -428,25 +445,24 @@ def test_workbench_feedback_is_digest_bound_idempotent_and_non_executable(client
     assert invalid_stage.status_code == 422
 
 
-def test_workbench_feedback_accepts_product_specification_review_context(client, valid_plan, supervisor_store) -> None:
+def test_workbench_feedback_accepts_work_specification_review_context(client, valid_plan, supervisor_store) -> None:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
     run_id = submitted.json()["run_id"]
-    draft = client.post(f"/api/v1/planning-runs/{run_id}/generate-product-specification").json()
     supervisor_store.planning_runs[run_id] = replace(supervisor_store.planning_runs[run_id], project_id="default")
 
     response = client.post(
         f"/api/v1/workbench/runs/{run_id}/feedback",
         json={
             "intent": "note",
-            "artifact_sha256": draft["product_specification_artifact"]["sha256"],
-            "stage_id": "product_specification",
+            "artifact_sha256": supervisor_store.planning_runs[run_id].source_artifact.sha256,
+            "stage_id": "work_specification",
             "comment": "Clarify the acceptance criteria before selection.",
         },
-        headers=_headers("product-specification-feedback"),
+        headers=_headers("work-specification-feedback"),
     )
 
     assert response.status_code == 202
-    assert response.json()["stage_id"] == "product_specification"
+    assert response.json()["stage_id"] == "work_specification"
 
 
 def test_workbench_feedback_accepts_a_512_character_oidc_subject(valid_plan) -> None:
@@ -515,7 +531,7 @@ def test_workbench_projects_authoritative_workflow_identity_and_scoped_timeline(
     assert timeline.status_code == 200
     assert timeline.json()["items"]
     stages_by_type = {item["event_type"]: item for item in timeline.json()["items"]}
-    assert stages_by_type["specification_recorded"]["stage_ids"] == ["specification"]
+    assert stages_by_type["specification_recorded"]["stage_ids"] == ["work_specification"]
     assert stages_by_type["planning_started"]["stage_ids"] == ["planning"]
     assert stages_by_type["plan_approval_requested"]["stage_ids"] == ["planning", "plan_approval"]
     assert stages_by_type["plan_approval_requested"]["stage_id"] == "plan_approval"
@@ -627,13 +643,13 @@ def test_workbench_stage_projection_is_typed_and_never_copies_terminal_run_state
 
     assert response.status_code == 200
     stages = {item["stage_id"]: item for item in response.json()["stages"]}
-    assert stages["specification"] == {
-        "stage_id": "specification",
-        "label": "Specification",
+    assert stages["work_specification"] == {
+        "stage_id": "work_specification",
+        "label": "Work specification",
         "state": "completed",
         "availability": "authoritative",
-        "reason": "An immutable submitted specification is recorded.",
-        "artifact_kind": "source",
+        "reason": "The approved Work Specification is the contract for discovery and planning.",
+        "artifact_kind": "work_specification",
     }
     assert stages["planning"]["state"] == "unavailable"
     assert stages["plan_approval"]["state"] == "unavailable"
@@ -641,23 +657,19 @@ def test_workbench_stage_projection_is_typed_and_never_copies_terminal_run_state
     assert stages["implementation_approval"]["state"] == "unavailable"
     graph = response.json()["workflow_graph"]
     assert [(node["stage_id"], node["node_type"]) for node in graph["nodes"]] == [
-            ("specification", "queue"),
-            ("product_specification", "queue"),
-            ("specification_evaluation", "queue"),
+            ("work_specification", "queue"),
             ("planning", "agent"),
         ("plan_approval", "gate"),
         ("implementation", "agent"),
         ("implementation_approval", "gate"),
     ]
     assert [(edge["source_node_id"], edge["target_node_id"]) for edge in graph["edges"]] == [
-            ("specification", "product_specification"),
-            ("product_specification", "specification_evaluation"),
-            ("specification_evaluation", "planning"),
+            ("work_specification", "planning"),
         ("planning", "plan_approval"),
         ("plan_approval", "implementation"),
         ("implementation", "implementation_approval"),
     ]
-    assert response.json()["workflow"] == ["specification", "product_specification", "specification_evaluation", "planning"]
+    assert response.json()["workflow"] == ["work_specification", "planning"]
 
 
 def test_workbench_product_specification_generation_projects_agent_progress(
@@ -669,15 +681,15 @@ def test_workbench_product_specification_generation_projects_agent_progress(
     initial = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
     initial_stages = {item["stage_id"]: item for item in initial.json()["stages"]}
 
-    assert initial_stages["product_specification"]["state"] == "awaiting_operator"
+    assert initial_stages["work_specification"]["state"] == "awaiting_operator"
     assert initial_stages["planning"]["state"] == "unavailable"
 
     assert asyncio.run(supervisor_store.claim_product_specification_generation(run_id))
     running = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
     running_stages = {item["stage_id"]: item for item in running.json()["stages"]}
 
-    assert running_stages["product_specification"]["state"] == "in_progress"
-    assert running_stages["product_specification"]["reason"] == "The planner agent is generating the product specification."
+    assert running_stages["work_specification"]["state"] == "in_progress"
+    assert running_stages["work_specification"]["reason"] == "Cogito is deriving normalized requirements from the Work Specification."
     assert running_stages["planning"]["state"] == "unavailable"
 
 
@@ -698,8 +710,7 @@ def test_workbench_stage_projection_shows_evaluation_gate_before_planning(client
 
     assert response.status_code == 200
     stages = {item["stage_id"]: item for item in response.json()["stages"]}
-    assert stages["product_specification"]["state"] == "completed"
-    assert stages["specification_evaluation"]["state"] == "needs_revision"
+    assert stages["work_specification"]["state"] == "needs_revision"
     assert stages["planning"] == {
         "stage_id": "planning",
         "label": "Planning",

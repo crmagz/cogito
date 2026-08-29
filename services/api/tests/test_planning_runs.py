@@ -311,8 +311,7 @@ def test_accept_product_specification_requires_revision_when_evaluation_records_
     assert body["selected_product_specification_artifact"] is None
     workbench = client.get(f"/api/v1/workbench/runs/{run_id}").json()
     states = {stage["stage_id"]: stage["state"] for stage in workbench["stages"]}
-    assert states["product_specification"] == "completed"
-    assert states["specification_evaluation"] == "needs_revision"
+    assert states["work_specification"] == "needs_revision"
     assert states["planning"] == "needs_revision"
     actions = {action["action_id"] for action in workbench["available_actions"]}
     assert "accept_product_specification" not in actions
@@ -448,7 +447,7 @@ def test_product_specification_generation_failure_is_recorded_in_the_workbench_t
     timeline = client.get(f"/api/v1/workbench/runs/{run_id}/timeline")
     assert timeline.status_code == 200
     failure = next(item for item in timeline.json()["items"] if item["event_type"] == "product_specification_generation_failed")
-    assert failure["stage_ids"] == ["product_specification"]
+    assert failure["stage_ids"] == ["work_specification"]
     assert failure["message"] == (
         "Product specification generation failed because the configured model provider was unavailable or rejected "
         "the request. Retry after platform configuration is restored."
