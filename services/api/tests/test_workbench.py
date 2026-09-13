@@ -216,7 +216,7 @@ def test_workbench_projects_permitted_product_specification_actions(client, vali
         }
     ]
     selected_stages = {item["stage_id"]: item for item in selected.json()["stages"]}
-    assert selected_stages["planning"]["state"] == "queued"
+    assert selected_stages["planning"]["state"] == "in_progress"
     assert selected_stages["plan_approval"]["state"] == "unavailable"
 
 
@@ -725,7 +725,7 @@ def test_workbench_timeline_projects_a_bound_agent_environment(client, valid_pla
 
     assert response.status_code == 200
     event = next(item for item in response.json()["items"] if item.get("agent_binding"))
-    assert event["stage_ids"] == ["work_specification"]
+    assert event["stage_ids"] == ["planning"]
     assert event["agent_binding"] == {
         "agent_run_id": "a" * 64,
         "registration_id": "discovery",

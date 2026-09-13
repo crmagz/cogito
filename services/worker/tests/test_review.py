@@ -119,6 +119,34 @@ async def test_review_harness_retries_one_malformed_completion_and_excludes_deve
     assert calls_by_lens == {"correctness": 2, "standards": 2, "blast_radius": 2}
 
 
+async def test_review_harness_retries_a_transient_litellm_server_error() -> None:
+    """A transient model-gateway 500 must not prevent downstream delivery."""
+
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(500, json={"error": "temporary gateway failure"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"findings":[]}'}}]})
+
+    harness = LiteLLMReviewHarness(
+        _Workspaces("diff"),  # type: ignore[arg-type]
+        "http://litellm.test",
+        "reviewer-key",
+        "reviewer-secondary-key",
+        "balanced",
+        "complex",
+        transport=httpx.MockTransport(handler),
+    )
+
+    content = await harness._completion("balanced", "reviewer-key", [{"role": "user", "content": "review"}])
+
+    assert content == '{"findings":[]}'
+    assert attempts == 2
+
+
 async def test_review_harness_repairs_an_unsafe_finding_path() -> None:
     calls_by_lens: dict[str, int] = {}
 

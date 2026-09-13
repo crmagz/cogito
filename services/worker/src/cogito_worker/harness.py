@@ -93,18 +93,53 @@ class ClaudeCodeHarness:
 
         verification = await self._verify(request)
         if not all(result.passed for result in verification):
-            return PhaseResult(
-                phase_id=request.phase.id,
-                branch_name=branch_name,
-                succeeded=False,
-                turns_used=agent.turns_used,
-                cost_usd=agent.cost_usd,
-                changed_files=changed_files,
-                commits=commits,
-                verification=verification,
-                summary="one or more approved verification commands failed",
-                outcome="failed",
-            )
+            remediation = await self._remediate_verification_failure(request, verification)
+            agent = _combine_agent_results(agent, remediation)
+            if not remediation.succeeded:
+                return PhaseResult(
+                    phase_id=request.phase.id,
+                    branch_name=branch_name,
+                    succeeded=False,
+                    turns_used=agent.turns_used,
+                    cost_usd=agent.cost_usd,
+                    changed_files=changed_files,
+                    commits=commits,
+                    verification=verification,
+                    summary=f"verification remediation failed: {remediation.summary}",
+                    outcome="ceiling_reached" if remediation.ceiling else "failed",
+                    ceiling=remediation.ceiling,
+                )
+            commits = await self._head_commits(request)
+            await self._assert_expected_repositories(request, branch_name)
+            changed_files = await self._changed_files(request, before_commits, commits)
+            dirty_repositories = await self._dirty_repositories(request)
+            if dirty_repositories:
+                return PhaseResult(
+                    phase_id=request.phase.id,
+                    branch_name=branch_name,
+                    succeeded=False,
+                    turns_used=agent.turns_used,
+                    cost_usd=agent.cost_usd,
+                    changed_files=changed_files,
+                    commits=commits,
+                    verification=verification,
+                    summary=f"verification remediation left uncommitted changes in {', '.join(dirty_repositories)}",
+                    outcome="failed",
+                )
+            verification = await self._verify(request)
+            if not all(result.passed for result in verification):
+                return PhaseResult(
+                    phase_id=request.phase.id,
+                    branch_name=branch_name,
+                    succeeded=False,
+                    turns_used=agent.turns_used,
+                    cost_usd=agent.cost_usd,
+                    changed_files=changed_files,
+                    commits=commits,
+                    verification=verification,
+                    summary="approved verification commands failed after remediation",
+                    outcome="failed",
+                )
 
         dirty_repositories = await self._dirty_repositories(request)
         if dirty_repositories:
@@ -173,9 +208,15 @@ class ClaudeCodeHarness:
                 timeout_seconds=request.timeout_seconds,
             )
             if handoff_result.exit_code != 0:
+                # A terminal response is already emitted by the pinned agent.  Persist
+                # it as a bounded JSON handoff when the agent missed the convenience
+                # file, so an otherwise successful specialist cannot be lost solely
+                # because it omitted an implementation detail of the transport.
+                handoff_result = await self._persist_terminal_handoff(request, agent.summary)
+            if handoff_result.exit_code != 0:
                 return AgentInvocationResult(
                     succeeded=False,
-                    output="agent did not write the required structured handoff file",
+                    output="agent completed but its structured handoff could not be persisted",
                     turns_used=agent.turns_used,
                     cost_usd=agent.cost_usd,
                     ceiling=agent.ceiling,
@@ -187,6 +228,34 @@ class ClaudeCodeHarness:
             turns_used=agent.turns_used,
             cost_usd=agent.cost_usd,
             ceiling=agent.ceiling,
+        )
+
+    async def _persist_terminal_handoff(
+        self, request: AgentInvocationRequest, summary: str
+    ) -> CommandResult:
+        """Persist a successful agent's terminal response as a durable fallback handoff."""
+
+        payload = json.dumps(
+            {
+                "schema_version": "cogito.agent-handoff/v1",
+                "stage_id": request.stage_id,
+                "role": request.role,
+                "source": "terminal_response_fallback",
+                "summary": summary,
+            },
+            separators=(",", ":"),
+        )
+        return await self._workspaces.execute(
+            request.workspace,
+            [
+                "sh",
+                "-ec",
+                'mkdir -p "$(dirname "$1")" && printf %s "$2" > "$1" && cat "$1"',
+                "sh",
+                request.handoff_path,
+                payload,
+            ],
+            timeout_seconds=request.timeout_seconds,
         )
     async def backup_phase(self, request: BackupExecutionRequest) -> PhaseResult:
         """Commit and push existing work without invoking a productive model command."""
@@ -340,6 +409,26 @@ class ClaudeCodeHarness:
         )
         return _parse_agent_result(result, request.max_turns)
 
+    async def _remediate_verification_failure(
+        self, request: PhaseExecutionRequest, verification: list[VerificationResult]
+    ) -> _AgentResult:
+        """Give the responsible agent one bounded chance to repair failed approved checks."""
+
+        result = await self._workspaces.execute(
+            request.workspace,
+            [
+                "sh",
+                "-ec",
+                'cd "$1" && exec claude --print --output-format json --max-turns "$2" --dangerously-skip-permissions',
+                "sh",
+                request.workspace.workspace_root,
+                str(request.max_turns),
+            ],
+            stdin=_assemble_verification_remediation_prompt(request, verification),
+            timeout_seconds=request.timeout_seconds,
+        )
+        return _parse_agent_result(result, request.max_turns)
+
     async def _configure_mcp(self, workspace: ExecutionWorkspace) -> None:
         """Configure only the Supervisor-approved MCP routes for this run's Claude process."""
 
@@ -470,6 +559,7 @@ def _assemble_prompt(request: PhaseExecutionRequest) -> str:
     repositories = "\n".join(f"- {repository}" for repository in request.workspace.repositories)
     tasks = "\n".join(f"- {task}" for task in phase.tasks)
     acceptance = "\n".join(f"- {criterion}" for criterion in phase.acceptance_criteria)
+    verification = "\n".join(f"- {command}" for command in phase.verification)
     return f"""You are the {request.agent_role.replace("_", " ")} agent executing one human-approved software-delivery phase.
 
 Phase ID: {phase.id}
@@ -482,6 +572,9 @@ Approved tasks:
 Acceptance criteria:
 {acceptance}
 
+Approved verification commands (the harness runs these exact commands after your work):
+{verification}
+
 Workspace context:
 - Repositories (already checked out on feature branch `adp/{request.workspace.run_id}`):
 {repositories}
@@ -490,8 +583,46 @@ Workspace context:
 Read all relevant specification files before editing. Work only inside the listed repositories.
 Do not create or modify credentials, deployment control-plane resources, or files outside the workspace.
 Do not push: the harness publishes a clean, verified feature branch after you finish.
-Make the implementation, run any useful focused checks, commit all intended changes on the existing feature branch,
-and leave every repository clean. In your final response, summarize the implementation and checks performed.
+Make the implementation, run the approved verification commands yourself before finalizing, commit all intended changes
+on the existing feature branch, and leave every repository clean. In your final response, summarize the implementation
+and checks performed.
+
+Completion is executable evidence, not a summary. If the approved checks include `uv sync --frozen` followed by
+`uv run pytest`, configure pytest as a uv development dependency that the sync command installs by default (for
+example, a dependency group), not only as an optional extra. If any check fails, fix the cause, rerun every approved
+check, commit the correction, and do not report completion until they all pass.
+"""
+
+
+def _assemble_verification_remediation_prompt(
+    request: PhaseExecutionRequest, verification: list[VerificationResult]
+) -> str:
+    """Build a bounded corrective prompt from failed approved verification evidence."""
+
+    failures = "\n".join(
+        f"- {result.command}\n  Output: {result.output or 'command exited unsuccessfully without captured output'}"
+        for result in verification
+        if not result.passed
+    )
+    verification_commands = "\n".join(f"- {command}" for command in request.phase.verification)
+    repositories = "\n".join(f"- {repository}" for repository in request.workspace.repositories)
+    return f"""You are the {request.agent_role.replace('_', ' ')} agent repairing a failed approved verification.
+
+The implementation is already on the existing feature branch. Do not change the approved scope, credentials,
+Kubernetes resources, or repositories outside this workspace. Diagnose and correct the concrete failure below.
+
+Failed verification evidence:
+{failures}
+
+All approved verification commands must pass before you finish:
+{verification_commands}
+
+Repositories:
+{repositories}
+
+Make the smallest corrective change, rerun every approved verification command yourself, commit the correction on
+the existing feature branch, and leave every repository clean. Do not report success based only on an explanation;
+the harness will rerun the commands after you finish.
 """
 
 
@@ -561,6 +692,24 @@ def _parse_agent_result(result: CommandResult, max_turns: int) -> _AgentResult:
         summary=summary_text,
         succeeded=succeeded,
         ceiling=ceiling,
+    )
+
+
+def _combine_agent_results(initial: _AgentResult, remediation: _AgentResult) -> _AgentResult:
+    """Combine bounded telemetry from an implementation attempt and its remediation."""
+
+    turns_used = initial.turns_used + remediation.turns_used if (
+        initial.turns_used is not None and remediation.turns_used is not None
+    ) else None
+    cost_usd = initial.cost_usd + remediation.cost_usd if (
+        initial.cost_usd is not None and remediation.cost_usd is not None
+    ) else None
+    return _AgentResult(
+        turns_used=turns_used,
+        cost_usd=cost_usd,
+        summary=remediation.summary,
+        succeeded=initial.succeeded and remediation.succeeded,
+        ceiling=remediation.ceiling,
     )
 
 

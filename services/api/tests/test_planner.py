@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from cogito_api.models import AgentGatewayResolution, AiPlan, ProductSpecification
+from cogito_api.main import _discovery_agent_prompt, _planning_agent_prompt
 from cogito_api.planner import (
     LiteLLMPlanner,
     OperatorRefinement,
@@ -54,6 +55,37 @@ def assert_trusted_plan(plan: AiPlan, expected: dict) -> None:
         for phase in plan.phases
         for assignment in phase.requirement_assignments
     )
+
+
+def test_planning_agent_prompt_requires_project_scoped_uv_verification(valid_plan: dict) -> None:
+    """The planner must produce commands the execution harness can reproduce."""
+
+    plan = AiPlan.model_validate(valid_plan)
+    prompt = _planning_agent_prompt(
+        "Create a uv-managed Python project.",
+        plan.target_repos,
+        plan.spec_set,
+        plan.constraints,
+        ["requirement-1"],
+        None,
+        None,
+    )
+
+    assert "uv run pytest" in prompt
+    assert "uv run python -c" in prompt
+    assert "Never use bare `python`" in prompt
+    assert "Never create a phase for any of those activities" in prompt
+    assert "Every returned phase must own at least one supplied requirement ID" in prompt
+
+
+def test_discovery_agent_prompt_bounds_repository_inspection() -> None:
+    """Discovery must reserve its agent budget for a useful structured handoff."""
+
+    prompt = _discovery_agent_prompt("Inspect the existing package.", ["https://github.com/acme/example.git#abc"])
+
+    assert "four-command research budget" in prompt
+    assert "Do not install dependencies" in prompt
+    assert "stop using tools and return the required JSON" in prompt
 
 
 def test_agent_plan_draft_receives_only_the_trusted_server_envelope(valid_plan: dict) -> None:
@@ -129,6 +161,7 @@ async def test_litellm_planner_requests_json_with_dedicated_bearer_key(valid_pla
     assert "product specification has already been accepted" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert "repository-relative paths" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert "Minimize the number of phases" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "pytest as a development dependency synchronized by default" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     planner_input = json.loads(captured["body"]["messages"][1]["content"])  # type: ignore[index]
     assert "target_repos" not in planner_input
     assert "constraints" not in planner_input
@@ -382,6 +415,35 @@ async def test_litellm_planner_repairs_volatile_uv_sync_output_verification(vali
 
     planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
 
+    plan = await planner.generate(
+        PlanningContext(
+            initial_specification="Scaffold a Python project with uv.",
+            target_repos=valid_plan["target_repos"],
+            spec_set=valid_plan["spec_set"],
+            constraints=AiPlan.model_validate(valid_plan).constraints,
+        ),
+        planner_gateway(),
+    )
+
+    assert_trusted_plan(plan, valid_plan)
+    assert requests == 2
+
+
+async def test_litellm_planner_repairs_natural_language_verification_descriptions(valid_plan: dict) -> None:
+    invalid = json.loads(json.dumps(valid_plan))
+    invalid["phases"][0]["verification"] = [
+        "uv sync --frozen completes without errors",
+        "uv run pytest runs successfully and reports test results",
+    ]
+    requests = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        candidate = planner_draft(invalid) if requests == 1 else planner_draft(valid_plan)
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(candidate)}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
     plan = await planner.generate(
         PlanningContext(
             initial_specification="Scaffold a Python project with uv.",

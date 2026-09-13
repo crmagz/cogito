@@ -6,6 +6,7 @@ from dataclasses import replace
 from cogito_worker.execution import CommandResult
 from cogito_worker.harness import ClaudeCodeHarness
 from cogito_worker.models import (
+    AgentInvocationRequest,
     BackupExecutionRequest,
     ExecutionWorkspace,
     McpServerConfiguration,
@@ -23,16 +24,20 @@ class ScriptedWorkspaces:
         self,
         *,
         verification_exit_code: int = 0,
+        verification_exit_codes: list[int] | None = None,
         agent_stdout: str | None = None,
         agent_exit_code: int = 0,
         agent_stderr: str = "",
         origin: str = "https://github.com/acme/example.git",
         dirty_after_verification: bool = False,
         staged_changes: bool = False,
+        handoff_content: str | None = None,
     ) -> None:
         self.calls: list[tuple[list[str], str]] = []
         self._head_calls = 0
         self._verification_exit_code = verification_exit_code
+        self._verification_exit_codes = verification_exit_codes or []
+        self._verification_calls = 0
         self._origin = origin
         self._dirty_after_verification = dirty_after_verification
         self._status_calls = 0
@@ -42,6 +47,7 @@ class ScriptedWorkspaces:
         self._agent_exit_code = agent_exit_code
         self._agent_stderr = agent_stderr
         self._staged_changes = staged_changes
+        self._handoff_content = handoff_content
 
     async def execute(
         self,
@@ -55,6 +61,12 @@ class ScriptedWorkspaces:
             return CommandResult(0, "", "")
         if command[:2] == ["sh", "-ec"] and "exec claude" in command[2]:
             return CommandResult(self._agent_exit_code, self._agent_stdout, self._agent_stderr)
+        if command[:2] == ["sh", "-ec"] and command[2] == 'test -s "$1" && cat "$1"':
+            if self._handoff_content is None:
+                return CommandResult(1, "", "missing handoff")
+            return CommandResult(0, self._handoff_content, "")
+        if command[:2] == ["sh", "-ec"] and "terminal_response_fallback" in command[-1]:
+            return CommandResult(0, command[-1], "")
         if command[-2:] == ["branch", "--show-current"]:
             return CommandResult(0, "adp/run-1\n", "")
         if command[-3:] == ["remote", "get-url", "origin"]:
@@ -74,7 +86,13 @@ class ScriptedWorkspaces:
                 return CommandResult(0, " M generated.lock\n", "")
             return CommandResult(0, "", "")
         if command[:2] == ["/bin/sh", "-lc"]:
-            return CommandResult(self._verification_exit_code, "verification output", "")
+            exit_code = (
+                self._verification_exit_codes[min(self._verification_calls, len(self._verification_exit_codes) - 1)]
+                if self._verification_exit_codes
+                else self._verification_exit_code
+            )
+            self._verification_calls += 1
+            return CommandResult(exit_code, "verification output", "")
         if "push" in command:
             return CommandResult(0, "published", "")
         raise AssertionError(f"unexpected command: {command}")
@@ -124,7 +142,56 @@ async def test_harness_records_turns_cost_changes_verification_and_published_com
     ]
     assert "Resolved immutable specifications: /workspace/specs" in prompt
     assert "adp/run-1" in prompt
+    assert "Approved verification commands" in prompt
+    assert "- npm test" in prompt
+    assert "runs these exact commands after your work" in prompt
+    assert "Completion is executable evidence" in prompt
+    assert "uv sync --frozen" in prompt
     assert workspaces.calls[-1][0][-4:] == ["push", "--set-upstream", "origin", "adp/run-1"]
+
+
+async def test_successful_agent_persists_terminal_response_when_handoff_file_is_missing() -> None:
+    """A specialist must not fail solely because it omitted its handoff file."""
+
+    workspaces = ScriptedWorkspaces()
+    request = AgentInvocationRequest(
+        stage_id="adversarial_review",
+        role="adversarial_review",
+        workspace=_request().workspace,
+        prompt="Review the repository.",
+        max_turns=7,
+        timeout_seconds=60,
+        handoff_path="/workspace/.cogito/handoffs/adversarial_review.json",
+    )
+
+    result = await ClaudeCodeHarness(workspaces).invoke_agent(request)  # type: ignore[arg-type]
+
+    assert result.succeeded is True
+    handoff = json.loads(result.output)
+    assert handoff["source"] == "terminal_response_fallback"
+    assert handoff["stage_id"] == "adversarial_review"
+    assert handoff["role"] == "adversarial_review"
+    assert handoff["summary"] == "implemented feature"
+
+
+async def test_successful_agent_uses_its_explicit_handoff_file() -> None:
+    """An agent-authored handoff remains authoritative when it is present."""
+
+    workspaces = ScriptedWorkspaces(handoff_content='{"findings":[]}')
+    request = AgentInvocationRequest(
+        stage_id="adversarial_review",
+        role="adversarial_review",
+        workspace=_request().workspace,
+        prompt="Review the repository.",
+        max_turns=7,
+        timeout_seconds=60,
+        handoff_path="/workspace/.cogito/handoffs/adversarial_review.json",
+    )
+
+    result = await ClaudeCodeHarness(workspaces).invoke_agent(request)  # type: ignore[arg-type]
+
+    assert result.succeeded is True
+    assert result.output == '{"findings":[]}'
 
 
 async def test_harness_configures_only_the_workspace_mcp_routes_before_claude_runs() -> None:
@@ -217,6 +284,21 @@ async def test_harness_does_not_publish_when_verification_fails() -> None:
     assert result.succeeded is False
     assert result.verification[0].passed is False
     assert all("push" not in command for command, _ in workspaces.calls)
+
+
+async def test_harness_remediates_a_failed_verification_before_publishing() -> None:
+    workspaces = ScriptedWorkspaces(verification_exit_codes=[1, 0])
+
+    result = await ClaudeCodeHarness(workspaces).execute_phase(_request())  # type: ignore[arg-type]
+
+    assert result.succeeded is True
+    assert result.verification[0].passed is True
+    agent_prompts = [stdin for command, stdin in workspaces.calls if command[:2] == ["sh", "-ec"] and "exec claude" in command[2]]
+    assert len(agent_prompts) == 2
+    assert "repairing a failed approved verification" in agent_prompts[1]
+    assert "verification output" in agent_prompts[1]
+    assert sum(command[:2] == ["/bin/sh", "-lc"] for command, _ in workspaces.calls) == 2
+    assert any("push" in command for command, _ in workspaces.calls)
 
 
 async def test_harness_rejects_unstructured_agent_output_without_publishing() -> None:
