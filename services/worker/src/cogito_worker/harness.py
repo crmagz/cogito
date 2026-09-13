@@ -40,7 +40,7 @@ class ClaudeCodeHarness:
 
         if not request.workspace.repositories:
             raise ValueError("single-phase execution requires at least one target repository")
-        branch_name = feature_branch_name(request.workspace.run_id)
+        branch_name = _workspace_feature_branch(request.workspace)
         await self._assert_expected_repositories(request, branch_name)
         before_commits = await self._head_commits(request)
         agent = await self._run_agent(request)
@@ -165,20 +165,35 @@ class ClaudeCodeHarness:
             timeout_seconds=request.timeout_seconds,
         )
         agent = _parse_agent_result(result, request.max_turns)
+        handoff = agent.summary
+        if agent.succeeded and request.handoff_path:
+            handoff_result = await self._workspaces.execute(
+                request.workspace,
+                ["sh", "-ec", 'test -s "$1" && cat "$1"', "sh", request.handoff_path],
+                timeout_seconds=request.timeout_seconds,
+            )
+            if handoff_result.exit_code != 0:
+                return AgentInvocationResult(
+                    succeeded=False,
+                    output="agent did not write the required structured handoff file",
+                    turns_used=agent.turns_used,
+                    cost_usd=agent.cost_usd,
+                    ceiling=agent.ceiling,
+                )
+            handoff = handoff_result.stdout.strip()
         return AgentInvocationResult(
             succeeded=agent.succeeded,
-            output=agent.summary,
+            output=handoff,
             turns_used=agent.turns_used,
             cost_usd=agent.cost_usd,
             ceiling=agent.ceiling,
         )
-
     async def backup_phase(self, request: BackupExecutionRequest) -> PhaseResult:
         """Commit and push existing work without invoking a productive model command."""
 
         if not request.workspace.repositories:
             raise ValueError("backup requires at least one target repository")
-        branch_name = feature_branch_name(request.workspace.run_id)
+        branch_name = _workspace_feature_branch(request.workspace)
         execution_request = PhaseExecutionRequest(
             phase=request.phase,
             workspace=request.workspace,
@@ -249,7 +264,7 @@ class ClaudeCodeHarness:
             raise ValueError("review revisions require one or more verified blocking findings")
         if not request.workspace.repositories:
             raise ValueError("review revision requires at least one target repository")
-        branch_name = feature_branch_name(request.workspace.run_id)
+        branch_name = _workspace_feature_branch(request.workspace)
         phase = request.phases[-1]
         execution_request = PhaseExecutionRequest(
             phase=phase,
@@ -455,7 +470,7 @@ def _assemble_prompt(request: PhaseExecutionRequest) -> str:
     repositories = "\n".join(f"- {repository}" for repository in request.workspace.repositories)
     tasks = "\n".join(f"- {task}" for task in phase.tasks)
     acceptance = "\n".join(f"- {criterion}" for criterion in phase.acceptance_criteria)
-    return f"""You are executing one human-approved software-delivery phase.
+    return f"""You are the {request.agent_role.replace("_", " ")} agent executing one human-approved software-delivery phase.
 
 Phase ID: {phase.id}
 Phase name: {phase.name}
@@ -553,6 +568,12 @@ def _command_error(result: CommandResult) -> str:
     """Return a bounded command-error summary without choosing a trusted output stream."""
 
     return _command_output(result) or f"command exited with status {result.exit_code}"
+
+
+def _workspace_feature_branch(workspace) -> str:
+    """Read the branch pinned at provisioning, with a legacy-safe fallback."""
+
+    return workspace.feature_branch or feature_branch_name(workspace.run_id)
 
 
 def _command_output(result: CommandResult) -> str:

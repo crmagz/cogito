@@ -127,6 +127,7 @@ class ExecutionWorkspace:
     mcp_grants: list[McpToolGrant] = field(default_factory=list)
     mcp_selection_explicit: bool = False
     audit_invocation_id: str = ""
+    feature_branch: str = ""
 
 
 @dataclass(frozen=True)
@@ -229,6 +230,7 @@ class PhaseExecutionRequest:
     max_turns: int
     timeout_seconds: int
     backup_reserve_turns: int = 25
+    agent_role: str = "developer"
 
     traceparent: str | None = None
     tracestate: str | None = None
@@ -260,6 +262,9 @@ class ExecutionRequest:
     run_key_secret: str = ""
     run_git_secret: str = ""
     agent_role: str = "developer"
+    # Separate agent environments in one delivery must inspect and advance
+    # the same reviewed branch, rather than creating one branch per pod.
+    feature_branch_run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -274,6 +279,10 @@ class AgentInvocationRequest:
     timeout_seconds: int
     audit_run_id: str | None = None
     registration_id: str = ""
+    handoff_path: str = ""
+    # A supervisor retry starts a fresh agent path rather than retrying this
+    # Temporal activity. Preserve that outer attempt in audit correlation.
+    audit_attempt: int = 1
 
 
 @dataclass(frozen=True)
@@ -325,6 +334,9 @@ class AgentPathEnvelope:
     max_cost_usd: float
     stages: list[AgentPathStage]
     registry_resolutions: list[RegistrationReference] = field(default_factory=list)
+    # One-based planning/delivery attempt supplied by the control plane.
+    # It must remain distinct from Temporal activity retries.
+    attempt: int = 1
 
 
 @dataclass(frozen=True)
@@ -335,6 +347,7 @@ class AgentPathResult:
     succeeded: bool
     completed_roles: list[str]
     failed_role: str | None = None
+    handoffs: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

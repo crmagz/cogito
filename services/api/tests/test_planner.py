@@ -7,7 +7,14 @@ import httpx
 import pytest
 
 from cogito_api.models import AgentGatewayResolution, AiPlan, ProductSpecification
-from cogito_api.planner import LiteLLMPlanner, OperatorRefinement, PlannerError, PlanningContext, ProductSpecificationContext
+from cogito_api.planner import (
+    LiteLLMPlanner,
+    OperatorRefinement,
+    PlannerError,
+    PlanningContext,
+    ProductSpecificationContext,
+    assemble_agent_plan_draft,
+)
 
 from .conftest import make_settings
 
@@ -45,6 +52,49 @@ def assert_trusted_plan(plan: AiPlan, expected: dict) -> None:
     assert all(
         assignment.relationship.value == "owns"
         for phase in plan.phases
+        for assignment in phase.requirement_assignments
+    )
+
+
+def test_agent_plan_draft_receives_only_the_trusted_server_envelope(valid_plan: dict) -> None:
+    """A specialist handoff cannot choose repository pins or execution limits."""
+
+    expected = AiPlan.model_validate(valid_plan)
+    result = assemble_agent_plan_draft(
+        json.dumps(planner_draft(valid_plan)),
+        PlanningContext(
+            initial_specification="Add a rate limiter.",
+            target_repos=expected.target_repos,
+            spec_set=expected.spec_set,
+            constraints=expected.constraints,
+        ),
+    )
+
+    assert_trusted_plan(result, valid_plan)
+
+
+def test_agent_plan_draft_converts_repeated_ownership_to_verification(valid_plan: dict) -> None:
+    """A final verification phase may cite earlier work without owning it again."""
+
+    candidate = planner_draft(valid_plan)
+    candidate["phases"][1]["requirement_ids"].append("acceptance-1")
+    expected = AiPlan.model_validate(valid_plan)
+
+    result = assemble_agent_plan_draft(
+        json.dumps(candidate),
+        PlanningContext(
+            initial_specification="Add a rate limiter.",
+            target_repos=expected.target_repos,
+            spec_set=expected.spec_set,
+            constraints=expected.constraints,
+        ),
+    )
+
+    phase = result.phases[1]
+    assert phase.requirement_ids == ["acceptance-2"]
+    assert "acceptance-1" in phase.verification_references
+    assert any(
+        assignment.requirement_id == "acceptance-1" and assignment.relationship.value == "verifies"
         for assignment in phase.requirement_assignments
     )
 

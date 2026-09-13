@@ -131,10 +131,12 @@ from .outbox import (
 from .notifications import NotificationOutboxDispatcher, notification_sink, stop_notification_dispatcher
 from .observability import Telemetry, TelemetrySettings
 from .planner import (
+    assemble_agent_plan_draft,
     LiteLLMPlanner,
     Planner,
     PlannerError,
     PlannerOutputError,
+    PlanDraft,
     OperatorRefinement,
     PlanningContext,
     ProductSpecificationContext,
@@ -384,7 +386,10 @@ def create_app(
     # Registry policy revisions are immutable. Adding specialist roles must
     # establish a new assignment set rather than rewriting an already-pinned
     # planner-only policy used by historical runs.
-    policy_revision = "agent_first_poc_v1_0_0"
+    # Adding specialist registrations changes the immutable assignment set.
+    # Publish a new revision rather than mutating a policy already pinned by
+    # active or historical runs.
+    policy_revision = "agent_first_poc_v1_0_1"
     assignments = {role: f"{manifest.registration_id}@{manifest.version}" for role, manifest in agents.items()}
     telemetry = Telemetry(TelemetrySettings.from_environment())
     authenticator = ApprovalAuthenticator(settings)
@@ -1026,7 +1031,7 @@ def create_app(
         try:
             await resolve_roles(
                 run_id,
-                ["discovery", "planner", "python_coding", "nodejs_coding", "developer", "adversarial_review", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
+                ["discovery", "planner", "python_coding", "nodejs_coding", "terraform_coding", "cdk_coding", "developer", "adversarial_review", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
                 settings.workbench_default_project_id,
                 plan.target_repos,
             )
@@ -1212,6 +1217,7 @@ def create_app(
     async def generate_plan(
         run_id: str,
         authorization: str | None = Header(default=None),
+        agent_attempt: int = 1,
     ) -> JSONResponse:
         """Generate and persist one normalized plan for a planning run.
 
@@ -1246,12 +1252,15 @@ def create_app(
                     detail="a matching specification evaluation is required before plan generation",
                 )
             try:
-                planner_resolution = (
-                    await resolve_roles(run_id, ["planner"], record.project_id or settings.workbench_default_project_id)
-                )[0]
+                discovery_resolution, planner_resolution = await resolve_roles(
+                    run_id,
+                    ["discovery", "planner"],
+                    record.project_id or settings.workbench_default_project_id,
+                    record.target_repos,
+                )
                 require_tool(planner_resolution, "planning_model", "plan_generation")
-                if planner_resolution.gateway is None:
-                    raise RegistryConflictError("planner gateway route is unavailable")
+                if discovery_resolution.gateway is None or planner_resolution.gateway is None:
+                    raise RegistryConflictError("discovery or planner gateway route is unavailable")
             except (RegistryAuthorizationError, RegistryConflictError) as error:
                 raise HTTPException(status_code=503, detail="planner registry grant is unavailable") from error
             try:
@@ -1281,26 +1290,97 @@ def create_app(
                         detail="the prior approved plan is temporarily unavailable for refinement",
                     ) from error
             try:
-                generated_plan = await planner.generate(
-                    PlanningContext(
-                        initial_specification=initial_specification,
-                        target_repos=record.target_repos,
-                        spec_set=record.spec_set,
-                        constraints=record.constraints,
-                        requirement_ids=tuple(selected_specification.requirement_ids),
-                        operator_refinement=(
-                            OperatorRefinement(
-                                refinement_id=refinement.refinement_id,
-                                source_gate=refinement.source_gate,
-                                comment=refinement.comment,
-                            )
-                            if refinement is not None
-                            else None
+                execute_agent_path = getattr(starter, "execute_agent_path", None)
+                if execute_agent_path is None:
+                    # Third-party starters from the rolling upgrade retain the
+                    # historic planner adapter until they support the durable
+                    # discovery-to-planner handoff protocol.
+                    generated_plan = await planner.generate(
+                        PlanningContext(
+                            initial_specification=initial_specification,
+                            target_repos=record.target_repos,
+                            spec_set=record.spec_set,
+                            constraints=record.constraints,
+                            requirement_ids=tuple(selected_specification.requirement_ids),
+                            operator_refinement=(
+                                OperatorRefinement(
+                                    refinement_id=refinement.refinement_id,
+                                    source_gate=refinement.source_gate,
+                                    comment=refinement.comment,
+                                )
+                                if refinement is not None
+                                else None
+                            ),
+                            base_plan=base_plan,
                         ),
-                        base_plan=base_plan,
-                    ),
-                    planner_resolution.gateway,
-                )
+                        planner_resolution.gateway,
+                    )
+                else:
+                    agent_result = await execute_agent_path({
+                        "run_id": record.run_id,
+                        "attempt": agent_attempt,
+                        "spec_ref": record.spec_set,
+                        "target_repos": record.target_repos,
+                        "timeout_seconds": min(record.constraints.max_wall_clock_minutes * 60, 600),
+                        "max_cost_usd": record.constraints.max_cost_usd,
+                        "stages": [
+                            {
+                                "stage_id": "discovery",
+                                "role": "discovery",
+                                "max_turns": 16,
+                                "prompt": _discovery_agent_prompt(initial_specification, record.target_repos),
+                            },
+                            {
+                                "stage_id": "planning",
+                                "role": "planner",
+                                "max_turns": 24,
+                                "prompt": _planning_agent_prompt(
+                                    initial_specification,
+                                    record.target_repos,
+                                    record.spec_set,
+                                    record.constraints,
+                                    selected_specification.requirement_ids,
+                                    refinement.comment if refinement is not None else None,
+                                    base_plan.model_dump(mode="json") if base_plan is not None else None,
+                                ),
+                            },
+                        ],
+                        "registry_resolutions": [
+                            discovery_resolution.model_dump(mode="json"),
+                            planner_resolution.model_dump(mode="json"),
+                        ],
+                    }, f"agent-planning-{record.run_id}-{record.product_specification_revision}")
+                    if agent_result.get("succeeded") is not True:
+                        raise PlannerError("discovery or planner agent did not complete")
+                    handoffs = agent_result.get("handoffs")
+                    planner_output = handoffs.get("planner") if isinstance(handoffs, dict) else None
+                    if not isinstance(planner_output, str):
+                        raise PlannerError("planner agent did not return a handoff")
+                    generated_plan = assemble_agent_plan_draft(
+                        planner_output,
+                        PlanningContext(
+                            initial_specification=initial_specification,
+                            target_repos=record.target_repos,
+                            spec_set=record.spec_set,
+                            constraints=record.constraints,
+                            requirement_ids=tuple(selected_specification.requirement_ids),
+                            operator_refinement=(
+                                OperatorRefinement(
+                                    refinement_id=refinement.refinement_id,
+                                    source_gate=refinement.source_gate,
+                                    comment=refinement.comment,
+                                )
+                                if refinement is not None
+                                else None
+                            ),
+                            base_plan=base_plan,
+                        ),
+                    )
+            except (ValueError, json.JSONDecodeError) as error:
+                raise HTTPException(
+                    status_code=422,
+                    detail="planner agent output did not satisfy the approved planning contract",
+                ) from error
             except PlannerOutputError as error:
                 failure = HTTPException(
                     status_code=422,
@@ -1369,7 +1449,7 @@ def create_app(
             telemetry.inject(carrier)
             resolutions = await resolve_roles(
                 updated.run_id,
-                ["discovery", "planner", "python_coding", "nodejs_coding", "developer", "adversarial_review", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
+                ["discovery", "planner", "python_coding", "nodejs_coding", "terraform_coding", "cdk_coding", "developer", "adversarial_review", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
                 updated.project_id or settings.workbench_default_project_id,
                 updated.target_repos,
             )
@@ -1593,7 +1673,11 @@ def create_app(
         """Deliver one leased planner handoff to a durable outcome."""
 
         try:
-            await generate_plan(delivery.run_id, internal_planner_authorization)  # type: ignore[arg-type]
+            await generate_plan(
+                delivery.run_id,
+                internal_planner_authorization,
+                agent_attempt=delivery.attempt_count,
+            )  # type: ignore[arg-type]
         except HTTPException as error:
             detail = error.detail if isinstance(error.detail, str) else "planner request could not be completed"
             if error.status_code >= 500:
@@ -1754,7 +1838,7 @@ def create_app(
             )
             resolutions = await resolve_roles(
                 record.run_id,
-                ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
+                ["planner", "python_coding", "nodejs_coding", "terraform_coding", "cdk_coding", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
                 record.project_id or settings.workbench_default_project_id,
                 record.target_repos,
             )
@@ -3815,6 +3899,55 @@ def _planning_workflow_id(run_id: str, plan_revision: int, plan_sha256: str) -> 
     """Bind every plan version to a distinct Temporal workflow execution."""
 
     return f"{run_id}:plan:{plan_revision}:{plan_sha256[:16]}"
+
+
+def _discovery_agent_prompt(specification: str, repositories: list[str]) -> str:
+    """Build the bounded, source-only discovery handoff contract."""
+
+    return (
+        "You are the Discovery agent in a governed delivery workflow. Inspect only the "
+        "source-pinned repositories and the approved WorkSpecification below. Do not modify "
+        "files, create commits, push branches, or create external delivery records. Return ONLY "
+        "a JSON object with technical_context (array of strings), risks (array of strings), "
+        "repository_findings (array of strings), and verification_notes (array of strings).\n\n"
+        f"Repositories: {json.dumps(repositories, separators=(',', ':'))}\n"
+        f"WorkSpecification: {specification}"
+    )
+
+
+def _planning_agent_prompt(
+    specification: str,
+    repositories: list[str],
+    spec_set: str,
+    constraints: PlanConstraints,
+    requirement_ids: list[str],
+    refinement: str | None,
+    base_plan: dict[str, object] | None,
+) -> str:
+    """Build the strict planner-agent contract for the durable plan artifact."""
+
+    return (
+        "You are the Planner agent in a governed delivery workflow. Use the prior Discovery "
+        "handoff as context, inspect the source-pinned repositories, and return ONLY one JSON "
+        "document conforming to this PlanDraft JSON Schema: "
+        f"{json.dumps(PlanDraft.model_json_schema(), separators=(',', ':'))}. "
+        "Do not include platform-owned target_repos, spec_set, constraints, or specification evaluation fields; "
+        "Cogito adds those trusted values after validating your draft. Every supplied requirement ID must appear "
+        "exactly once in the phase requirement_ids assignments. Each phase must have non-empty tasks, "
+        "acceptance_criteria, and verification commands. Do not modify files, create commits, push branches, "
+        "or create external delivery records. For a small repository scaffold, use exactly one cohesive phase: "
+        "that phase must create every prerequisite (configuration, package, tests, and lockfile) before running "
+        "its verification commands. Do not create a final verification or documentation phase that repeats earlier "
+        "requirement ownership. Every verification command must be runnable immediately after its own phase tasks; "
+        "it cannot depend on work deferred to another phase.\n\n"
+        f"WorkSpecification: {specification}\n"
+        f"Repositories: {json.dumps(repositories, separators=(',', ':'))}\n"
+        f"Spec set: {spec_set}\n"
+        f"Constraints: {json.dumps(constraints.model_dump(mode='json'), sort_keys=True, separators=(',', ':'))}\n"
+        f"Requirement IDs: {json.dumps(requirement_ids, separators=(',', ':'))}\n"
+        f"Operator refinement: {json.dumps(refinement) if refinement else 'none'}\n"
+        f"Existing plan to refine additively: {json.dumps(base_plan, sort_keys=True, separators=(',', ':')) if base_plan else 'none'}"
+    )
 
 
 app = create_app()

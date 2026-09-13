@@ -105,6 +105,79 @@ class PlanDraft(BaseModel):
     superseded_base_verification: list[str] = Field(default_factory=list)
 
 
+def assemble_agent_plan_draft(output: str, context: "PlanningContext") -> AiPlan:
+    """Validate an agent-owned plan draft and attach the trusted plan envelope.
+
+    Specialist agents own only delivery decomposition. Repository pins, limits,
+    and requirement ownership remain server-authored so an agent cannot make a
+    valid-looking handoff by echoing or altering workflow authority.
+    """
+
+    try:
+        draft = PlanDraft.model_validate_json(_strip_json_fence(output))
+    except ValidationError as error:
+        if any(
+            "plan phase requirement IDs must be unique" in str(detail.get("msg", ""))
+            for detail in error.errors()
+        ):
+            raise RequirementPartitionError("plan phase requirement IDs must be unique") from error
+        raise PlannerOutputError(
+            "planner agent returned invalid plan draft JSON", code=PlanningFailureCode.INVALID_JSON
+        ) from error
+    except (TypeError, ValueError) as error:
+        raise PlannerOutputError(
+            "planner agent returned invalid plan draft JSON", code=PlanningFailureCode.INVALID_JSON
+        ) from error
+    draft = _normalize_agent_requirement_ownership(draft)
+    _validate_explicit_base_removals(draft, context)
+    return _assemble_trusted_plan(_merge_base_plan_content(draft, context.base_plan), context)
+
+
+def _normalize_agent_requirement_ownership(draft: PlanDraft) -> PlanDraft:
+    """Preserve repeated agent references without granting duplicate ownership.
+
+    A specialist commonly repeats an implemented requirement in a final
+    verification phase.  ``requirement_ids`` means ownership, however, while
+    a repeated check is a verification relationship.  The platform owns that
+    distinction, so canonicalize only subsequent occurrences to ``verifies``;
+    do not drop the work, task, acceptance criterion, or verification command.
+    """
+
+    owned: set[str] = set()
+    phases: list[PlanPhase] = []
+    for phase in draft.phases:
+        owner_ids: list[str] = []
+        verification_references = list(phase.verification_references)
+        assignments = list(phase.requirement_assignments)
+        assigned_pairs = {(item.requirement_id, item.relationship) for item in assignments}
+        for requirement_id in phase.requirement_ids:
+            if requirement_id not in owned:
+                owned.add(requirement_id)
+                owner_ids.append(requirement_id)
+                continue
+            if requirement_id not in verification_references:
+                verification_references.append(requirement_id)
+            pair = (requirement_id, WorkflowRequirementRelationship.VERIFIES)
+            if pair not in assigned_pairs:
+                assignments.append(
+                    RequirementAssignment(
+                        requirement_id=requirement_id,
+                        relationship=WorkflowRequirementRelationship.VERIFIES,
+                    )
+                )
+                assigned_pairs.add(pair)
+        phases.append(
+            phase.model_copy(
+                update={
+                    "requirement_ids": owner_ids,
+                    "verification_references": verification_references,
+                    "requirement_assignments": assignments,
+                }
+            )
+        )
+    return draft.model_copy(update={"phases": phases})
+
+
 @dataclass(frozen=True)
 class PlanningContext:
     """Trusted envelope paired with the untrusted initial work specification."""

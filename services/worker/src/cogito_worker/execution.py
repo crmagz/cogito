@@ -154,7 +154,12 @@ def build_execution_job(
                                     "name": "COGITO_EXECUTION_WORKSPACE_ROOT",
                                     "value": settings.workspace_root,
                                 },
-                                {"name": "COGITO_FEATURE_BRANCH", "value": feature_branch_name(request.run_id)},
+                                {
+                                    "name": "COGITO_FEATURE_BRANCH",
+                                    "value": feature_branch_name(
+                                        request.feature_branch_run_id or request.run_id
+                                    ),
+                                },
                                 {"name": "COGITO_GIT_AUTHOR_NAME", "value": settings.git_author_name},
                                 {"name": "COGITO_GIT_AUTHOR_EMAIL", "value": settings.git_author_email},
                                 {"name": "MINIO_ENDPOINT", "value": settings.minio_endpoint},
@@ -614,6 +619,7 @@ class ExecutionWorkspaceService:
             run_id=request.run_id,
             job_name=job_name,
             workspace_root=self._settings.workspace_root,
+            feature_branch=feature_branch_name(request.feature_branch_run_id or request.run_id),
             repositories=[
                 f"{self._settings.workspace_root}/repos/"
                 f"{repository_directory_name(repository, self._settings.allowed_git_hosts)}"

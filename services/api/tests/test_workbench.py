@@ -1313,7 +1313,7 @@ def test_workbench_agent_inventory_is_scoped_bounded_and_etagged(client, valid_p
 def test_workbench_agent_inventory_uses_only_the_runtime_gateway_policy(valid_plan) -> None:
     client, _, supervisor_store, _ = _mcp_workbench(valid_plan)
     assert client.post("/api/v1/runs", json={"plan": valid_plan}).status_code == 202
-    current = supervisor_store.registry_agent_gateway_policies["agent_gateway_agent_first_poc_v1_0_1"]
+    current = supervisor_store.registry_agent_gateway_policies["agent_gateway_agent_first_poc_v1_0_2"]
     historical = current.model_copy(update={"policy_revision": "agent_gateway_historical_v1"})
     supervisor_store.registry_agent_gateway_policies[historical.policy_revision] = historical
 
@@ -1321,7 +1321,7 @@ def test_workbench_agent_inventory_uses_only_the_runtime_gateway_policy(valid_pl
 
     assert inventory.status_code == 200
     assert {route["policy_revision"] for item in inventory.json()["items"] for route in item["gateway_routes"]} == {
-        "agent_gateway_agent_first_poc_v1_0_1"
+        "agent_gateway_agent_first_poc_v1_0_2"
     }
 
 
@@ -1343,7 +1343,7 @@ def test_workbench_agent_detail_returns_only_safe_project_authorized_release_fac
     assert detail.json()["registration_id"] == "developer"
     assert detail.json()["gateway_routes"] == [
         {
-            "policy_revision": "agent_gateway_agent_first_poc_v1_0_1",
+            "policy_revision": "agent_gateway_agent_first_poc_v1_0_2",
             "role": "developer",
             "model_alias": "complex",
             "max_budget_usd": 25.0,
@@ -1404,7 +1404,7 @@ def test_workbench_agent_invocation_history_and_detail_project_safe_pins_without
             "created_at": supervisor_store.agent_runs[run_id].created_at,
             "updated_at": supervisor_store.agent_runs[run_id].updated_at,
             "gateway_route": {
-                "policy_revision": "agent_gateway_agent_first_poc_v1_0_1",
+                "policy_revision": "agent_gateway_agent_first_poc_v1_0_2",
                 "role": "developer",
                 "model_alias": "complex",
                 "max_budget_usd": 25.0,
