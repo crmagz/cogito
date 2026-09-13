@@ -6,6 +6,7 @@ from temporalio.testing import ActivityEnvironment
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.execution import ExecutionJobSettings, ExecutionWorkspaceService
 from cogito_worker.models import (
+    AgentInvocationRequest,
     ExecutionRequest,
     ExecutionWorkspace,
     McpToolGrant,
@@ -59,6 +60,48 @@ async def test_load_resolved_workflow_returns_immutable_artifact_from_store(
     result = await env.run(activities.load_resolved_workflow, workflow_ref)
 
     assert result == resolution
+
+
+async def test_agent_invocation_records_one_role_bound_log_stream(
+    env: ActivityEnvironment, store: InMemoryRunStore
+) -> None:
+    class Reporter:
+        def __init__(self) -> None:
+            self.started: list[tuple[object, ...]] = []
+            self.completed: list[tuple[object, ...]] = []
+
+        async def report(self, *args: object) -> None:
+            del args
+
+        async def record_stage_invocation(self, *args: object) -> None:
+            self.started.append(args)
+
+        async def record_stage_invocation_result(self, *args: object) -> None:
+            self.completed.append(args)
+
+    harness = InMemoryHarness()
+    reporter = Reporter()
+    activities = WorkerActivities(store, InMemoryExecutionWorkspaces(), harness, run_state=reporter)
+    workspace = ExecutionWorkspace(run_id="run-1", job_name="agent-job", workspace_root="/workspace")
+
+    result = await env.run(
+        activities.invoke_agent,
+        AgentInvocationRequest(
+            stage_id="discovery",
+            role="discovery",
+            workspace=workspace,
+            prompt="Inspect the pinned repository and return discovery evidence.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+    )
+
+    assert result.succeeded is True
+    assert harness.agent_invocation_request.workspace.audit_invocation_id == stage_invocation_id(
+        "run-1", "discovery", "discovery", 1
+    )
+    assert reporter.started[0][:4] == ("run-1", "discovery", "discovery", 1)
+    assert reporter.completed[0][4] == "succeeded"
 
 
 async def test_report_status_creates_status_when_none_exists(

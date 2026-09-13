@@ -10,6 +10,9 @@ import pytest
 import cogito_worker.workflows as workflows
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.models import (
+    AgentGatewayResolution,
+    AgentPathEnvelope,
+    AgentPathStage,
     ExecutionWorkspace,
     McpToolGrant,
     PhaseResult,
@@ -22,6 +25,7 @@ from cogito_worker.models import (
     VerificationResult,
 )
 from cogito_worker.workflows import (
+    AgentPathWorkflow,
     DeveloperRunWorkflow,
     _implementation_evidence,
     _execution_plan,
@@ -241,6 +245,81 @@ async def test_workflow_runs_activities_and_reports_completion(
     assert [workspace.run_id for workspace in workspaces.cleaned] == ["run-1"]
     assert harness.requests[0].max_turns == 25
     assert store.statuses["run-1"]["phase_results"][0]["turns_used"] == 3
+
+
+async def test_agent_path_runs_each_specialist_in_an_isolated_workspace(
+    env: WorkflowEnvironment,
+) -> None:
+    workspaces = InMemoryExecutionWorkspaces()
+    harness = InMemoryHarness()
+    activities = WorkerActivities(InMemoryRunStore(), workspaces, harness)
+    task_queue = f"test-agent-path-{uuid.uuid4()}"
+    roles = [
+        "discovery",
+        "planner",
+        "python_coding",
+        "nodejs_coding",
+        "adversarial_review",
+        "pull_request_publisher",
+    ]
+    resolutions = [
+        RegistrationReference(
+            role=role,
+            registration_id=role,
+            version="0.1.0",
+            manifest_sha256="a" * 64,
+            component_id=role,
+            component_version="0.1.0",
+            gateway=AgentGatewayResolution(
+                policy_revision="agent_first_test",
+                project_id="default",
+                role=role,
+                registration_id=role,
+                registration_version="0.1.0",
+                manifest_sha256="a" * 64,
+                model_alias="balanced",
+                max_budget_usd=5.0,
+                toolset="test",
+            ),
+        )
+        for role in roles
+    ]
+    stages = [
+        AgentPathStage(stage_id=f"agent_{role}", role=role, prompt=f"Run {role}", max_turns=1)
+        for role in roles
+    ]
+
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[AgentPathWorkflow],
+        activities=[
+            activities.provision_execution_workspace,
+            activities.cleanup_execution_workspace,
+            activities.invoke_agent,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            AgentPathWorkflow.run,
+            AgentPathEnvelope(
+                run_id="run-agent-path",
+                spec_ref="kind-e2e@v1#sha256=" + "a" * 64,
+                target_repos=[],
+                timeout_seconds=60,
+                max_cost_usd=5.0,
+                stages=stages,
+                registry_resolutions=resolutions,
+            ),
+            id=f"test-agent-path-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+    assert result.succeeded is True
+    assert result.completed_roles == roles
+    assert [request.agent_role for request in workspaces.requests] == roles
+    assert all("_" not in request.run_id and len(request.run_id) <= 63 for request in workspaces.requests)
+    assert len({workspace.job_name for workspace in workspaces.cleaned}) == len(roles)
+    assert [request.audit_run_id for request in harness.agent_invocation_requests] == ["run-agent-path"] * len(roles)
 
 
 async def test_resolved_run_rejects_missing_developer_before_workspace_provisioning(
@@ -1135,7 +1214,7 @@ async def test_duplicate_plan_approval_is_an_idempotent_acknowledgement() -> Non
     assert workflow_instance._plan_decision == decision
 
 
-async def test_workflow_waits_for_implementation_approval_then_opens_one_pr(env: WorkflowEnvironment) -> None:
+async def test_workflow_opens_one_pr_before_implementation_approval(env: WorkflowEnvironment) -> None:
     store = InMemoryRunStore()
     plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, ["https://github.com/acme/example.git#" + "1" * 40])
     store.plans["s3://plans/plans/run-implementation/plan.json"] = plan
@@ -1178,6 +1257,7 @@ async def test_workflow_waits_for_implementation_approval_then_opens_one_pr(env:
         )
         await _wait_for_status(store, "run-implementation", "awaiting_implementation_approval")
         assert len(workspaces.cleaned) == 1
+        assert len(publisher.requests) == 1
         digest = store.statuses["run-implementation"]["implementation_artifact"]["sha256"]
         accepted = await handle.execute_update(
             "submit_implementation_approval",

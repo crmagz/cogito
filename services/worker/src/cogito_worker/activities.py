@@ -10,6 +10,8 @@ from .execution import ExecutionWorkspaceService
 from .github import PullRequestPublisher, PullRequestResult
 from .harness import ClaudeCodeHarness
 from .models import (
+    AgentInvocationRequest,
+    AgentInvocationResult,
     BackupExecutionRequest,
     ExecutionRequest,
     ExecutionWorkspace,
@@ -277,6 +279,47 @@ class WorkerActivities:
                 await self._record_stage_invocation_result(request, "failed")
                 raise
         await self._record_stage_invocation_result(request, "succeeded" if result.succeeded else "failed")
+        return result
+
+    @activity.defn
+    async def invoke_agent(self, request: AgentInvocationRequest) -> AgentInvocationResult:
+        """Run an isolated agent and emit one independently queryable audit stream."""
+
+        invocation_id = stage_invocation_id(
+            request.workspace.run_id, request.stage_id, request.role, activity.info().attempt
+        )
+        audited_workspace = replace(request.workspace, audit_invocation_id=invocation_id)
+        audited_request = replace(request, workspace=audited_workspace)
+        try:
+            audit_run_id = audited_request.audit_run_id or audited_workspace.run_id
+            await self._run_state.record_stage_invocation(
+                audit_run_id,
+                audited_request.stage_id,
+                audited_request.role,
+                activity.info().attempt,
+                False,
+                audited_request.registration_id,
+                audited_workspace.job_name,
+            )
+        except Exception:
+            activity.logger.warning(
+                "agent invocation audit evidence unavailable",
+                extra={"run_id": audited_workspace.run_id, "stage_id": audited_request.stage_id, "role": audited_request.role},
+            )
+        result = await self._harness.invoke_agent(audited_request)
+        try:
+            await self._run_state.record_stage_invocation_result(
+                audited_request.audit_run_id or audited_workspace.run_id,
+                audited_request.stage_id,
+                audited_request.role,
+                activity.info().attempt,
+                "succeeded" if result.succeeded else "failed",
+            )
+        except Exception:
+            activity.logger.warning(
+                "agent invocation completion audit evidence unavailable",
+                extra={"run_id": audited_workspace.run_id, "stage_id": audited_request.stage_id, "role": audited_request.role},
+            )
         return result
 
     async def _record_stage_invocation_result(self, request: PhaseExecutionRequest, status: str) -> None:

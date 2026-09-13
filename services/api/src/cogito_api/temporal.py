@@ -13,6 +13,8 @@ from .models import RunEnvelope
 class RunStarter(Protocol):
     async def start_run(self, envelope: RunEnvelope) -> None: ...
 
+    async def start_agent_path(self, envelope: dict[str, Any]) -> None: ...
+
     async def submit_plan_approval(self, workflow_id: str, decision: dict[str, Any]) -> bool: ...
 
     async def submit_implementation_approval(self, workflow_id: str, decision: dict[str, str]) -> bool: ...
@@ -46,6 +48,23 @@ class TemporalRunStarter:
         except WorkflowAlreadyStartedError:
             # A caller can lose its response after Temporal accepted a start.
             # The immutable workflow ID makes that retry safe and idempotent.
+            return
+
+    async def start_agent_path(self, envelope: dict[str, Any]) -> None:
+        """Start one idempotent, bounded agent-first validation path."""
+
+        client = await self._get_client()
+        run_id = envelope.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("agent path requires a run ID")
+        try:
+            await client.start_workflow(
+                "AgentPathWorkflow",
+                args=[envelope],
+                id=f"agent-path-poc-{run_id}",
+                task_queue=self._task_queue,
+            )
+        except WorkflowAlreadyStartedError:
             return
 
     async def submit_plan_approval(self, workflow_id: str, decision: dict[str, Any]) -> bool:

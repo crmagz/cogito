@@ -259,6 +259,82 @@ class ExecutionRequest:
     mcp_selection_explicit: bool = False
     run_key_secret: str = ""
     run_git_secret: str = ""
+    agent_role: str = "developer"
+
+
+@dataclass(frozen=True)
+class AgentInvocationRequest:
+    """One bounded, role-pinned prompt executed in an isolated workspace."""
+
+    stage_id: str
+    role: str
+    workspace: ExecutionWorkspace
+    prompt: str
+    max_turns: int
+    timeout_seconds: int
+    audit_run_id: str | None = None
+    registration_id: str = ""
+
+
+@dataclass(frozen=True)
+class AgentInvocationResult:
+    """Safe result returned by an isolated agent invocation."""
+
+    succeeded: bool
+    output: str
+    turns_used: int | None
+    cost_usd: float | None
+    ceiling: str | None = None
+
+
+@dataclass
+class AgentInvocationEnvelope:
+    """Worker-owned handoff contract for one isolated agent environment."""
+
+    run_id: str
+    stage_id: str
+    role: str
+    prompt: str
+    spec_ref: str
+    target_repos: list[str] = field(default_factory=list)
+    max_turns: int = 25
+    timeout_seconds: int = 300
+    max_cost_usd: float = 5.0
+    registration: RegistrationReference | None = None
+    gateway: AgentGatewayResolution | None = None
+
+
+@dataclass(frozen=True)
+class AgentPathStage:
+    """One policy-pinned specialist handoff in an agent-first workflow."""
+
+    stage_id: str
+    role: str
+    prompt: str
+    max_turns: int
+
+
+@dataclass
+class AgentPathEnvelope:
+    """A bounded, sequential set of independently auditable agent environments."""
+
+    run_id: str
+    spec_ref: str
+    target_repos: list[str]
+    timeout_seconds: int
+    max_cost_usd: float
+    stages: list[AgentPathStage]
+    registry_resolutions: list[RegistrationReference] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AgentPathResult:
+    """Terminal result of a bounded agent-first handoff path."""
+
+    run_id: str
+    succeeded: bool
+    completed_roles: list[str]
+    failed_role: str | None = None
 
 
 @dataclass(frozen=True)

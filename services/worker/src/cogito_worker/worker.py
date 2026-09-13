@@ -18,7 +18,7 @@ from .observability import WorkerTelemetry
 from .review import LiteLLMReviewHarness
 from .run_state import PostgresRunStateReporter
 from .storage import MinioRunStore
-from .workflows import DeveloperRunWorkflow
+from .workflows import AgentInvocationWorkflow, AgentPathWorkflow, DeveloperRunWorkflow
 
 _READINESS_FILE = Path("/tmp/cogito-worker-ready")
 
@@ -137,7 +137,7 @@ async def main() -> None:
     worker = Worker(
         client,
         task_queue=settings.task_queue,
-        workflows=[DeveloperRunWorkflow],
+        workflows=[DeveloperRunWorkflow, AgentInvocationWorkflow, AgentPathWorkflow],
         activities=[
             activities.load_plan,
             activities.load_resolved_workflow,
@@ -147,6 +147,7 @@ async def main() -> None:
             activities.open_pull_request,
             activities.provision_execution_workspace,
             activities.cleanup_execution_workspace,
+            activities.invoke_agent,
             activities.run_phase,
             activities.backup_phase,
             activities.review,

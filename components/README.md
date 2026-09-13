@@ -16,9 +16,10 @@ that selects an agent release, LiteLLM model alias, budget ceiling, and
 toolset label for each project and active LLM role. It is an allow-list: a
 catalog release cannot execute merely because it is registered, and a policy
 route cannot grant a tool that the selected agent release does not declare.
-This first substrate routes the planner and developer paths; separate reviewer,
-validator, environment-test, and publishing adapters must be added before a
-route is declared for those roles.
+The agent-first POC pins Discovery, Planner, Python, Node.js, adversarial
+review, and delivery releases for every admitted run. The first releases share
+the platform's general execution substrate; their prompts and domain playbooks
+can evolve independently as versioned component releases.
 
 ## Lifecycles
 
@@ -48,8 +49,12 @@ independent approval, credential, audit, or policy authority.
 | Area | Agent | Brokered tools |
 |---|---|---|
 | Planning / SDD | `planner` | `planning_model` |
+| Repository discovery | `discovery` | `execution_workspace`, `planning_model` |
 | Software delivery | `developer` | `execution_workspace`, `developer_harness` |
+| Python delivery | `python_coding` | `execution_workspace`, `developer_harness` |
+| Node.js delivery | `nodejs_coding` | `execution_workspace`, `developer_harness` |
 | Adversarial review | `reviewer` | `execution_workspace`, `review_model` |
+| Adversarial review POC | `adversarial_review` | `execution_workspace`, `review_model` |
 | Validation management | `validator` | `validation_runner` |
 | Ephemeral environments | `ephemeral_environment_tester` | `ephemeral_environment` |
 | Git / release management | `pull_request_publisher` | `github_publisher` |

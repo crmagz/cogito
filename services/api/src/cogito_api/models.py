@@ -1767,6 +1767,18 @@ class WorkbenchWorkflowNode(WorkbenchStageSummary):
     """A typed, server-owned relay graph node without presentation coordinates."""
 
     node_type: WorkbenchWorkflowNodeType = Field(description="Semantic role used to render the relay node")
+    parent_node_id: str | None = Field(
+        default=None,
+        description="Optional lifecycle node that groups an isolated agent environment",
+    )
+    agent_role: str | None = Field(
+        default=None,
+        description="Pinned specialist role when this node represents an agent environment",
+    )
+    metric: str | None = Field(
+        default=None,
+        description="Authoritative short execution metric for this node",
+    )
 
 
 class WorkbenchWorkflowEdge(BaseModel):
@@ -1892,6 +1904,32 @@ class WorkbenchExternalLink(BaseModel):
     url: str
 
 
+class WorkbenchDeliveredPullRequest(BaseModel):
+    """Immutable delivery evidence exposed before implementation approval."""
+
+    repository: str = Field(description="Validated owner/repository destination")
+    number: int = Field(ge=1, description="GitHub pull-request number")
+    title: str = Field(min_length=1, max_length=512, description="Safe delivery title")
+    url: str = Field(description="Server-derived pull-request URL")
+    checks: Literal["passed", "failing", "running", "unavailable"] = Field(
+        description="Only provider-projected check state; unavailable is intentionally unsynthesized"
+    )
+    failing_check_count: int | None = Field(default=None, ge=1)
+    opened_at: str = Field(description="Authoritative delivery-record timestamp")
+    merged_at: str | None = Field(default=None, description="Provider-projected merge timestamp when known")
+    agent_role: str | None = Field(default=None, description="Agent responsible for delivery")
+
+
+class TimelineAgentBinding(BaseModel):
+    """The isolated agent environment responsible for one audit event."""
+
+    agent_run_id: str = Field(description="Invocation identity used to resolve this environment's logs")
+    registration_id: str = Field(description="Pinned registered agent release")
+    role: str = Field(description="Policy-selected specialist role")
+    environment_id: str = Field(description="Isolated Job or sandbox identity")
+    attempt: int = Field(ge=1, description="One-based attempt number for this environment")
+
+
 class WorkbenchTimelineEvent(BaseModel):
     """Bounded, scope-filtered lifecycle event safe for Workbench rendering."""
 
@@ -1933,6 +1971,14 @@ class WorkbenchTimelineEvent(BaseModel):
     )
     delivered: bool = Field(description="Whether the configured delivery sink acknowledged the event")
     delivery_attempt_count: int = Field(ge=0, description="Bounded reconciliation attempt count")
+    agent_binding: TimelineAgentBinding | None = Field(
+        default=None,
+        description="Per-environment invocation identity when this is agent work",
+    )
+    parent_event_id: str | None = Field(
+        default=None,
+        description="Optional phase-level event parent; omitted for legacy flat audit streams",
+    )
 
 
 class WorkbenchTimelineResponse(BaseModel):
@@ -1991,6 +2037,10 @@ class WorkbenchRunResponse(BaseModel):
         description="Bounded sanitized reason for a terminal workflow failure when available",
     )
     external_links: list[WorkbenchExternalLink] = Field(default_factory=list)
+    delivered_pull_requests: list[WorkbenchDeliveredPullRequest] | None = Field(
+        default=None,
+        description="Optional pull-request delivery evidence; omitted until the API records it",
+    )
 
 
 class WorkbenchProjectResponse(BaseModel):

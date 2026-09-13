@@ -414,7 +414,7 @@ async def test_execution_workspace_rejects_a_gateway_not_matching_the_pinned_reg
         toolset="development-restricted",
     )
 
-    with pytest.raises(ValueError, match="pinned developer gateway route"):
+    with pytest.raises(ValueError, match="pinned agent gateway route"):
         await service.provision(
             ExecutionRequest(
                 run_id="run-1",
@@ -436,7 +436,7 @@ async def test_execution_workspace_rejects_a_gateway_not_matching_the_pinned_reg
 async def test_execution_workspace_rejects_a_resolved_developer_without_a_gateway() -> None:
     service = ExecutionWorkspaceService(execution_settings(), InMemoryExecutionJobClient())
 
-    with pytest.raises(ValueError, match="pinned developer gateway route"):
+    with pytest.raises(ValueError, match="pinned agent gateway route"):
         await service.provision(
             ExecutionRequest(
                 run_id="run-1",

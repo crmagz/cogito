@@ -32,7 +32,7 @@ async def test_loki_reader_uses_fixed_invocation_query_and_redacts_again() -> No
 
     assert len(requests) == 1
     assert requests[0].url.path == "/loki/api/v1/query_range"
-    assert requests[0].url.params["query"] == '{namespace=~"cogito|cogito-executions"} |= "' + invocation_id + ' "'
+    assert requests[0].url.params["query"] == '{namespace=~"cogito|cogito-executions"} |~ "^' + invocation_id + ' "'
     assert page.availability == "available"
     assert page.lines[0].message.endswith("token=[REDACTED]")
 

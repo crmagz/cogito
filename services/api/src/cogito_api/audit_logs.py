@@ -90,7 +90,11 @@ class LokiAuditLogReader:
             start, end = _invocation_window(cursor, occurred_at)
             start_nanoseconds = str(int(start.timestamp() * 1_000_000_000))
             direction = "BACKWARD"
-        query = '{namespace=~"cogito|cogito-executions"} |= "' + invocation_id + ' "'
+        # Invocation output is deliberately written at the beginning of each
+        # execution-pod log line.  Match that invariant rather than a mere
+        # substring: an API access log can otherwise contain the identifier
+        # in a requested URL and be presented as agent output.
+        query = '{namespace=~"cogito|cogito-executions"} |~ "^' + invocation_id + ' "'
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds, transport=self._transport) as client:
                 response = await client.get(
