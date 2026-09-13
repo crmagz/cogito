@@ -1,5 +1,5 @@
 {
-  "policy_revision": "agent_gateway_planner_v1_2_0",
+  "policy_revision": "agent_gateway_agent_first_poc_v1_0_1",
   "bindings": [
     {
       "role": "planner",
@@ -18,6 +18,51 @@
       "model_alias": "complex",
       "max_budget_usd": 25,
       "toolset": "development-restricted"
+    },
+    {
+      "role": "discovery",
+      "registration_id": "discovery",
+      "registration_version": "0.1.0",
+      "project_ids": ["default"],
+      "model_alias": "balanced",
+      "max_budget_usd": 5,
+      "toolset": "discovery-readonly"
+    },
+    {
+      "role": "python_coding",
+      "registration_id": "python_coding",
+      "registration_version": "0.1.0",
+      "project_ids": ["default"],
+      "model_alias": "complex",
+      "max_budget_usd": 25,
+      "toolset": "python-development"
+    },
+    {
+      "role": "nodejs_coding",
+      "registration_id": "nodejs_coding",
+      "registration_version": "0.1.0",
+      "project_ids": ["default"],
+      "model_alias": "complex",
+      "max_budget_usd": 25,
+      "toolset": "nodejs-development"
+    },
+    {
+      "role": "adversarial_review",
+      "registration_id": "adversarial_review",
+      "registration_version": "0.1.0",
+      "project_ids": ["default"],
+      "model_alias": "balanced",
+      "max_budget_usd": 10,
+      "toolset": "adversarial-readonly"
+    },
+    {
+      "role": "pull_request_publisher",
+      "registration_id": "pull_request_publisher",
+      "registration_version": "1.0.0",
+      "project_ids": ["default"],
+      "model_alias": "discovery",
+      "max_budget_usd": 1,
+      "toolset": "delivery-restricted"
     }
   ]
 }

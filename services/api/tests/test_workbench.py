@@ -677,6 +677,64 @@ def test_workbench_timeline_classifies_lifecycle_agent_and_mcp_activity(client, 
     assert events_by_type["mcp_invocation_observed"]["log_evidence_available"] is False
 
 
+def test_agent_path_poc_starts_all_pinned_specialists_from_a_source_run(
+    client: TestClient, valid_plan: dict, starter: FakeRunStarter
+) -> None:
+    run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
+
+    response = client.post(f"/api/v1/workbench/runs/{run_id}/agent-path-poc", headers=_headers())
+
+    assert response.status_code == 202
+    assert response.json()["workflow_id"] == f"agent-path-poc-{run_id}"
+    assert response.json()["read_only"] is True
+    assert len(starter.started_agent_paths) == 1
+    envelope = starter.started_agent_paths[0]
+    assert [stage["role"] for stage in envelope["stages"]] == [
+        "discovery",
+        "planner",
+        "python_coding",
+        "nodejs_coding",
+        "adversarial_review",
+        "pull_request_publisher",
+    ]
+    assert all(item["gateway"] is not None for item in envelope["registry_resolutions"])
+
+
+def test_workbench_timeline_projects_a_bound_agent_environment(client, valid_plan, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store._append_coordination_event(
+        run_id,
+        "stage_invocation_started",
+        invocation={
+            "invocation_id": "a" * 64,
+            "source": "worker_phase",
+            "stage_id": "discovery",
+            "role": "discovery",
+            "attempt": 1,
+        },
+        agent_binding={
+            "agent_run_id": "a" * 64,
+            "registration_id": "discovery",
+            "role": "discovery",
+            "environment_id": "cogito-execution-discovery",
+            "attempt": 1,
+        },
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}/timeline", headers=_headers())
+
+    assert response.status_code == 200
+    event = next(item for item in response.json()["items"] if item.get("agent_binding"))
+    assert event["stage_ids"] == ["work_specification"]
+    assert event["agent_binding"] == {
+        "agent_run_id": "a" * 64,
+        "registration_id": "discovery",
+        "role": "discovery",
+        "environment_id": "cogito-execution-discovery",
+        "attempt": 1,
+    }
+
+
 def test_workbench_timeline_pairs_a_finished_invocation_with_its_started_audit_row(
     client, valid_plan, supervisor_store
 ) -> None:
@@ -781,6 +839,65 @@ def test_workbench_stage_projection_is_typed_and_never_copies_terminal_run_state
         ("implementation", "implementation_approval"),
     ]
     assert response.json()["workflow"] == ["work_specification", "planning"]
+
+
+def test_workbench_projects_recorded_delivery_before_implementation_approval(client, valid_plan, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    supervisor_store._append_coordination_event(run_id, "run_status_changed")
+    event_id, event = next(reversed(supervisor_store.coordination_events.items()))
+    supervisor_store.coordination_events[event_id] = replace(
+        event,
+        payload=event.payload | {
+            "pull_request": {"number": 42, "url": "https://github.com/acme/example/pull/42"}
+        },
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.json()["delivered_pull_requests"] == [
+        {
+            "repository": "acme/example",
+            "number": 42,
+            "title": "Cogito implementation",
+            "url": "https://github.com/acme/example/pull/42",
+            "checks": "unavailable",
+            "failing_check_count": None,
+            "opened_at": event.occurred_at,
+            "merged_at": None,
+            "agent_role": "pull_request_publisher",
+        }
+    ]
+
+
+def test_workbench_graph_groups_discovery_and_implementation_environments(client, valid_plan, supervisor_store) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    for role, stage_id in (("discovery", "discovery"), ("planner", "planning"), ("python_coding", "implementation")):
+        invocation_id = f"{role}-run"
+        supervisor_store._append_coordination_event(
+            run_id,
+            "stage_invocation_started",
+            invocation={"invocation_id": invocation_id, "stage_id": stage_id, "role": role, "attempt": 1},
+            agent_binding={
+                "agent_run_id": invocation_id,
+                "registration_id": role,
+                "role": role,
+                "environment_id": f"cogito-execution-{role}",
+                "attempt": 1,
+            },
+        )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert response.status_code == 200
+    environments = [
+        node for node in response.json()["workflow_graph"]["nodes"] if node["parent_node_id"] is not None
+    ]
+    assert [(node["agent_role"], node["parent_node_id"], node["metric"]) for node in environments] == [
+        ("discovery", "planning", "Attempt 1"),
+        ("planner", "planning", "Attempt 1"),
+        ("python_coding", "implementation", "Attempt 1"),
+    ]
 
 
 def test_workbench_product_specification_generation_projects_agent_progress(
@@ -1196,7 +1313,7 @@ def test_workbench_agent_inventory_is_scoped_bounded_and_etagged(client, valid_p
 def test_workbench_agent_inventory_uses_only_the_runtime_gateway_policy(valid_plan) -> None:
     client, _, supervisor_store, _ = _mcp_workbench(valid_plan)
     assert client.post("/api/v1/runs", json={"plan": valid_plan}).status_code == 202
-    current = supervisor_store.registry_agent_gateway_policies["agent_gateway_planner_v1_2_0"]
+    current = supervisor_store.registry_agent_gateway_policies["agent_gateway_agent_first_poc_v1_0_1"]
     historical = current.model_copy(update={"policy_revision": "agent_gateway_historical_v1"})
     supervisor_store.registry_agent_gateway_policies[historical.policy_revision] = historical
 
@@ -1204,7 +1321,7 @@ def test_workbench_agent_inventory_uses_only_the_runtime_gateway_policy(valid_pl
 
     assert inventory.status_code == 200
     assert {route["policy_revision"] for item in inventory.json()["items"] for route in item["gateway_routes"]} == {
-        "agent_gateway_planner_v1_2_0"
+        "agent_gateway_agent_first_poc_v1_0_1"
     }
 
 
@@ -1226,7 +1343,7 @@ def test_workbench_agent_detail_returns_only_safe_project_authorized_release_fac
     assert detail.json()["registration_id"] == "developer"
     assert detail.json()["gateway_routes"] == [
         {
-            "policy_revision": "agent_gateway_planner_v1_2_0",
+            "policy_revision": "agent_gateway_agent_first_poc_v1_0_1",
             "role": "developer",
             "model_alias": "complex",
             "max_budget_usd": 25.0,
@@ -1287,7 +1404,7 @@ def test_workbench_agent_invocation_history_and_detail_project_safe_pins_without
             "created_at": supervisor_store.agent_runs[run_id].created_at,
             "updated_at": supervisor_store.agent_runs[run_id].updated_at,
             "gateway_route": {
-                "policy_revision": "agent_gateway_planner_v1_2_0",
+                "policy_revision": "agent_gateway_agent_first_poc_v1_0_1",
                 "role": "developer",
                 "model_alias": "complex",
                 "max_budget_usd": 25.0,

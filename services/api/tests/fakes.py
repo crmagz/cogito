@@ -1333,6 +1333,7 @@ class InMemorySupervisorStore:
         message: str | None = None,
         attempt_id: str | None = None,
         invocation: dict[str, object] | None = None,
+        agent_binding: dict[str, object] | None = None,
         mcp_invocation: dict[str, object] | None = None,
         execution_workspace: dict[str, object] | None = None,
         planning_failure: PlanningFailureEvidence | None = None,
@@ -1349,6 +1350,7 @@ class InMemorySupervisorStore:
             "message": message[:512] if message else None,
             "attempt_id": attempt_id,
             "invocation": invocation,
+            "agent_binding": agent_binding,
             "mcp_invocation": mcp_invocation,
             "execution_workspace": execution_workspace,
             "planning_failure": planning_failure.model_dump(mode="json") if planning_failure is not None else None,
@@ -1584,6 +1586,7 @@ class FakePlanner:
 class FakeRunStarter:
     def __init__(self) -> None:
         self.started_runs: list[RunEnvelope] = []
+        self.started_agent_paths: list[dict[str, object]] = []
         self.plan_approvals: list[tuple[str, dict[str, object]]] = []
         self.implementation_approvals: list[tuple[str, dict[str, str]]] = []
         self.workflow_gates: list[tuple[str, str, dict[str, object]]] = []
@@ -1598,6 +1601,12 @@ class FakeRunStarter:
         if any((run.workflow_id or run.run_id) == (envelope.workflow_id or envelope.run_id) for run in self.started_runs):
             return
         self.started_runs.append(envelope)
+
+    async def start_agent_path(self, envelope: dict[str, object]) -> None:
+        if self.start_error is not None:
+            raise self.start_error
+        if not any(item.get("run_id") == envelope.get("run_id") for item in self.started_agent_paths):
+            self.started_agent_paths.append(envelope)
 
     async def submit_plan_approval(self, workflow_id: str, decision: dict[str, object]) -> bool:
         self.plan_approvals.append((workflow_id, decision))

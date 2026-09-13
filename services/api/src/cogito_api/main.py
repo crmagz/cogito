@@ -97,6 +97,7 @@ from .models import (
     WorkbenchBudgetSummary,
     WorkbenchEvidenceResponse,
     WorkbenchExecutionSummary,
+    WorkbenchDeliveredPullRequest,
     WorkbenchExternalLink,
     WorkbenchFeedbackRequest,
     WorkbenchFeedbackListResponse,
@@ -118,6 +119,7 @@ from .models import (
     WorkbenchWorkflowNodeType,
     WorkbenchTimelineEvent,
     WorkbenchTimelineResponse,
+    TimelineAgentBinding,
 )
 from .specification_evaluation import evaluate_specification, validate_requirement_assignments
 from .outbox import (
@@ -149,6 +151,7 @@ from .registry import (
 from .supervisor import (
     AgentRunRecord,
     ApprovalConflictError,
+    CoordinationEvent,
     PlanningGenerationDelivery,
     PlanningRunRecord,
     PostgresSupervisorStore,
@@ -378,7 +381,10 @@ def create_app(
     agents = {item.registration_id: item for item in catalog.components if item.kind.value == "agent"}
     # Registry policy revisions are immutable: changing an assigned agent release
     # requires a new revision so historical runs retain their original pin.
-    policy_revision = "phase12_planner_v1_2_0"
+    # Registry policy revisions are immutable. Adding specialist roles must
+    # establish a new assignment set rather than rewriting an already-pinned
+    # planner-only policy used by historical runs.
+    policy_revision = "agent_first_poc_v1_0_0"
     assignments = {role: f"{manifest.registration_id}@{manifest.version}" for role, manifest in agents.items()}
     telemetry = Telemetry(TelemetrySettings.from_environment())
     authenticator = ApprovalAuthenticator(settings)
@@ -1020,7 +1026,7 @@ def create_app(
         try:
             await resolve_roles(
                 run_id,
-                ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
+                ["discovery", "planner", "python_coding", "nodejs_coding", "developer", "adversarial_review", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
                 settings.workbench_default_project_id,
                 plan.target_repos,
             )
@@ -1363,7 +1369,7 @@ def create_app(
             telemetry.inject(carrier)
             resolutions = await resolve_roles(
                 updated.run_id,
-                ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
+                ["discovery", "planner", "python_coding", "nodejs_coding", "developer", "adversarial_review", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
                 updated.project_id or settings.workbench_default_project_id,
                 updated.target_repos,
             )
@@ -2407,6 +2413,8 @@ def create_app(
             workflow.append(f"{active_gate.value}_approval")
         agent_run = await supervisor_store.get_agent_run(record.run_id)
         operator_refinement = await supervisor_store.get_active_operator_refinement(record.run_id)
+        coordination_events = await supervisor_store.list_coordination_events(record.run_id, limit=100)
+        delivered_pull_requests = workbench_delivered_pull_requests(coordination_events)
         stages = workbench_stages(record, active_gate, agent_run.status if agent_run is not None else None)
         return WorkbenchRunResponse(
             run_id=record.run_id,
@@ -2440,7 +2448,7 @@ def create_app(
             ),
             available_actions=workbench_available_actions(record, can_approve="approve" in abilities),
             stages=stages,
-            workflow_graph=workbench_graph(stages),
+            workflow_graph=workbench_graph(stages, coordination_events),
             active_gate=active_gate,
             artifacts=artifacts,
             abilities=abilities,
@@ -2452,6 +2460,7 @@ def create_app(
             ),
             approval_history_available="approve" in abilities,
             external_links=workbench_external_links(record),
+            delivered_pull_requests=delivered_pull_requests,
         )
 
     def workbench_available_actions(
@@ -2537,7 +2546,10 @@ def create_app(
             )
         ] if record.plan_artifact is None else []
 
-    def workbench_graph(stages: list[WorkbenchStageSummary]) -> WorkbenchWorkflowGraph:
+    def workbench_graph(
+        stages: list[WorkbenchStageSummary],
+        coordination_events: list[tuple[CoordinationEvent, bool, int, str | None]],
+    ) -> WorkbenchWorkflowGraph:
         """Return the server-owned relay topology for the lifecycle stages it exposes."""
 
         nodes = [
@@ -2553,6 +2565,66 @@ def create_app(
             )
             for stage in stages
         ]
+        terminal_statuses: dict[str, WorkbenchStageState] = {}
+        for event, _delivered, _attempts, _last_error in coordination_events:
+            if event.event_type != "stage_invocation_finished":
+                continue
+            invocation = event.payload.get("invocation")
+            result = event.payload.get("result")
+            if not isinstance(invocation, dict) or not isinstance(result, dict):
+                continue
+            invocation_id = invocation.get("invocation_id")
+            outcome = result.get("status")
+            if isinstance(invocation_id, str) and outcome in {"succeeded", "failed"}:
+                terminal_statuses[invocation_id] = (
+                    WorkbenchStageState.COMPLETED
+                    if outcome == "succeeded"
+                    else WorkbenchStageState.FAILED
+                )
+        parent_stages = {stage.stage_id: stage for stage in stages}
+        seen_agent_runs: set[str] = set()
+        for event, _delivered, _attempts, _last_error in reversed(coordination_events):
+            if event.event_type != "stage_invocation_started":
+                continue
+            binding = event.payload.get("agent_binding")
+            if not isinstance(binding, dict):
+                continue
+            agent_run_id = binding.get("agent_run_id")
+            role = binding.get("role")
+            attempt = binding.get("attempt")
+            if (
+                not isinstance(agent_run_id, str)
+                or not agent_run_id
+                or agent_run_id in seen_agent_runs
+                or not isinstance(role, str)
+                or not role
+                or not isinstance(attempt, int)
+                or attempt < 1
+            ):
+                continue
+            parent_node_id = (
+                "planning"
+                if role in {"discovery", "planner"}
+                else "implementation"
+            )
+            parent = parent_stages.get(parent_node_id)
+            if parent is None:
+                continue
+            seen_agent_runs.add(agent_run_id)
+            nodes.append(
+                WorkbenchWorkflowNode(
+                    stage_id=f"agent-environment:{agent_run_id}",
+                    label=role.replace("_", " ").title(),
+                    state=terminal_statuses.get(agent_run_id, parent.state),
+                    availability=parent.availability,
+                    reason="An isolated agent environment recorded by the workflow audit.",
+                    artifact_kind=None,
+                    node_type=WorkbenchWorkflowNodeType.AGENT,
+                    parent_node_id=parent_node_id,
+                    agent_role=role,
+                    metric=f"Attempt {attempt}",
+                )
+            )
         return WorkbenchWorkflowGraph(
             nodes=nodes,
             edges=[
@@ -2740,6 +2812,61 @@ def create_app(
                 artifact_kind=WorkbenchArtifactKind.IMPLEMENTATION if record.implementation_artifact is not None else None,
             ),
         ]
+
+    def workbench_delivered_pull_requests(
+        events: list[tuple[CoordinationEvent, bool, int, str | None]],
+    ) -> list[WorkbenchDeliveredPullRequest] | None:
+        """Project delivery facts only after the worker has recorded a PR.
+
+        The worker writes this fact when the pull-request publisher completes,
+        before implementation approval.  Check state intentionally remains
+        unavailable until a provider projection supplies it; the Workbench
+        must not infer green checks from a successful workflow transition.
+        """
+
+        pull_requests: list[WorkbenchDeliveredPullRequest] = []
+        seen_urls: set[str] = set()
+        for event, _delivered, _attempts, _last_error in events:
+            pull_request = event.payload.get("pull_request")
+            if not isinstance(pull_request, dict):
+                continue
+            number = pull_request.get("number")
+            url = pull_request.get("url")
+            if not isinstance(number, int) or not isinstance(url, str) or url in seen_urls:
+                continue
+            repository = _repository_from_pull_request_url(url)
+            if repository is None:
+                continue
+            seen_urls.add(url)
+            pull_requests.append(
+                WorkbenchDeliveredPullRequest(
+                    repository=repository,
+                    number=number,
+                    title="Cogito implementation",
+                    url=url,
+                    checks="unavailable",
+                    opened_at=event.occurred_at,
+                    agent_role="pull_request_publisher",
+                )
+            )
+        return pull_requests or None
+
+    def _repository_from_pull_request_url(url: str) -> str | None:
+        """Return a GitHub owner/repository only from a canonical PR URL."""
+
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "github.com"
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        path = [segment for segment in parsed.path.split("/") if segment]
+        if len(path) != 4 or path[2] != "pull" or not path[3].isdigit():
+            return None
+        return f"{path[0]}/{path[1]}"
 
     def workbench_external_links(record: PlanningRunRecord) -> list[WorkbenchExternalLink]:
         """Expose only repository destinations derived from a validated run target."""
@@ -3018,6 +3145,14 @@ def create_app(
                 "request_revision": ["implementation_approval", "work_specification", "planning"],
             }.get(decision, ["implementation_approval"])
         if event_type == "stage_invocation_started":
+            invocation = payload.get("invocation")
+            stage_id = invocation.get("stage_id") if isinstance(invocation, dict) else None
+            if stage_id == "discovery":
+                return ["work_specification"]
+            if stage_id == "planning":
+                return ["planning"]
+            if isinstance(stage_id, str) and stage_id.startswith("implementation"):
+                return ["implementation"]
             return ["implementation"]
         return []
 
@@ -3056,6 +3191,11 @@ def create_app(
             activity_kind, actor_label, log_evidence_available = workbench_activity(event.event_type, event.payload)
             invocation = event.payload.get("invocation")
             invocation_id = invocation.get("invocation_id") if isinstance(invocation, dict) else None
+            raw_binding = event.payload.get("agent_binding")
+            try:
+                agent_binding = TimelineAgentBinding.model_validate(raw_binding)
+            except ValueError:
+                agent_binding = None
             items.append(
                 WorkbenchTimelineEvent(
                     event_id=event.event_id,
@@ -3079,6 +3219,12 @@ def create_app(
                     planning_failure=planning_failure_summary(event.payload),
                     delivered=delivered,
                     delivery_attempt_count=attempts,
+                    agent_binding=agent_binding,
+                    parent_event_id=(
+                        event.payload.get("parent_event_id")
+                        if isinstance(event.payload.get("parent_event_id"), str)
+                        else None
+                    ),
                 )
             )
         draft = WorkbenchTimelineResponse(items=items, revision="")
@@ -3364,6 +3510,107 @@ def create_app(
                 next_cursor=page.next_cursor,
                 tail_cursor=page.tail_cursor,
             ).model_dump(mode="json")
+        )
+
+    @app.post("/api/v1/workbench/runs/{run_id}/agent-path-poc", status_code=status.HTTP_202_ACCEPTED)
+    async def start_agent_path_poc(
+        run_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Start a read-only, source-grounded specialist handoff validation.
+
+        This POC deliberately exercises the operational seam that will own the
+        lifecycle: each policy-pinned role gets an isolated environment and an
+        independently queryable audit stream. It does not create a pull
+        request or mutate a repository; those decisions remain human-gated.
+        """
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        if record.status is not PlanningRunStatus.PLANNING:
+            raise HTTPException(status_code=409, detail="agent-path validation requires a work specification awaiting planning")
+        roles = [
+            "discovery",
+            "planner",
+            "python_coding",
+            "nodejs_coding",
+            "adversarial_review",
+            "pull_request_publisher",
+        ]
+        try:
+            resolutions = await resolve_roles(
+                run_id,
+                roles,
+                record.project_id or settings.workbench_default_project_id,
+                record.target_repos,
+            )
+        except RegistryConflictError as error:
+            raise HTTPException(status_code=503, detail="agent registry is temporarily unavailable") from error
+
+        stages = [
+            {
+                "stage_id": "discovery",
+                "role": "discovery",
+                "max_turns": 12,
+                "prompt": "You are the Discovery agent. Inspect only the source-pinned repositories and WorkSpecification context. Do not modify files, create commits, push branches, or call external delivery systems. Return concise JSON with technical context, risks, and discovery evidence.",
+            },
+            {
+                "stage_id": "planning",
+                "role": "planner",
+                "max_turns": 12,
+                "prompt": "You are the Planner agent. Inspect only the source-pinned repositories and WorkSpecification context. Do not modify files, create commits, push branches, or call external delivery systems. Return concise JSON outlining an implementation plan and verification approach.",
+            },
+            {
+                "stage_id": "implementation_python",
+                "role": "python_coding",
+                "max_turns": 12,
+                "prompt": "You are the Python coding agent. Inspect the source-pinned repositories for Python implementation implications. Do not modify files, create commits, push branches, or call external delivery systems. Return concise JSON with the proposed Python changes and tests.",
+            },
+            {
+                "stage_id": "implementation_nodejs",
+                "role": "nodejs_coding",
+                "max_turns": 12,
+                "prompt": "You are the Node.js coding agent. Inspect the source-pinned repositories for Node.js implementation implications. Do not modify files, create commits, push branches, or call external delivery systems. Return concise JSON with the proposed Node.js changes and tests, or explain why no Node.js work is needed.",
+            },
+            {
+                "stage_id": "implementation_review",
+                "role": "adversarial_review",
+                "max_turns": 12,
+                "prompt": "You are the adversarial review agent. Inspect the source-pinned repositories and evaluate the proposed delivery path for correctness, security, and operational risks. Do not modify files, create commits, push branches, or call external delivery systems. Return concise JSON findings with severity and evidence.",
+            },
+            {
+                "stage_id": "implementation_delivery",
+                "role": "pull_request_publisher",
+                "max_turns": 8,
+                "prompt": "You are the pull-request delivery agent. Inspect the source-pinned repositories and determine delivery readiness. Do not modify files, create commits, push branches, create pull requests, or call external delivery systems. Return concise JSON with the required branch, pull request, and check evidence for a later approved delivery.",
+            },
+        ]
+        envelope = {
+            "run_id": run_id,
+            "spec_ref": record.spec_set,
+            "target_repos": record.target_repos,
+            "timeout_seconds": min(record.constraints.max_wall_clock_minutes * 60, 600),
+            "max_cost_usd": record.constraints.max_cost_usd,
+            "stages": stages,
+            "registry_resolutions": [item.model_dump(mode="json") for item in resolutions],
+        }
+        try:
+            await starter.start_agent_path(envelope)
+        except (ValueError, RuntimeError) as error:
+            raise HTTPException(status_code=503, detail="agent-path worker is temporarily unavailable") from error
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "run_id": run_id,
+                "workflow_id": f"agent-path-poc-{run_id}",
+                "status": "started",
+                "roles": roles,
+                "read_only": True,
+            },
         )
 
     @app.post("/api/v1/workbench/runs/{run_id}/feedback", status_code=status.HTTP_202_ACCEPTED)

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from .execution import CommandResult, ExecutionWorkspaceService, _sanitize_diagnostics
 from .execution_prepare import feature_branch_name
 from .models import (
+    AgentInvocationRequest,
+    AgentInvocationResult,
     BackupExecutionRequest,
     PhaseExecutionRequest,
     PhaseResult,
@@ -144,6 +146,31 @@ class ClaudeCodeHarness:
             commits=commits,
             verification=verification,
             summary=agent.summary,
+        )
+
+    async def invoke_agent(self, request: AgentInvocationRequest) -> AgentInvocationResult:
+        """Run one role-pinned agent prompt without granting phase-write semantics."""
+
+        result = await self._workspaces.execute(
+            request.workspace,
+            [
+                "sh",
+                "-ec",
+                'cd "$1" && exec claude --print --output-format json --max-turns "$2" --dangerously-skip-permissions',
+                "sh",
+                request.workspace.workspace_root,
+                str(request.max_turns),
+            ],
+            stdin=request.prompt,
+            timeout_seconds=request.timeout_seconds,
+        )
+        agent = _parse_agent_result(result, request.max_turns)
+        return AgentInvocationResult(
+            succeeded=agent.succeeded,
+            output=agent.summary,
+            turns_used=agent.turns_used,
+            cost_usd=agent.cost_usd,
+            ceiling=agent.ceiling,
         )
 
     async def backup_phase(self, request: BackupExecutionRequest) -> PhaseResult:

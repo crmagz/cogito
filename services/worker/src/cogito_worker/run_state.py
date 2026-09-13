@@ -63,6 +63,8 @@ class RunStateReporter(Protocol):
         role: str,
         attempt: int,
         trace_context_available: bool,
+        registration_id: str = "",
+        environment_id: str = "",
     ) -> None: ...
 
     async def record_stage_invocation_result(
@@ -96,8 +98,10 @@ class NullRunStateReporter:
         role: str,
         attempt: int,
         trace_context_available: bool,
+        registration_id: str = "",
+        environment_id: str = "",
     ) -> None:
-        del run_id, stage_id, role, attempt, trace_context_available
+        del run_id, stage_id, role, attempt, trace_context_available, registration_id, environment_id
 
     async def record_stage_invocation_result(
         self, run_id: str, stage_id: str, role: str, attempt: int, status: str
@@ -119,6 +123,12 @@ def stage_invocation_id(run_id: str, stage_id: str, role: str, attempt: int) -> 
     return sha256(f"stage-invocation-v1:{run_id}:{stage_id}:{role}:{attempt}".encode()).hexdigest()
 
 
+def coordination_dedupe_key(identity: str, event_type: str) -> str:
+    """Return a fixed-width idempotency key for one identity and event type."""
+
+    return sha256(f"coordination-event-v1:{identity}:{event_type}".encode()).hexdigest()
+
+
 class PostgresRunStateReporter:
     def __init__(self, database_url: str):
         self._engine: AsyncEngine = create_async_engine(
@@ -138,6 +148,12 @@ class PostgresRunStateReporter:
         safe_metadata = {"status": status}
         if metadata and "phase_result" in metadata:
             safe_metadata["phase_result"] = "recorded"
+        if metadata and isinstance(metadata.get("pull_request"), dict):
+            pull_request = metadata["pull_request"]
+            number = pull_request.get("number")
+            url = pull_request.get("url")
+            if isinstance(number, int) and isinstance(url, str):
+                safe_metadata["pull_request"] = {"number": number, "url": url}
         implementation_artifact = metadata.get("implementation_artifact") if metadata else None
         implementation_gate_event: dict[str, object] | None = None
         async with self._engine.begin() as connection:
@@ -235,7 +251,7 @@ class PostgresRunStateReporter:
                         "revision": artifact_row["implementation_revision"],
                     }
             pull_request = metadata.get("pull_request") if metadata else None
-            if status == "completed" and isinstance(pull_request, dict) and isinstance(implementation_artifact, dict):
+            if status in {"awaiting_implementation_approval", "completed"} and isinstance(pull_request, dict) and isinstance(implementation_artifact, dict):
                 number = pull_request.get("number")
                 url = pull_request.get("url")
                 digest = implementation_artifact.get("sha256")
@@ -342,6 +358,7 @@ class PostgresRunStateReporter:
                 "run_id": run_id,
                 "gate": None,
                 "artifact": implementation_artifact if status == "awaiting_implementation_approval" else None,
+                "pull_request": safe_metadata.get("pull_request"),
                 "decision": None,
                 "lifecycle_status": target,
                 "read_url": f"/api/v1/planning-runs/{run_id}/coordination",
@@ -398,6 +415,8 @@ class PostgresRunStateReporter:
         role: str,
         attempt: int,
         trace_context_available: bool,
+        registration_id: str = "",
+        environment_id: str = "",
     ) -> None:
         """Append non-authoritative, correlation-only evidence for one phase attempt."""
 
@@ -418,6 +437,13 @@ class PostgresRunStateReporter:
                 "role": role,
                 "attempt": attempt,
                 "trace_context_available": trace_context_available,
+            },
+            "agent_binding": {
+                "agent_run_id": invocation_id,
+                "registration_id": registration_id or role,
+                "role": role,
+                "environment_id": environment_id or invocation_id,
+                "attempt": attempt,
             },
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -480,7 +506,7 @@ class PostgresRunStateReporter:
                 {
                     "event_id": str(uuid.uuid4()),
                     "run_id": run_id,
-                    "dedupe_key": f"{invocation_id}:finished",
+                    "dedupe_key": coordination_dedupe_key(invocation_id, "finished"),
                     "payload": canonical,
                     "created_at": datetime.now(timezone.utc),
                 },

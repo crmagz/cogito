@@ -3,6 +3,8 @@ from __future__ import annotations
 from cogito_worker.execution import CommandResult
 from cogito_worker.github import PullRequestResult
 from cogito_worker.models import (
+    AgentInvocationRequest,
+    AgentInvocationResult,
     BackupExecutionRequest,
     ExecutionRequest,
     ExecutionWorkspace,
@@ -117,6 +119,7 @@ class InMemoryHarness:
         results: list[PhaseResult] | None = None,
     ) -> None:
         self.requests: list[PhaseExecutionRequest] = []
+        self.agent_invocation_requests: list[AgentInvocationRequest] = []
         self.backup_requests: list[BackupExecutionRequest] = []
         self.review_revision_requests: list[ReviewRevisionRequest] = []
         self.result = result
@@ -139,6 +142,16 @@ class InMemoryHarness:
             commits={"/workspace/repos/example": "a" * 40},
             verification=[],
             summary="completed",
+        )
+
+    async def invoke_agent(self, request: AgentInvocationRequest) -> AgentInvocationResult:
+        self.agent_invocation_requests.append(request)
+        self.agent_invocation_request = request
+        return AgentInvocationResult(
+            succeeded=True,
+            output='{"title":"agent output"}',
+            turns_used=3,
+            cost_usd=0.01,
         )
 
     async def backup_phase(self, request: BackupExecutionRequest) -> PhaseResult:

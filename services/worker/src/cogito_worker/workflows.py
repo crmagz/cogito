@@ -13,6 +13,11 @@ from temporalio.exceptions import TimeoutError
 with workflow.unsafe.imports_passed_through():
     from .activities import WorkerActivities
     from .models import (
+        AgentInvocationEnvelope,
+        AgentInvocationRequest,
+        AgentInvocationResult,
+        AgentPathEnvelope,
+        AgentPathResult,
         BackupExecutionRequest,
         ExecutionRequest,
         ImplementationArtifact,
@@ -51,6 +56,132 @@ _RUN_PHASE_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 _BACKUP_PHASE_RETRY_POLICY = _IDEMPOTENT_RETRY_POLICY
 _BACKUP_ACTIVITY_TIMEOUT = timedelta(seconds=120)
 _REVIEW_ACTIVITY_TIMEOUT = timedelta(seconds=120)
+
+
+@workflow.defn
+class AgentInvocationWorkflow:
+    """Run exactly one policy-pinned agent in its own execution environment."""
+
+    @workflow.run
+    async def run(self, envelope: AgentInvocationEnvelope) -> AgentInvocationResult:
+        workspace = await workflow.execute_activity(
+            WorkerActivities.provision_execution_workspace,
+            args=[
+                ExecutionRequest(
+                    run_id=envelope.run_id,
+                    spec_ref=envelope.spec_ref,
+                    target_repos=envelope.target_repos,
+                    execution_timeout_seconds=envelope.timeout_seconds,
+                    max_cost_usd=envelope.max_cost_usd,
+                    registration=envelope.registration,
+                    gateway=envelope.gateway,
+                    agent_role=envelope.role,
+                )
+            ],
+            start_to_close_timeout=_PROVISION_ACTIVITY_TIMEOUT,
+            schedule_to_start_timeout=_WORKER_START_TIMEOUT,
+            retry_policy=_PROVISION_RETRY_POLICY,
+        )
+        try:
+            return await workflow.execute_activity(
+                WorkerActivities.invoke_agent,
+                args=[
+                    AgentInvocationRequest(
+                        stage_id=envelope.stage_id,
+                        role=envelope.role,
+                        workspace=workspace,
+                        prompt=envelope.prompt,
+                        max_turns=envelope.max_turns,
+                        timeout_seconds=envelope.timeout_seconds,
+                        audit_run_id=envelope.run_id,
+                        registration_id=(
+                            envelope.registration.registration_id if envelope.registration is not None else ""
+                        ),
+                    )
+                ],
+                start_to_close_timeout=timedelta(seconds=envelope.timeout_seconds),
+                retry_policy=_RUN_PHASE_RETRY_POLICY,
+            )
+        finally:
+            await workflow.execute_activity(
+                WorkerActivities.cleanup_execution_workspace,
+                args=[workspace],
+                start_to_close_timeout=_CLEANUP_ACTIVITY_TIMEOUT,
+                retry_policy=_CLEANUP_RETRY_POLICY,
+            )
+
+
+@workflow.defn
+class AgentPathWorkflow:
+    """Execute each specialist in a fresh environment with a separate audit stream."""
+
+    @workflow.run
+    async def run(self, envelope: AgentPathEnvelope) -> AgentPathResult:
+        resolved = {item.role: item for item in envelope.registry_resolutions}
+        completed: list[str] = []
+        for index, stage in enumerate(envelope.stages, start=1):
+            registration = resolved.get(stage.role)
+            if registration is None or registration.gateway is None:
+                raise ValueError(f"agent path is missing a pinned gateway route for {stage.role}")
+            # The execution initializer derives a Git branch from its run ID,
+            # whose contract permits only alphanumeric characters and hyphens.
+            # Roles may contain underscores, so keep their identity in the
+            # audit binding and derive a distinct safe environment identifier.
+            environment_run_id = "env-" + hashlib.sha256(
+                f"agent-environment-v1:{envelope.run_id}:{index}:{stage.role}".encode()
+            ).hexdigest()[:32]
+            workspace = await workflow.execute_activity(
+                WorkerActivities.provision_execution_workspace,
+                args=[
+                    ExecutionRequest(
+                        run_id=environment_run_id,
+                        spec_ref=envelope.spec_ref,
+                        target_repos=envelope.target_repos,
+                        execution_timeout_seconds=envelope.timeout_seconds,
+                        max_cost_usd=envelope.max_cost_usd,
+                        registration=registration,
+                        gateway=registration.gateway,
+                        agent_role=stage.role,
+                    )
+                ],
+                start_to_close_timeout=_PROVISION_ACTIVITY_TIMEOUT,
+                schedule_to_start_timeout=_WORKER_START_TIMEOUT,
+                retry_policy=_PROVISION_RETRY_POLICY,
+            )
+            try:
+                result = await workflow.execute_activity(
+                    WorkerActivities.invoke_agent,
+                    args=[
+                        AgentInvocationRequest(
+                            stage_id=stage.stage_id,
+                            role=stage.role,
+                            workspace=workspace,
+                            prompt=stage.prompt,
+                            max_turns=stage.max_turns,
+                            timeout_seconds=envelope.timeout_seconds,
+                            audit_run_id=envelope.run_id,
+                            registration_id=registration.registration_id,
+                        )
+                    ],
+                    start_to_close_timeout=timedelta(seconds=envelope.timeout_seconds),
+                    retry_policy=_RUN_PHASE_RETRY_POLICY,
+                )
+            finally:
+                await workflow.execute_activity(
+                    WorkerActivities.cleanup_execution_workspace,
+                    args=[workspace],
+                    start_to_close_timeout=_CLEANUP_ACTIVITY_TIMEOUT,
+                    retry_policy=_CLEANUP_RETRY_POLICY,
+                )
+            if not result.succeeded:
+                return AgentPathResult(
+                    run_id=envelope.run_id,
+                    succeeded=False,
+                    completed_roles=completed,
+                    failed_role=stage.role,
+                )
+            completed.append(stage.role)
+        return AgentPathResult(run_id=envelope.run_id, succeeded=True, completed_roles=completed)
 
 
 @workflow.defn
@@ -421,16 +552,44 @@ class DeveloperRunWorkflow:
                     start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 )
                 return RunResult(run_id=envelope.run_id, status="escalated")
-            if not envelope.requires_implementation_approval:
-                await workflow.execute_activity(
-                    WorkerActivities.report_status,
-                    args=[envelope.run_id, "completed", None, {"review": review_outcome}],
-                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
-                )
-                return RunResult(run_id=envelope.run_id, status="completed")
             if implementation_artifact is None:
                 raise RuntimeError("converged review did not produce an implementation artifact")
             assert implementation_evidence is not None
+            # Delivery evidence must exist before the operator is asked to
+            # approve the implementation.  An implementation approval is a
+            # decision over the frozen artifact *and* the already-opened PR,
+            # never permission to create a moving delivery after the fact.
+            pull_request_metadata: dict[str, object] | None = None
+            if envelope.target_repos:
+                publisher_registration = require_role(envelope, "pull_request_publisher")
+                require_tool(publisher_registration, "github_publisher", "approved_pull_request")
+                pull_request = await workflow.execute_activity(
+                    WorkerActivities.open_pull_request,
+                    args=[implementation_artifact.sha256, implementation_evidence],
+                    start_to_close_timeout=_REVIEW_ACTIVITY_TIMEOUT,
+                    retry_policy=_PUBLISH_RETRY_POLICY,
+                )
+                pull_request_metadata = {
+                    "number": pull_request.number,
+                    "url": pull_request.url,
+                    "reused": pull_request.reused,
+                }
+            if not envelope.requires_implementation_approval:
+                await workflow.execute_activity(
+                    WorkerActivities.report_status,
+                    args=[
+                        envelope.run_id,
+                        "completed",
+                        None,
+                        {
+                            "review": review_outcome,
+                            "pull_request": pull_request_metadata,
+                            "implementation_artifact": {"sha256": implementation_artifact.sha256},
+                        },
+                    ],
+                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                )
+                return RunResult(run_id=envelope.run_id, status="completed")
             self._implementation_sha256 = implementation_artifact.sha256
             self._awaiting_implementation_approval = True
             await workflow.execute_activity(
@@ -445,6 +604,7 @@ class DeveloperRunWorkflow:
                             "sha256": implementation_artifact.sha256,
                         },
                         "review": implementation_evidence["review"],
+                        "pull_request": pull_request_metadata,
                     },
                 ],
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
@@ -472,14 +632,6 @@ class DeveloperRunWorkflow:
                 args=[envelope.run_id, "finalizing", None, {"implementation_artifact": {"sha256": implementation_artifact.sha256}}],
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
             )
-            publisher_registration = require_role(envelope, "pull_request_publisher")
-            require_tool(publisher_registration, "github_publisher", "approved_pull_request")
-            pull_request = await workflow.execute_activity(
-                WorkerActivities.open_pull_request,
-                args=[implementation_artifact.sha256, implementation_evidence],
-                start_to_close_timeout=_REVIEW_ACTIVITY_TIMEOUT,
-                retry_policy=_PUBLISH_RETRY_POLICY,
-            )
             await workflow.execute_activity(
                 WorkerActivities.report_status,
                 args=[
@@ -488,11 +640,7 @@ class DeveloperRunWorkflow:
                     None,
                     {
                         "review": implementation_evidence["review"],
-                        "pull_request": {
-                            "number": pull_request.number,
-                            "url": pull_request.url,
-                            "reused": pull_request.reused,
-                        },
+                        "pull_request": pull_request_metadata,
                         "implementation_artifact": {"sha256": implementation_artifact.sha256},
                     },
                 ],

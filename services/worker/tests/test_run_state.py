@@ -4,7 +4,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from cogito_worker.run_state import PostgresRunStateReporter
+from cogito_worker.run_state import PostgresRunStateReporter, coordination_dedupe_key, stage_invocation_id
 
 
 @dataclass
@@ -152,6 +152,31 @@ async def test_running_run_can_enter_implementation_approval_and_register_artifa
     assert '"lifecycle_status":"WAITING_FOR_APPROVAL"' in lifecycle_parameters["payload"]
 
 
+async def test_implementation_approval_persists_delivery_evidence_before_operator_decision() -> None:
+    connection = _Connection(previous_status="RUNNING")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.report(
+        "run-1",
+        "awaiting_implementation_approval",
+        None,
+        {
+            "implementation_artifact": {"ref": "s3://plans/implementation.json", "sha256": "a" * 64},
+            "pull_request": {"number": 42, "url": "https://github.com/acme/example/pull/42"},
+        },
+    )
+
+    pull_request_statement, pull_request_parameters = next(
+        (statement, parameters)
+        for statement, parameters in connection.calls
+        if "INSERT INTO implementation_pull_requests" in statement
+    )
+    assert "ON CONFLICT (run_id) DO NOTHING" in pull_request_statement
+    assert pull_request_parameters["repository"] == "acme/example"
+    assert pull_request_parameters["number"] == 42
+
+
 async def test_coordination_event_dedupe_keys_are_deterministic() -> None:
     connection = _Connection(previous_status="RUNNING")
     reporter = object.__new__(PostgresRunStateReporter)
@@ -177,7 +202,9 @@ async def test_stage_invocation_event_is_idempotent_and_correlation_only() -> No
     reporter = object.__new__(PostgresRunStateReporter)
     reporter._engine = _Engine(connection)  # type: ignore[assignment]
 
-    await reporter.record_stage_invocation("run-1", "implement-api", "developer", 2, True)
+    await reporter.record_stage_invocation(
+        "run-1", "implement-api", "developer", 2, True, "python_coding", "cogito-execution-abc"
+    )
 
     statement, parameters = connection.calls[0]
     assert "INSERT INTO coordination_events" in statement
@@ -190,7 +217,28 @@ async def test_stage_invocation_event_is_idempotent_and_correlation_only() -> No
         "actor_label": "Developer",
         "log_evidence_available": True,
     }
+    assert json.loads(parameters["payload"])["agent_binding"] == {
+        "agent_run_id": stage_invocation_id("run-1", "implement-api", "developer", 2),
+        "registration_id": "python_coding",
+        "role": "developer",
+        "environment_id": "cogito-execution-abc",
+        "attempt": 2,
+    }
     assert "notification_outbox" not in statement
+
+
+async def test_stage_invocation_completion_uses_a_database_safe_dedupe_key() -> None:
+    connection = _Connection(previous_status="RUNNING")
+    reporter = object.__new__(PostgresRunStateReporter)
+    reporter._engine = _Engine(connection)  # type: ignore[assignment]
+
+    await reporter.record_stage_invocation_result("run-1", "implement-api", "developer", 2, "succeeded")
+
+    _, parameters = connection.calls[0]
+    assert parameters["dedupe_key"] == coordination_dedupe_key(
+        stage_invocation_id("run-1", "implement-api", "developer", 2), "finished"
+    )
+    assert len(parameters["dedupe_key"]) == 64
 
 
 async def test_mcp_invocation_event_persists_only_the_safe_aggregate() -> None:
