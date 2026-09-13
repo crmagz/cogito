@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import replace
 import json
 
@@ -296,6 +297,84 @@ def test_workbench_projects_a_post_approval_failure_as_implementation_failed(cli
     assert response.json()["failure_summary"] == "phase scaffold failed: verification command returned 1"
 
 
+def test_workbench_offers_and_starts_an_immutable_plan_redrive(
+    client, valid_plan, supervisor_store, starter
+) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    record = supervisor_store.planning_runs[run_id]
+    supervisor_store.planning_runs[run_id] = replace(record, status=PlanningRunStatus.IMPLEMENTATION_FAILED)
+    supervisor_store.agent_runs[run_id] = replace(supervisor_store.agent_runs[run_id], status=AgentRunStatus.FAILED)
+
+    projected = client.get(f"/api/v1/workbench/runs/{run_id}", headers=_headers())
+
+    assert projected.status_code == 200
+    assert projected.json()["available_actions"] == [
+        {
+            "action_id": "redrive_implementation",
+            "stage_id": "implementation",
+            "label": "Retry implementation",
+            "description": (
+                "Retry the failed execution with the same approved immutable plan. "
+                "This does not change the Work Specification or plan approval."
+            ),
+            "requires_confirmation": True,
+        }
+    ]
+
+    redrive = client.post(f"/api/v1/planning-runs/{run_id}/redrive-implementation", headers=_headers("redrive-1"))
+
+    assert redrive.status_code == 202
+    assert redrive.json()["status"] == "implementing"
+    assert supervisor_store.planning_runs[run_id].plan_artifact == record.plan_artifact
+    assert supervisor_store.agent_runs[run_id].status is AgentRunStatus.QUEUED
+    assert len(starter.started_runs) == 1
+
+
+def test_redrive_restores_the_failed_state_when_temporal_startup_fails(
+    client, valid_plan, supervisor_store, starter
+) -> None:
+    """A transient starter error must leave the advertised retry action available."""
+
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    record = supervisor_store.planning_runs[run_id]
+    supervisor_store.planning_runs[run_id] = replace(record, status=PlanningRunStatus.IMPLEMENTATION_FAILED)
+    starter.start_error = ConnectionError("Temporal unavailable")
+
+    redrive = client.post(f"/api/v1/planning-runs/{run_id}/redrive-implementation", headers=_headers("redrive-start-fails"))
+
+    assert redrive.status_code == 503
+    assert supervisor_store.planning_runs[run_id].status is PlanningRunStatus.IMPLEMENTATION_FAILED
+    assert supervisor_store.agent_runs[run_id].status is AgentRunStatus.FAILED
+
+
+def test_redrive_uses_requirement_ids_from_the_approved_plan(
+    client, valid_plan, supervisor_store, starter, store
+) -> None:
+    """Historical plans retain their immutable requirement contract during recovery."""
+
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    legacy_plan = copy.deepcopy(valid_plan)
+    legacy_plan["phases"][0]["requirement_ids"] = ["functional-rate-limiter"]
+    legacy_plan["phases"][0]["verification_references"] = ["functional-rate-limiter"]
+    legacy_plan["phases"][1]["requirement_ids"] = ["nonfunctional-observability"]
+    snapshot = store.put_planning_plan(run_id, 1, AiPlan.model_validate(legacy_plan))
+    record = supervisor_store.planning_runs[run_id]
+    supervisor_store.planning_runs[run_id] = replace(
+        record,
+        status=PlanningRunStatus.IMPLEMENTATION_FAILED,
+        plan_artifact=ArtifactReference(ref=snapshot.ref, sha256=snapshot.sha256),
+    )
+    starter.started_runs.clear()
+
+    redrive = client.post(f"/api/v1/planning-runs/{run_id}/redrive-implementation", headers=_headers("legacy-redrive"))
+
+    assert redrive.status_code == 202
+    assert starter.started_runs[-1].specification_requirement_ids == [
+        "functional-rate-limiter",
+        "nonfunctional-observability",
+    ]
+
+
 def test_workbench_approver_can_view_pinned_mcp_capabilities_and_submit_selection(valid_plan: dict) -> None:
     client, starter, supervisor_store, _ = _mcp_workbench(valid_plan)
     run_id, digest = _awaiting_plan(client, valid_plan)
@@ -561,7 +640,7 @@ def test_workbench_timeline_classifies_lifecycle_agent_and_mcp_activity(client, 
         invocation={
             "invocation_id": "a" * 64,
             "source": "worker_phase",
-            "stage_id": "implementation",
+            "stage_id": "phase-1",
             "role": "developer",
             "attempt": 1,
             "trace_context_available": True,
@@ -590,11 +669,43 @@ def test_workbench_timeline_classifies_lifecycle_agent_and_mcp_activity(client, 
     assert events_by_type["plan_approval_requested"]["actor_label"] is None
     assert events_by_type["plan_approval_requested"]["log_evidence_available"] is False
     assert events_by_type["stage_invocation_started"]["activity_kind"] == "agent"
-    assert events_by_type["stage_invocation_started"]["actor_label"] == "Developer"
+    assert events_by_type["stage_invocation_started"]["actor_label"] == "Developer · Phase 1 · Attempt 1"
     assert events_by_type["stage_invocation_started"]["log_evidence_available"] is True
+    assert events_by_type["stage_invocation_started"]["stage_ids"] == ["implementation"]
     assert events_by_type["mcp_invocation_observed"]["activity_kind"] == "mcp"
     assert events_by_type["mcp_invocation_observed"]["actor_label"] == "github-readonly / catalog_read"
     assert events_by_type["mcp_invocation_observed"]["log_evidence_available"] is False
+
+
+def test_workbench_timeline_pairs_a_finished_invocation_with_its_started_audit_row(
+    client, valid_plan, supervisor_store
+) -> None:
+    run_id, _ = _awaiting_plan(client, valid_plan)
+    invocation = {
+        "invocation_id": "a" * 64,
+        "source": "worker_phase",
+        "stage_id": "phase-1",
+        "role": "developer",
+        "attempt": 1,
+    }
+    supervisor_store._append_coordination_event(run_id, "stage_invocation_started", invocation=invocation)
+    supervisor_store._append_coordination_event(run_id, "stage_invocation_finished", invocation=invocation)
+    event_id, finished = next(
+        (event_id, event)
+        for event_id, event in supervisor_store.coordination_events.items()
+        if event.event_type == "stage_invocation_finished"
+    )
+    supervisor_store.coordination_events[event_id] = replace(
+        finished, payload=finished.payload | {"result": {"status": "succeeded"}}
+    )
+
+    response = client.get(f"/api/v1/workbench/runs/{run_id}/timeline", headers=_headers())
+
+    assert response.status_code == 200
+    invocation_events = [item for item in response.json()["items"] if item["event_type"].startswith("stage_invocation")]
+    assert len(invocation_events) == 1
+    assert invocation_events[0]["event_type"] == "stage_invocation_started"
+    assert invocation_events[0]["lifecycle_status"] == "SUCCEEDED"
 
 
 def test_workbench_timeline_tolerates_unknown_persisted_enum_values(client, valid_plan, supervisor_store) -> None:

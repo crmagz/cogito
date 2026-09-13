@@ -278,11 +278,10 @@ def test_accept_product_specification_requires_revision_when_evaluation_records_
     refinement_needed["unresolved_questions"] = [
         {
             "id": "question-retention",
-            "text": "How long must rejected requests be retained?",
-            "kind": "question",
-            "source_segment_ids": [],
-            "requirement_ids": [],
-        }
+                "text": "How long must rejected requests be retained?",
+                "kind": "question",
+                "source_segment_ids": [],
+            }
     ]
     revised = client.post(
         f"/api/v1/planning-runs/{run_id}/revise-product-specification",
@@ -508,15 +507,10 @@ def test_selected_product_specification_is_the_only_plan_input(
     assert planned.status_code == 200
     assert selected["selected_product_specification_revision"] == 1
     selected_specification = json.loads(planner.contexts[0].initial_specification)
-    assert selected_specification["out_of_scope"] == [{
-        "id": "scope-out-1",
-        "kind": "source",
-        "requirement_ids": [],
-        "source_segment_ids": ["source-1"],
-        "text": "Changing authentication",
-    }]
-    assert selected_specification["risks"][0]["id"] == "risk-1"
-    assert selected_specification["desired_outcomes"][0]["id"] == "outcome-1"
+    assert selected_specification["title"]["id"] == "title"
+    assert selected_specification["user_story"]["id"] == "user-story"
+    assert selected_specification["outcome"]["id"] == "outcome"
+    assert selected_specification["acceptance_criteria"][0]["id"] == "acceptance-1"
     assert "Add a rate limiter with bounded, observable behavior." not in planner.contexts[0].initial_specification
 
 
@@ -819,9 +813,9 @@ def test_dispatcher_records_structured_planner_contract_failure_in_workbench_aud
 
     async def invalid_output(*_args: object) -> AiPlan:
         raise PlannerOutputError(
-            "plan does not assign owner phases for requirement IDs: functional-2",
+            "plan does not assign owner phases for requirement IDs: acceptance-2",
             code=PlanningFailureCode.REQUIREMENT_PARTITION,
-            requirement_ids=("functional-2",),
+            requirement_ids=("acceptance-2",),
         )
 
     planner.generate = invalid_output  # type: ignore[method-assign]
@@ -858,10 +852,10 @@ def test_dispatcher_records_structured_planner_contract_failure_in_workbench_aud
             "contract_version": "plan-draft/v2",
             "attempt_count": 1,
             "code": "requirement_partition",
-            "message": "plan does not assign owner phases for requirement IDs: functional-2",
-            "requirement_ids": ["functional-2"],
+            "message": "plan does not assign owner phases for requirement IDs: acceptance-2",
+            "requirement_ids": ["acceptance-2"],
         }
-        assert "functional-2" in failure["message"]
+        assert "acceptance-2" in failure["message"]
         assert store.plans == {}
 
 
@@ -948,6 +942,9 @@ def test_revision_reopens_planning_with_a_new_artifact_and_workflow(
     ).json()
     assert reopened["status"] == "planning"
     assert reopened["plan_artifact"] is None
+    workbench = client.get(f"/api/v1/workbench/runs/{run_id}")
+    assert workbench.status_code == 200
+    assert workbench.json()["operator_feedback"]["comment"] == "Narrow the scope."
     revised_plan = copy.deepcopy(valid_plan)
     revised_plan["title"] = "Add a narrower rate limiter"
     planner.plan = AiPlan.model_validate(revised_plan)
@@ -955,6 +952,10 @@ def test_revision_reopens_planning_with_a_new_artifact_and_workflow(
     second_digest = second.json()["plan_artifact"]["sha256"]
 
     assert second.status_code == 200
+    assert planner.contexts[-1].operator_refinement is not None
+    assert planner.contexts[-1].operator_refinement.comment == "Narrow the scope."
+    assert planner.contexts[-1].base_plan is not None
+    assert planner.contexts[-1].base_plan.title == valid_plan["title"]
     assert second_digest != first_digest
     assert len(starter.started_runs) == 2
     assert starter.started_runs[0].workflow_id != starter.started_runs[1].workflow_id

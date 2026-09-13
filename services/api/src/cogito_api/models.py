@@ -99,38 +99,32 @@ class WorkSpecification(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1, le=1)
-    objective: str = Field(min_length=1, max_length=10_000)
-    actors: list[str] = Field(min_length=1, max_length=64)
-    desired_outcomes: list[str] = Field(min_length=1, max_length=128)
-    scope_in: list[str] = Field(min_length=1, max_length=256)
-    scope_out: list[str] = Field(default_factory=list, max_length=256)
-    acceptance_expectations: list[str] = Field(min_length=1, max_length=256)
-    constraints: list[str] = Field(default_factory=list, max_length=256)
-    unknowns: list[str] = Field(default_factory=list, max_length=256)
+    schema_version: int = Field(default=2, ge=2, le=2, description="Work Specification contract version")
+    title: str = Field(min_length=1, max_length=500, description="Short name for the requested work")
+    user_story: str = Field(min_length=1, max_length=10_000, description="User need and the reason it matters")
+    outcome: str = Field(min_length=1, max_length=10_000, description="Measurable result the work should achieve")
+    acceptance_criteria: list[str] = Field(
+        min_length=1,
+        max_length=256,
+        description="Observable conditions required before the outcome can be accepted",
+    )
+    technical_context: list[str] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Optional Jira-supplied technical facts relevant to discovery and planning",
+    )
     repository_candidates: list["RepositoryCandidate"] = Field(
         default_factory=list,
         max_length=32,
         description="Repositories the product manager already believes are relevant; relationships are discovered server-side",
     )
-    discovery_preference: "RepositoryDiscoveryPreference" = Field(
-        default="supplied_first",
-        validate_default=True,
-        description="Whether discovery may expand beyond the product manager's supplied repository candidates",
-    )
 
     @model_validator(mode="after")
     def validate_non_blank_values(self) -> "WorkSpecification":
-        fields = (
-            self.actors,
-            self.desired_outcomes,
-            self.scope_in,
-            self.scope_out,
-            self.acceptance_expectations,
-            self.constraints,
-            self.unknowns,
-        )
-        if not self.objective.strip() or any(not value.strip() for field in fields for value in field):
+        fields = (self.acceptance_criteria, self.technical_context)
+        if not all(value.strip() for value in (self.title, self.user_story, self.outcome)) or any(
+            not value.strip() for field in fields for value in field
+        ):
             raise ValueError("specification intake values must be non-blank")
         repository_ids = [candidate.repository_id for candidate in self.repository_candidates]
         if len(set(repository_ids)) != len(repository_ids):
@@ -140,14 +134,6 @@ class WorkSpecification(BaseModel):
 
 # Backwards-compatible request name during the Work Specification migration.
 SpecificationIntake = WorkSpecification
-
-
-class RepositoryDiscoveryPreference(StrEnum):
-    """Bounded product-manager hint; platform policy still controls actual discovery authority."""
-
-    SUPPLIED_ONLY = "supplied_only"
-    SUPPLIED_FIRST = "supplied_first"
-    EXPAND_IF_NEEDED = "expand_if_needed"
 
 
 class RepositoryCandidate(BaseModel):
@@ -189,6 +175,15 @@ class AiPlan(BaseModel):
         default=None,
         pattern=r"^[a-f0-9]{64}$",
         description="Digest of the exact specification evaluation that authorized planning",
+    )
+    operator_feedback_id: str | None = Field(
+        default=None,
+        description="Immutable operator feedback incorporated by this replacement plan",
+    )
+    operator_feedback_response: str | None = Field(
+        default=None,
+        max_length=2_000,
+        description="Planner's bounded statement of how the replacement plan incorporates operator feedback",
     )
 
 
@@ -241,6 +236,9 @@ class ProductSpecificationStatement(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    kind: ProductSpecificationStatementKind = Field(
+        description="Whether the statement is grounded in intake, an assumption, or an unresolved question",
+    )
     id: str = Field(
         min_length=1,
         max_length=128,
@@ -250,20 +248,12 @@ class ProductSpecificationStatement(BaseModel):
     text: str = Field(
         min_length=1,
         max_length=10_000,
-        description="Bounded product statement, requirement, criterion, assumption, risk, or question",
-    )
-    kind: ProductSpecificationStatementKind = Field(
-        description="Whether the statement is grounded in intake, an assumption, or an unresolved question",
+        description="Bounded product statement, criterion, assumption, or question",
     )
     source_segment_ids: list[str] = Field(
         default_factory=list,
         max_length=32,
         description="Explicit immutable intake segments supporting a source-grounded statement",
-    )
-    requirement_ids: list[str] = Field(
-        default_factory=list,
-        max_length=256,
-        description="Requirement IDs that this acceptance criterion verifies",
     )
 
     @model_validator(mode="after")
@@ -272,8 +262,6 @@ class ProductSpecificationStatement(BaseModel):
 
         if len(set(self.source_segment_ids)) != len(self.source_segment_ids):
             raise ValueError("product specification source segment IDs must be unique")
-        if len(set(self.requirement_ids)) != len(self.requirement_ids):
-            raise ValueError("product specification requirement IDs must be unique")
         if self.kind is ProductSpecificationStatementKind.SOURCE and not self.source_segment_ids:
             raise ValueError("source-grounded product specification statements require a source segment")
         if self.kind is not ProductSpecificationStatementKind.SOURCE and self.source_segment_ids:
@@ -282,144 +270,114 @@ class ProductSpecificationStatement(BaseModel):
 
 
 class ProductSpecification(BaseModel):
-    """Strict, evidence-labelled product contract produced before implementation planning."""
+    """The compact, evidence-labelled Work Specification used for approval and planning.
+
+    The older expansive product-specification shape is accepted only to read
+    historical evidence. New drafts and revisions emit this small v3 shape.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(
-        default=1,
+        default=3,
         ge=1,
-        le=2,
-        description="Product specification contract version; evaluation requires version 2",
+        le=3,
+        description="Compact Work Specification contract version",
     )
-
     title: ProductSpecificationStatement = Field(description="Traceable concise name for the proposed outcome")
-    problem_statement: ProductSpecificationStatement = Field(description="Traceable problem to solve")
-    desired_outcomes: list[ProductSpecificationStatement] = Field(
-        min_length=1,
-        max_length=64,
-        description="Traceable expected product outcomes",
-    )
-    actors: list[ProductSpecificationStatement] = Field(
-        min_length=1,
-        max_length=64,
-        description="Traceable affected users or systems",
-    )
-    in_scope: list[ProductSpecificationStatement] = Field(
-        min_length=1,
-        max_length=128,
-        description="Traceable work included in the proposed feature",
-    )
-    out_of_scope: list[ProductSpecificationStatement] = Field(
-        min_length=1,
-        max_length=128,
-        description="Traceable work deliberately excluded from the proposed feature",
-    )
-    functional_requirements: list[ProductSpecificationStatement] = Field(
-        min_length=1,
-        max_length=256,
-        description="Traceable functional requirements for the future implementation plan",
-    )
-    non_functional_requirements: list[ProductSpecificationStatement] = Field(
-        default_factory=list,
-        max_length=256,
-        description="Traceable quality, security, performance, or operability requirements",
-    )
+    user_story: ProductSpecificationStatement = Field(description="Traceable user need and reason for the work")
+    outcome: ProductSpecificationStatement = Field(description="Traceable measurable result to achieve")
     acceptance_criteria: list[ProductSpecificationStatement] = Field(
-        min_length=1,
         max_length=256,
-        description="Traceable observable conditions required for feature acceptance",
+        description="Traceable observable conditions required for acceptance and planning",
+    )
+    technical_context: list[ProductSpecificationStatement] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Optional technical facts supplied by Jira or learned during discovery",
     )
     assumptions: list[ProductSpecificationStatement] = Field(
         default_factory=list,
         max_length=128,
         description="Explicit assumptions requiring later human confirmation",
     )
-    risks: list[ProductSpecificationStatement] = Field(
-        default_factory=list,
-        max_length=128,
-        description="Traceable risks or explicitly assumed risks",
-    )
     unresolved_questions: list[ProductSpecificationStatement] = Field(
         default_factory=list,
         max_length=128,
         description="Explicit questions that must not be treated as settled requirements",
     )
-    personas: list[ProductSpecificationStatement] = Field(
-        default_factory=list,
-        max_length=64,
-        description="Version 2 personas whose needs are addressed by the journeys",
-    )
-    user_journeys: list[ProductSpecificationStatement] = Field(
-        default_factory=list,
-        max_length=128,
-        description="Version 2 user or system journeys covered by the contract",
-    )
-    constraints: list[ProductSpecificationStatement] = Field(
-        default_factory=list,
-        max_length=128,
-        description="Version 2 delivery or product constraints",
-    )
-    dependencies: list[ProductSpecificationStatement] = Field(
-        default_factory=list,
-        max_length=128,
-        description="Version 2 external dependencies or explicit absence thereof",
-    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_shape(cls, value: object) -> object:
+        """Read a v1/v2 artifact without retaining its redundant public shape."""
+
+        if not isinstance(value, dict) or "user_story" in value:
+            return value
+        migrated = dict(value)
+
+        def without_requirement_links(statement: object) -> object:
+            if not isinstance(statement, dict):
+                return statement
+            return {key: item for key, item in statement.items() if key != "requirement_ids"}
+
+        migrated["title"] = without_requirement_links(migrated.get("title"))
+        migrated["user_story"] = without_requirement_links(migrated.get("problem_statement"))
+        outcomes = migrated.get("desired_outcomes")
+        migrated["outcome"] = without_requirement_links(outcomes[0]) if isinstance(outcomes, list) and outcomes else None
+        context_fields = ("in_scope", "out_of_scope", "constraints", "dependencies", "risks")
+        migrated["technical_context"] = [
+            without_requirement_links(statement)
+            for field in context_fields
+            for statement in migrated.get(field, [])
+            if isinstance(statement, dict)
+        ]
+        migrated["acceptance_criteria"] = [
+            without_requirement_links(statement) for statement in migrated.get("acceptance_criteria", [])
+        ]
+        for field in ("assumptions", "unresolved_questions"):
+            migrated[field] = [without_requirement_links(statement) for statement in migrated.get(field, [])]
+        for field in (
+            "problem_statement",
+            "desired_outcomes",
+            "actors",
+            "in_scope",
+            "out_of_scope",
+            "functional_requirements",
+            "non_functional_requirements",
+            "risks",
+            "personas",
+            "user_journeys",
+            "constraints",
+            "dependencies",
+        ):
+            migrated.pop(field, None)
+        return migrated
 
     @model_validator(mode="after")
     def validate_statement_kinds(self) -> "ProductSpecification":
-        """Keep uncertain material visibly separate from claimed requirements."""
+        """Keep product intent compact and uncertain material visibly separate."""
 
         statements = [
             self.title,
-            self.problem_statement,
-            *self.desired_outcomes,
-            *self.actors,
-            *self.in_scope,
-            *self.out_of_scope,
-            *self.functional_requirements,
-            *self.non_functional_requirements,
+            self.user_story,
+            self.outcome,
             *self.acceptance_criteria,
+            *self.technical_context,
             *self.assumptions,
-            *self.risks,
             *self.unresolved_questions,
-            *self.personas,
-            *self.user_journeys,
-            *self.constraints,
-            *self.dependencies,
         ]
         if len({statement.id for statement in statements}) != len(statements):
             raise ValueError("product specification statement IDs must be unique")
         factual = [
             self.title,
-            self.problem_statement,
-            *self.desired_outcomes,
-            *self.actors,
-            *self.in_scope,
-            *self.out_of_scope,
-            *self.functional_requirements,
-            *self.non_functional_requirements,
+            self.user_story,
+            self.outcome,
             *self.acceptance_criteria,
-            *self.risks,
-            *self.personas,
-            *self.user_journeys,
-            *self.constraints,
-            *self.dependencies,
+            *self.technical_context,
         ]
         if any(statement.kind is not ProductSpecificationStatementKind.SOURCE for statement in factual):
-            raise ValueError("claimed product requirements and risks must be source-grounded")
-        requirement_ids = set(self.requirement_ids)
-        invalid_acceptance_references = {
-            requirement_id
-            for criterion in self.acceptance_criteria
-            for requirement_id in criterion.requirement_ids
-            if requirement_id not in requirement_ids
-        }
-        if invalid_acceptance_references:
-            raise ValueError(
-                "acceptance criteria reference unknown requirement IDs: "
-                + ", ".join(sorted(invalid_acceptance_references))
-            )
+            raise ValueError("claimed Work Specification fields must be source-grounded")
         if any(statement.kind is not ProductSpecificationStatementKind.ASSUMPTION for statement in self.assumptions):
             raise ValueError("product specification assumptions must be labelled assumptions")
         if any(statement.kind is not ProductSpecificationStatementKind.QUESTION for statement in self.unresolved_questions):
@@ -436,21 +394,12 @@ class ProductSpecification(BaseModel):
 
         statements = [
             self.title,
-            self.problem_statement,
-            *self.desired_outcomes,
-            *self.actors,
-            *self.in_scope,
-            *self.out_of_scope,
-            *self.functional_requirements,
-            *self.non_functional_requirements,
+            self.user_story,
+            self.outcome,
             *self.acceptance_criteria,
+            *self.technical_context,
             *self.assumptions,
-            *self.risks,
             *self.unresolved_questions,
-            *self.personas,
-            *self.user_journeys,
-            *self.constraints,
-            *self.dependencies,
         ]
         invalid_statement_ids = [
             statement.id
@@ -465,12 +414,9 @@ class ProductSpecification(BaseModel):
 
     @property
     def requirement_ids(self) -> list[str]:
-        """Return the stable requirement IDs that a generated plan must cover."""
+        """Return the acceptance criteria that a generated plan must cover."""
 
-        return [
-            *(statement.id for statement in self.functional_requirements),
-            *(statement.id for statement in self.non_functional_requirements),
-        ]
+        return [statement.id for statement in self.acceptance_criteria]
 
 
 class SpecificationEvaluationReadiness(StrEnum):
@@ -595,6 +541,13 @@ class ImplementationApprovalDecision(StrEnum):
     APPROVE = "approve"
     REJECT = "reject"
     REQUEST_REVISION = "request_revision"
+
+
+class OperatorRefinementGate(StrEnum):
+    """The approval gate that supplied an operator refinement."""
+
+    PLAN = "plan"
+    IMPLEMENTATION = "implementation"
 
 
 class PlanningRunSubmission(BaseModel):
@@ -1840,6 +1793,7 @@ class WorkbenchActionId(StrEnum):
     REFINE_PRODUCT_SPECIFICATION = "refine_product_specification"
     GENERATE_PLAN = "generate_plan"
     CANCEL_PLANNING_RUN = "cancel_planning_run"
+    REDRIVE_IMPLEMENTATION = "redrive_implementation"
 
 
 class WorkbenchActionSummary(BaseModel):
@@ -1870,6 +1824,16 @@ class WorkbenchApprovalSummary(BaseModel):
     created_at: str
     delivered: bool
     mcp_selection: list[McpToolSelection] | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class WorkbenchOperatorFeedback(BaseModel):
+    """Explicit operator direction that the next planning revision must honor."""
+
+    feedback_id: str = Field(description="Immutable approval-decision identity")
+    source_gate: OperatorRefinementGate = Field(description="Gate where the refinement was requested")
+    comment: str = Field(min_length=1, max_length=10_000, description="Operator-provided refinement direction")
+    actor_id: str = Field(min_length=1, max_length=512, description="Authenticated operator who requested refinement")
+    created_at: str = Field(min_length=1, description="ISO 8601 refinement timestamp")
 
 
 class WorkbenchSpecificationEvaluationWaiverSummary(BaseModel):
@@ -2000,6 +1964,10 @@ class WorkbenchRunResponse(BaseModel):
         default=None,
         pattern=r"^[a-f0-9]{64}$",
         description="Evaluation digest selected with the product specification for planning",
+    )
+    operator_feedback: WorkbenchOperatorFeedback | None = Field(
+        default=None,
+        description="Active explicit operator direction being incorporated into the next plan",
     )
     available_actions: list[WorkbenchActionSummary] = Field(
         default_factory=list,
@@ -2348,6 +2316,10 @@ class AuditLogResponse(BaseModel):
     availability: str = Field(pattern=r"^(available|disabled|unavailable|not_available)$")
     lines: list[AuditLogLineResponse] = Field(default_factory=list, max_length=200)
     next_cursor: str | None = None
+    tail_cursor: str | None = Field(
+        default=None,
+        description="Exclusive opaque cursor used to retrieve newer correlated output while an operator tails an invocation",
+    )
 
 
 class RunEnvelope(BaseModel):

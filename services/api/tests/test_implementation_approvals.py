@@ -67,3 +67,41 @@ async def test_rejected_implementation_never_enters_finalizing(
 
     assert response.status_code == 202
     assert supervisor_store.planning_runs[run_id].status is PlanningRunStatus.REJECTED
+
+
+async def test_implementation_revision_returns_to_planning_with_operator_feedback(
+    client, valid_plan: dict, planner, supervisor_store: InMemorySupervisorStore
+) -> None:
+    """Delivery feedback must become a planner input, never a queued implementation retry."""
+
+    run_id, digest = await _awaiting_implementation(client, valid_plan, supervisor_store)
+
+    response = client.post(
+        f"/api/v1/runs/{run_id}/approvals/implementation",
+        json={
+            "decision": "request_revision",
+            "artifact_sha256": digest,
+            "comment": "Add Pydantic, mypy, and Ruff before delivery.",
+        },
+        headers={"Authorization": "Bearer operator-test-token", "Idempotency-Key": "implementation-revision"},
+    )
+
+    assert response.status_code == 202
+    assert supervisor_store.planning_runs[run_id].status is PlanningRunStatus.PLANNING
+    workbench = client.get(f"/api/v1/workbench/runs/{run_id}")
+    assert workbench.status_code == 200
+    assert workbench.json()["operator_feedback"] == {
+        "feedback_id": response.json()["decision_id"],
+        "source_gate": "implementation",
+        "comment": "Add Pydantic, mypy, and Ruff before delivery.",
+        "actor_id": "test-operator",
+        "created_at": workbench.json()["operator_feedback"]["created_at"],
+    }
+
+    replanned = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
+
+    assert replanned.status_code == 200
+    assert planner.contexts[-1].operator_refinement is not None
+    assert planner.contexts[-1].operator_refinement.source_gate == "implementation"
+    assert planner.contexts[-1].operator_refinement.comment == "Add Pydantic, mypy, and Ruff before delivery."
+    assert (await supervisor_store.get_active_operator_refinement(run_id)) is None

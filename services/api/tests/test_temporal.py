@@ -34,7 +34,7 @@ class _FakeClient:
 
 
 @pytest.mark.asyncio
-async def test_temporal_approval_uses_the_durable_decision_id_as_update_id() -> None:
+async def test_temporal_approval_uses_workflow_decision_id_not_temporal_update_id() -> None:
     handle = _FakeHandle()
     starter = TemporalRunStarter("temporal:7233", "default", "tasks")
     starter._client = _FakeClient(handle)  # type: ignore[assignment]
@@ -43,7 +43,7 @@ async def test_temporal_approval_uses_the_durable_decision_id_as_update_id() -> 
     accepted = await starter.submit_plan_approval("run-1:plan:1:abcdef", decision)
 
     assert accepted is True
-    assert handle.calls == [("submit_plan_approval", decision, "decision-1")]
+    assert handle.calls == [("submit_plan_approval", decision, None)]
 
 
 @pytest.mark.asyncio
@@ -66,7 +66,7 @@ async def test_temporal_mcp_selection_uses_the_versioned_worker_update() -> None
     }
 
     assert await starter.submit_plan_approval("run-1:plan:1:abcdef", decision) is True
-    assert handle.calls == [("submit_plan_approval_with_mcp_selection", decision, "decision-mcp-1")]
+    assert handle.calls == [("submit_plan_approval_with_mcp_selection", decision, None)]
 
 
 @pytest.mark.asyncio
@@ -78,7 +78,7 @@ async def test_temporal_resolved_gate_uses_the_sdk_multi_argument_shape() -> Non
 
     assert await starter.submit_workflow_gate("run-1:plan:1:abcdef", "plan_scope_review", decision) is True
     assert handle.gate_calls == [
-        ("submit_workflow_gate", ["plan_scope_review", decision], "decision-gate-1")
+        ("submit_workflow_gate", ["plan_scope_review", decision], None)
     ]
 
 

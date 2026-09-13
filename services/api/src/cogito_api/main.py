@@ -26,6 +26,7 @@ from .dag import validate_constraints, validate_phase_dag, validate_spec_referen
 from .models import (
     AgentRunResponse,
     AgentRunStatus,
+    AiPlan,
     ArtifactReference,
     AuditLogLineResponse,
     AuditLogResponse,
@@ -102,6 +103,7 @@ from .models import (
     WorkbenchFeedbackResponse,
     WorkbenchMcpCapabilities,
     WorkbenchMcpCapabilityState,
+    WorkbenchOperatorFeedback,
     WorkbenchProjectListResponse,
     WorkbenchProjectResponse,
     WorkbenchRunListResponse,
@@ -131,6 +133,7 @@ from .planner import (
     Planner,
     PlannerError,
     PlannerOutputError,
+    OperatorRefinement,
     PlanningContext,
     ProductSpecificationContext,
 )
@@ -438,7 +441,9 @@ def create_app(
     ) -> None:
         """Apply the template's actor-separation rule to governed runs only."""
 
-        resolution = await workflow_configuration_store.get_run_resolution(record.run_id)
+        resolution = await workflow_configuration_store.get_run_resolution(
+            record.run_id, workflow_id=record.workflow_id
+        )
         admission = await workflow_configuration_store.get_run_admission(record.run_id) if resolution is None else None
         if resolution is None and admission is None:
             return  # Legacy planning runs retain their historic approval semantics.
@@ -457,7 +462,9 @@ def create_app(
     ) -> None:
         """Authorize a decision against the immutable gate, not a route name."""
 
-        resolution = await workflow_configuration_store.get_run_resolution(record.run_id)
+        resolution = await workflow_configuration_store.get_run_resolution(
+            record.run_id, workflow_id=record.workflow_id
+        )
         admission = await workflow_configuration_store.get_run_admission(record.run_id) if resolution is None else None
         if resolution is None and admission is None:
             raise HTTPException(status_code=409, detail="resolved workflow is not available for this run")
@@ -481,7 +488,9 @@ def create_app(
     ) -> PlanApprovalResponse:
         """Record the plan adapter behind a resolved schema gate."""
 
-        if await workflow_configuration_store.get_run_resolution(record.run_id) is not None:
+        if await workflow_configuration_store.get_run_resolution(
+            record.run_id, workflow_id=record.workflow_id
+        ) is not None:
             await require_resolved_gate(record, principal, "plan_scope_review", request_body.decision.value)
         else:
             await enforce_resolved_gate_separation(record, principal, "plan_scope_review")
@@ -534,7 +543,9 @@ def create_app(
     ) -> ImplementationApprovalResponse:
         """Record the delivery adapter behind a resolved schema gate."""
 
-        if await workflow_configuration_store.get_run_resolution(record.run_id) is not None:
+        if await workflow_configuration_store.get_run_resolution(
+            record.run_id, workflow_id=record.workflow_id
+        ) is not None:
             await require_resolved_gate(record, principal, "delivery_review", request_body.decision.value)
         else:
             await enforce_resolved_gate_separation(record, principal, "delivery_review")
@@ -870,7 +881,7 @@ def create_app(
             )
         submitted_at = datetime.now(timezone.utc).isoformat()
         source_text = _source_specification_contract(
-            goal=submission.resolved_work_specification.objective,
+            goal=submission.resolved_work_specification.user_story,
             target_repos=admission.binding.target_repos,
             spec_set=admission.binding.spec_set,
             constraints=constraints,
@@ -1251,6 +1262,18 @@ def create_app(
                 )
             except (PlanStoreUnavailableError, ValueError) as error:
                 raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
+            refinement = await supervisor_store.get_active_operator_refinement(run_id)
+            base_plan: AiPlan | None = None
+            if refinement is not None and refinement.base_plan_artifact is not None:
+                try:
+                    base_plan = AiPlan.model_validate_json(
+                        store.get_verified_artifact(refinement.base_plan_artifact, max_bytes=MAX_PRODUCT_SPECIFICATION_BYTES)
+                    )
+                except (PlanStoreUnavailableError, ValueError) as error:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="the prior approved plan is temporarily unavailable for refinement",
+                    ) from error
             try:
                 generated_plan = await planner.generate(
                     PlanningContext(
@@ -1259,6 +1282,16 @@ def create_app(
                         spec_set=record.spec_set,
                         constraints=record.constraints,
                         requirement_ids=tuple(selected_specification.requirement_ids),
+                        operator_refinement=(
+                            OperatorRefinement(
+                                refinement_id=refinement.refinement_id,
+                                source_gate=refinement.source_gate,
+                                comment=refinement.comment,
+                            )
+                            if refinement is not None
+                            else None
+                        ),
+                        base_plan=base_plan,
                     ),
                     planner_resolution.gateway,
                 )
@@ -1294,6 +1327,8 @@ def create_app(
                     expected_product_specification_revision=record.selected_product_specification_revision,
                     expected_product_specification_sha256=record.selected_product_specification_artifact.sha256,
                 )
+                if refinement is not None:
+                    await supervisor_store.clear_active_operator_refinement(run_id, refinement.refinement_id)
             except ValueError:
                 # A concurrent caller may have persisted the active immutable
                 # plan after this caller read the planning record. Converge on
@@ -1377,7 +1412,7 @@ def create_app(
                 }
                 activation_text = "\n".join(
                     statement.text
-                    for statement in selected_specification.constraints + selected_specification.risks
+                    for statement in selected_specification.technical_context
                 ).casefold()
                 for phase in admission.template.phases:
                     gateway = gateway_by_role.get(phase.agent_role)
@@ -1470,7 +1505,9 @@ def create_app(
                     resolved_workflow_artifact = store.put_resolved_workflow(updated.run_id, resolved_workflow)
                 except PlanStoreUnavailableError as error:
                     raise HTTPException(status_code=503, detail="resolved workflow storage is temporarily unavailable") from error
-                await workflow_configuration_store.put_run_resolution(resolved_workflow)
+                await workflow_configuration_store.put_run_resolution(
+                    resolved_workflow, workflow_id=updated.workflow_id
+                )
             await starter.start_run(
                 RunEnvelope(
                     run_id=updated.run_id,
@@ -1677,6 +1714,95 @@ def create_app(
             raise HTTPException(status_code=409, detail="planning run is not eligible for cancellation") from error
         planning_generation_dispatcher.cancel(run_id)
         return JSONResponse(content=_planning_run_response(cancelled).model_dump(mode="json"))
+
+    @app.post("/api/v1/planning-runs/{run_id}/redrive-implementation")
+    async def redrive_failed_implementation(
+        run_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        """Retry a failed execution from its approved immutable plan evidence."""
+
+        principal = await authenticator.authenticate(authorization)
+        authenticator.require_approver(principal)
+        record = await supervisor_store.get_planning_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="planning run not found")
+        require_workbench_scope(record, principal)
+        if (
+            record.plan_artifact is None
+            or record.workflow_id is None
+            or record.selected_product_specification_artifact is None
+            or record.selected_specification_evaluation_artifact is None
+        ):
+            raise HTTPException(status_code=409, detail="failed implementation is missing immutable execution evidence")
+        redrive_started = False
+        try:
+            selected_specification = ProductSpecification.model_validate_json(
+                store.get_verified_artifact(
+                    record.selected_product_specification_artifact,
+                    max_bytes=MAX_PRODUCT_SPECIFICATION_BYTES,
+                )
+            )
+            approved_plan = AiPlan.model_validate_json(
+                store.get_verified_artifact(record.plan_artifact, max_bytes=MAX_PRODUCT_SPECIFICATION_BYTES)
+            )
+            resolutions = await resolve_roles(
+                record.run_id,
+                ["planner", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
+                record.project_id or settings.workbench_default_project_id,
+                record.target_repos,
+            )
+            resolved_workflow = await workflow_configuration_store.get_run_resolution(
+                record.run_id, workflow_id=record.workflow_id
+            )
+            resolved_workflow_artifact = (
+                store.put_resolved_workflow(record.run_id, resolved_workflow) if resolved_workflow is not None else None
+            )
+            carrier: dict[str, str] = {}
+            telemetry.inject(carrier)
+            redriven = await supervisor_store.redrive_failed_implementation(run_id)
+            redrive_started = True
+            await starter.start_run(
+                RunEnvelope(
+                    run_id=redriven.run_id,
+                    plan_ref=redriven.plan_artifact.ref,
+                    plan_sha256=redriven.plan_artifact.sha256,
+                    spec_ref=redriven.spec_set,
+                    target_repos=redriven.target_repos,
+                    constraints=redriven.constraints,
+                    priority=redriven.priority,
+                    submitted_at=redriven.submitted_at,
+                    submitted_by=redriven.submitted_by,
+                    workflow_id=redriven.workflow_id,
+                    requires_plan_approval=False,
+                    requires_implementation_approval=True,
+                    specification_evaluation_sha256=redriven.selected_specification_evaluation_artifact.sha256,
+                    specification_requirement_ids=tuple(
+                        sorted({requirement_id for phase in approved_plan.phases for requirement_id in phase.requirement_ids})
+                    ),
+                    registry_resolutions=resolutions,
+                    workflow_template_ref=resolved_workflow.template_ref if resolved_workflow else None,
+                    workflow_policy_ref=resolved_workflow.policy_ref if resolved_workflow else None,
+                    workflow_resolution_ref=resolved_workflow_artifact.ref if resolved_workflow_artifact else None,
+                    workflow_resolution_sha256=resolved_workflow_artifact.sha256 if resolved_workflow_artifact else None,
+                    workflow_required_gate_ids=[gate.id for gate in resolved_workflow.gates] if resolved_workflow else [],
+                    traceparent=carrier.get("traceparent"),
+                    tracestate=carrier.get("tracestate"),
+                )
+            )
+        except ValueError as error:
+            if redrive_started:
+                await supervisor_store.abort_implementation_redrive(run_id, "implementation retry could not be started")
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (PlanStoreUnavailableError, RegistryConflictError, RegistryAuthorizationError) as error:
+            if redrive_started:
+                await supervisor_store.abort_implementation_redrive(run_id, "implementation retry could not reach a required platform service")
+            raise HTTPException(status_code=503, detail="implementation retry could not reach a required platform service") from error
+        except Exception as error:
+            if redrive_started:
+                await supervisor_store.abort_implementation_redrive(run_id, "implementation retry could not be started")
+            raise HTTPException(status_code=503, detail="implementation retry could not be started; retry the request") from error
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=_planning_run_response(redriven).model_dump(mode="json"))
 
     @app.post("/api/v1/planning-runs/{run_id}/select-product-specification")
     async def select_product_specification(
@@ -1962,7 +2088,9 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="planning run not found")
         require_workbench_scope(record, principal)
-        resolved_workflow = await workflow_configuration_store.get_run_resolution(run_id)
+        resolved_workflow = await workflow_configuration_store.get_run_resolution(
+            run_id, workflow_id=record.workflow_id
+        )
         if resolved_workflow is None:
             raise HTTPException(status_code=404, detail="resolved workflow is not available")
         return JSONResponse(content=resolved_workflow.model_dump(mode="json"))
@@ -2278,6 +2406,7 @@ def create_app(
         if active_gate is not None:
             workflow.append(f"{active_gate.value}_approval")
         agent_run = await supervisor_store.get_agent_run(record.run_id)
+        operator_refinement = await supervisor_store.get_active_operator_refinement(record.run_id)
         stages = workbench_stages(record, active_gate, agent_run.status if agent_run is not None else None)
         return WorkbenchRunResponse(
             run_id=record.run_id,
@@ -2296,6 +2425,17 @@ def create_app(
             selected_specification_evaluation_sha256=(
                 record.selected_specification_evaluation_artifact.sha256
                 if record.selected_specification_evaluation_artifact is not None
+                else None
+            ),
+            operator_feedback=(
+                WorkbenchOperatorFeedback(
+                    feedback_id=operator_refinement.refinement_id,
+                    source_gate=operator_refinement.source_gate,
+                    comment=operator_refinement.comment,
+                    actor_id=operator_refinement.actor_id,
+                    created_at=operator_refinement.created_at,
+                )
+                if operator_refinement is not None
                 else None
             ),
             available_actions=workbench_available_actions(record, can_approve="approve" in abilities),
@@ -2319,6 +2459,19 @@ def create_app(
     ) -> list[WorkbenchActionSummary]:
         """Declare the next permitted product-specification actions without client inference."""
 
+        if can_approve and record.status is PlanningRunStatus.IMPLEMENTATION_FAILED:
+            return [
+                WorkbenchActionSummary(
+                    action_id=WorkbenchActionId.REDRIVE_IMPLEMENTATION,
+                    stage_id="implementation",
+                    label="Retry implementation",
+                    description=(
+                        "Retry the failed execution with the same approved immutable plan. "
+                        "This does not change the Work Specification or plan approval."
+                    ),
+                    requires_confirmation=True,
+                )
+            ]
         if not can_approve or record.status is not PlanningRunStatus.PLANNING:
             return []
         if record.product_specification_artifact is None:
@@ -2791,6 +2944,19 @@ def create_app(
     def workbench_activity(event_type: str, payload: dict[str, object]) -> tuple[str, str | None, bool]:
         """Project one server-owned activity classification without exposing correlation identifiers."""
 
+        if event_type == "stage_invocation_started":
+            invocation = payload.get("invocation")
+            role = invocation.get("role") if isinstance(invocation, dict) else None
+            invocation_id = invocation.get("invocation_id") if isinstance(invocation, dict) else None
+            stage_id = invocation.get("stage_id") if isinstance(invocation, dict) else None
+            attempt = invocation.get("attempt") if isinstance(invocation, dict) else None
+            actor_label = role.replace("_", " ").title() if isinstance(role, str) else "Agent"
+            if isinstance(stage_id, str) and stage_id.startswith("phase-") and stage_id[6:].isdigit():
+                actor_label = f"{actor_label} · Phase {stage_id[6:]}"
+                if isinstance(attempt, int) and attempt > 0:
+                    actor_label = f"{actor_label} · Attempt {attempt}"
+            return "agent", actor_label, isinstance(invocation_id, str) and len(invocation_id) == 64
+
         persisted = payload.get("activity")
         if isinstance(persisted, dict):
             kind = persisted.get("kind")
@@ -2799,12 +2965,6 @@ def create_app(
             if kind in {"event", "agent", "mcp"} and isinstance(log_evidence_available, bool):
                 return kind, actor_label[:384] if isinstance(actor_label, str) else None, log_evidence_available
 
-        if event_type == "stage_invocation_started":
-            invocation = payload.get("invocation")
-            role = invocation.get("role") if isinstance(invocation, dict) else None
-            invocation_id = invocation.get("invocation_id") if isinstance(invocation, dict) else None
-            actor_label = role.replace("_", " ").title() if isinstance(role, str) else "Agent"
-            return "agent", actor_label, isinstance(invocation_id, str) and len(invocation_id) == 64
         if event_type in {"planning_agent_started", "planning_agent_failed"}:
             return "agent", "Planner", False
         if event_type == "mcp_invocation_observed":
@@ -2848,13 +3008,17 @@ def create_app(
         if event_type == "plan_approval_recorded":
             return {
                 "approve": ["plan_approval", "implementation"],
-                "request_revision": ["plan_approval", "planning"],
+                "request_revision": ["plan_approval", "work_specification", "planning"],
                 "reject": ["plan_approval"],
             }.get(decision, ["plan_approval"])
         if event_type == "implementation_approval_requested":
             return ["implementation", "implementation_approval"]
         if event_type == "implementation_approval_recorded":
-            return ["implementation_approval"]
+            return {
+                "request_revision": ["implementation_approval", "work_specification", "planning"],
+            }.get(decision, ["implementation_approval"])
+        if event_type == "stage_invocation_started":
+            return ["implementation"]
         return []
 
     async def workbench_timeline_response(record: PlanningRunRecord) -> WorkbenchTimelineResponse:
@@ -2872,10 +3036,26 @@ def create_app(
                 return None
 
         events = await supervisor_store.list_coordination_events(record.run_id, limit=100)
+        terminal_status_by_invocation: dict[str, AgentRunStatus] = {}
+        for event, _delivered, _attempts, _last_error in events:
+            if event.event_type != "stage_invocation_finished":
+                continue
+            invocation = event.payload.get("invocation")
+            result = event.payload.get("result")
+            invocation_id = invocation.get("invocation_id") if isinstance(invocation, dict) else None
+            terminal_status = result.get("status") if isinstance(result, dict) else None
+            if isinstance(invocation_id, str) and terminal_status == "succeeded":
+                terminal_status_by_invocation[invocation_id] = AgentRunStatus.SUCCEEDED
+            elif isinstance(invocation_id, str) and terminal_status == "failed":
+                terminal_status_by_invocation[invocation_id] = AgentRunStatus.FAILED
         items = []
         for event, delivered, attempts, _last_error in events:
+            if event.event_type == "stage_invocation_finished":
+                continue
             stage_ids = workbench_stage_ids(event.event_type, event.payload, event.decision)
             activity_kind, actor_label, log_evidence_available = workbench_activity(event.event_type, event.payload)
+            invocation = event.payload.get("invocation")
+            invocation_id = invocation.get("invocation_id") if isinstance(invocation, dict) else None
             items.append(
                 WorkbenchTimelineEvent(
                     event_id=event.event_id,
@@ -2889,7 +3069,12 @@ def create_app(
                     gate=workbench_gate(event.gate),
                     artifact_sha256=event.artifact_sha256,
                     decision=workbench_plan_decision(event.decision),
-                    lifecycle_status=workbench_agent_status(event.lifecycle_status),
+                    lifecycle_status=(
+                        terminal_status_by_invocation.get(invocation_id)
+                        if isinstance(invocation_id, str)
+                        else workbench_agent_status(event.lifecycle_status)
+                    )
+                    or workbench_agent_status(event.lifecycle_status),
                     message=event.payload.get("message") if isinstance(event.payload.get("message"), str) else None,
                     planning_failure=planning_failure_summary(event.payload),
                     delivered=delivered,
@@ -3139,6 +3324,7 @@ def create_app(
         run_id: str,
         event_id: str,
         cursor: str | None = None,
+        tail_after: str | None = None,
         authorization: str | None = Header(default=None),
     ) -> JSONResponse:
         """Return bounded, redacted logs for exactly one authorized invocation event."""
@@ -3159,16 +3345,24 @@ def create_app(
         )
         if event is None:
             raise HTTPException(status_code=404, detail="audit event not found")
+        if cursor is not None and tail_after is not None:
+            raise HTTPException(status_code=422, detail="cursor and tail_after cannot be used together")
         invocation = event.payload.get("invocation")
         invocation_id = invocation.get("invocation_id") if isinstance(invocation, dict) else None
         if event.event_type != "stage_invocation_started" or not isinstance(invocation_id, str):
             return JSONResponse(content=AuditLogResponse(availability="not_available", lines=[]).model_dump(mode="json"))
-        page = await audit_log_reader.read_invocation(invocation_id, cursor, occurred_at=event.occurred_at)
+        if tail_after is not None:
+            page = await audit_log_reader.read_invocation(
+                invocation_id, occurred_at=event.occurred_at, tail_after=tail_after
+            )
+        else:
+            page = await audit_log_reader.read_invocation(invocation_id, cursor, occurred_at=event.occurred_at)
         return JSONResponse(
             content=AuditLogResponse(
                 availability=page.availability,
                 lines=[AuditLogLineResponse(**line.__dict__) for line in page.lines],
                 next_cursor=page.next_cursor,
+                tail_cursor=page.tail_cursor,
             ).model_dump(mode="json")
         )
 
