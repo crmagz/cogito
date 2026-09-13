@@ -488,6 +488,7 @@ class DeveloperRunWorkflow:
                                         traceparent=envelope.traceparent,
                                         tracestate=envelope.tracestate,
                                         agent_role=implementation_role,
+                                        audit_attempt=envelope.implementation_attempt,
                                     )
                                 ],
                                 start_to_close_timeout=remaining,

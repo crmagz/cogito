@@ -2410,6 +2410,11 @@ class RunEnvelope(BaseModel):
         default=False,
         description="Whether converged implementation evidence must receive a human decision before finalization",
     )
+    implementation_attempt: int = Field(
+        default=1,
+        ge=1,
+        description="One-based implementation execution attempt used to keep redrive audit streams distinct",
+    )
     specification_evaluation_sha256: str | None = Field(
         default=None,
         pattern=r"^[a-f0-9]{64}$",

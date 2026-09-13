@@ -166,11 +166,11 @@ def test_accept_product_specification_evaluates_and_selects_a_ready_current_revi
     assert body["status"] == "planning"
     workbench = client.get(f"/api/v1/workbench/runs/{run_id}")
     stages = {stage["stage_id"]: stage for stage in workbench.json()["stages"]}
-    assert stages["planning"]["state"] == "queued"
+    assert stages["planning"]["state"] == "in_progress"
     assert stages["plan_approval"]["state"] == "unavailable"
 
 
-def test_workbench_projects_only_a_running_planner_as_planning_in_progress(
+def test_workbench_projects_accepted_specification_as_planning_in_progress(
     client: TestClient, valid_plan: dict, supervisor_store: InMemorySupervisorStore
 ) -> None:
     run_id = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan)).json()["run_id"]
@@ -186,8 +186,8 @@ def test_workbench_projects_only_a_running_planner_as_planning_in_progress(
     )
     assert accepted.status_code == 200
 
-    queued = client.get(f"/api/v1/workbench/runs/{run_id}").json()
-    assert {stage["stage_id"]: stage for stage in queued["stages"]}["planning"]["state"] == "queued"
+    accepted_projection = client.get(f"/api/v1/workbench/runs/{run_id}").json()
+    assert {stage["stage_id"]: stage for stage in accepted_projection["stages"]}["planning"]["state"] == "in_progress"
 
     claims = asyncio.run(supervisor_store.claim_planning_generation_deliveries(limit=1, lease_seconds=60))
     assert len(claims) == 1
@@ -923,13 +923,24 @@ def test_generate_plan_reports_retryable_temporal_start_failure(
 
 
 def test_revision_reopens_planning_with_a_new_artifact_and_workflow(
-    client: TestClient, valid_plan: dict, planner: FakePlanner, starter: FakeRunStarter
+    client: TestClient, valid_plan: dict, planner: FakePlanner, starter: FakeRunStarter, supervisor_store: InMemorySupervisorStore
 ) -> None:
     submitted = client.post("/api/v1/planning-runs", json=_planning_request(valid_plan))
     run_id = submitted.json()["run_id"]
     _select_product_specification(client, run_id)
     first = client.post(f"/api/v1/planning-runs/{run_id}/generate-plan")
     first_digest = first.json()["plan_artifact"]["sha256"]
+    supervisor_store._append_coordination_event(
+        run_id,
+        "stage_invocation_started",
+        agent_binding={
+            "agent_run_id": "a" * 64,
+            "registration_id": "python_coding",
+            "role": "python_coding",
+            "environment_id": "environment-1",
+            "attempt": 1,
+        },
+    )
     revision = client.post(
         f"/api/v1/runs/{run_id}/approvals/plan",
         json={"decision": "request_revision", "artifact_sha256": first_digest, "comment": "Narrow the scope."},
@@ -959,6 +970,8 @@ def test_revision_reopens_planning_with_a_new_artifact_and_workflow(
     assert second_digest != first_digest
     assert len(starter.started_runs) == 2
     assert starter.started_runs[0].workflow_id != starter.started_runs[1].workflow_id
+    assert starter.started_runs[0].implementation_attempt == 1
+    assert starter.started_runs[1].implementation_attempt == 2
     stale = client.post(
         f"/api/v1/runs/{run_id}/approvals/plan",
         json={"decision": "approve", "artifact_sha256": first_digest},

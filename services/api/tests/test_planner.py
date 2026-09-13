@@ -12,9 +12,11 @@ from cogito_api.planner import (
     LiteLLMPlanner,
     OperatorRefinement,
     PlannerError,
+    PlannerOutputError,
     PlanningContext,
     ProductSpecificationContext,
     assemble_agent_plan_draft,
+    validate_agent_plan_draft,
 )
 
 from .conftest import make_settings
@@ -74,6 +76,7 @@ def test_planning_agent_prompt_requires_project_scoped_uv_verification(valid_pla
     assert "uv run pytest" in prompt
     assert "uv run python -c" in prompt
     assert "Never use bare `python`" in prompt
+    assert "do not assert an invented `python-version` field" in prompt
     assert "Never create a phase for any of those activities" in prompt
     assert "Every returned phase must own at least one supplied requirement ID" in prompt
 
@@ -129,6 +132,81 @@ def test_agent_plan_draft_converts_repeated_ownership_to_verification(valid_plan
         assignment.requirement_id == "acceptance-1" and assignment.relationship.value == "verifies"
         for assignment in phase.requirement_assignments
     )
+
+
+def test_agent_plan_draft_rejects_nonportable_uv_lock_python_version_check(valid_plan: dict) -> None:
+    """Workspace-handoff planners cannot freeze an obsolete uv lockfile schema."""
+
+    candidate = planner_draft(valid_plan)
+    candidate["phases"][0]["verification"] = [
+        'test -f uv.lock && grep -q \'python-version = "3.14"\' uv.lock'
+    ]
+    expected = AiPlan.model_validate(valid_plan)
+    context = PlanningContext(
+        initial_specification="Scaffold a uv-managed Python project.",
+        target_repos=expected.target_repos,
+        spec_set=expected.spec_set,
+        constraints=expected.constraints,
+        requirement_ids=("acceptance-1", "acceptance-2"),
+    )
+
+    plan = assemble_agent_plan_draft(json.dumps(candidate), context)
+
+    with pytest.raises(PlannerOutputError):
+        validate_agent_plan_draft(plan, context, make_settings())
+
+
+def test_agent_plan_draft_drops_free_text_optional_trace_references(valid_plan: dict) -> None:
+    """The source requirement IDs remain authoritative over agent prose metadata."""
+
+    candidate = planner_draft(valid_plan)
+    candidate["phases"][0]["requirement_assignments"] = [
+        {
+            "requirement_id": "acceptance-1",
+            "relationship": "verifies",
+            "acceptance_criterion_ids": ["all new files staged for commit"],
+        }
+    ]
+    expected = AiPlan.model_validate(valid_plan)
+    plan = assemble_agent_plan_draft(
+        json.dumps(candidate),
+        PlanningContext(
+            initial_specification="Add a rate limiter.",
+            target_repos=expected.target_repos,
+            spec_set=expected.spec_set,
+            constraints=expected.constraints,
+            requirement_ids=("acceptance-1", "acceptance-2"),
+        ),
+    )
+
+    assignment = next(item for item in plan.phases[0].requirement_assignments if item.relationship.value == "verifies")
+    assert assignment.acceptance_criterion_ids == []
+
+
+def test_agent_plan_draft_attaches_required_operator_refinement_metadata(valid_plan: dict) -> None:
+    """An additive replacement cannot fail just because the agent omits gate bookkeeping."""
+
+    candidate = planner_draft(valid_plan)
+    expected = AiPlan.model_validate(valid_plan)
+    refinement = OperatorRefinement(
+        refinement_id="refinement-1",
+        source_gate="plan",
+        comment="Add Ruff without weakening the existing delivery contract.",
+    )
+    context = PlanningContext(
+        initial_specification="Add a rate limiter.",
+        target_repos=expected.target_repos,
+        spec_set=expected.spec_set,
+        constraints=expected.constraints,
+        requirement_ids=("acceptance-1", "acceptance-2"),
+        operator_refinement=refinement,
+        base_plan=expected,
+    )
+
+    plan = assemble_agent_plan_draft(json.dumps(candidate), context)
+
+    assert plan.operator_feedback_id == refinement.refinement_id
+    assert plan.operator_feedback_response == f"Incorporates operator refinement: {refinement.comment}"
 
 
 async def test_litellm_planner_requests_json_with_dedicated_bearer_key(valid_plan: dict) -> None:

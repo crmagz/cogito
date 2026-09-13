@@ -119,6 +119,30 @@ async def test_review_harness_retries_one_malformed_completion_and_excludes_deve
     assert calls_by_lens == {"correctness": 2, "standards": 2, "blast_radius": 2}
 
 
+async def test_review_harness_records_advisory_when_a_lens_remains_malformed() -> None:
+    """A malformed optional review lens must not discard a verified delivery."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})
+
+    harness = LiteLLMReviewHarness(
+        _Workspaces("diff"),  # type: ignore[arg-type]
+        "http://litellm.test",
+        "reviewer-key",
+        "reviewer-secondary-key",
+        "balanced",
+        "complex",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = await harness.review(_request())
+
+    assert len(result.findings) == 3
+    assert {finding.lens for finding in result.findings} == {"correctness", "standards", "blast_radius"}
+    assert all(finding.severity == "advisory" for finding in result.findings)
+    assert all(finding.file == "REVIEW_UNAVAILABLE" for finding in result.findings)
+
+
 async def test_review_harness_retries_a_transient_litellm_server_error() -> None:
     """A transient model-gateway 500 must not prevent downstream delivery."""
 

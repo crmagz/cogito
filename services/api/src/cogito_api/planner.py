@@ -134,8 +134,24 @@ def assemble_agent_plan_draft(output: str, context: "PlanningContext") -> AiPlan
             "planner agent returned invalid plan draft JSON", code=PlanningFailureCode.INVALID_JSON
         ) from error
     draft = _normalize_agent_requirement_ownership(draft)
+    draft = _normalize_agent_requirement_references(draft, frozenset(context.requirement_ids))
+    draft = _attach_operator_refinement_metadata(draft, context.operator_refinement)
     _validate_explicit_base_removals(draft, context)
     return _assemble_trusted_plan(_merge_base_plan_content(draft, context.base_plan), context)
+
+
+def validate_agent_plan_draft(plan: AiPlan, context: "PlanningContext", settings: Settings) -> None:
+    """Apply the executable-plan contract to a specialist-agent handoff.
+
+    The durable discovery/planner path receives its JSON through a workspace
+    handoff rather than :class:`LiteLLMPlanner`. It must therefore run the
+    same safety checks as the direct LiteLLM path before an immutable plan is
+    recorded. Otherwise an impossible verification can reach implementation
+    and make an unrelated review fail.
+    """
+
+    _validate_generated_plan(plan, context, settings)
+    _validate_requirement_partition(plan, context.requirement_ids)
 
 
 def _normalize_agent_requirement_ownership(draft: PlanDraft) -> PlanDraft:
@@ -181,6 +197,73 @@ def _normalize_agent_requirement_ownership(draft: PlanDraft) -> PlanDraft:
             )
         )
     return draft.model_copy(update={"phases": phases})
+
+
+def _normalize_agent_requirement_references(draft: PlanDraft, known_requirement_ids: frozenset[str]) -> PlanDraft:
+    """Retain only source-authoritative IDs in optional agent trace metadata.
+
+    The planner commonly supplies useful free-text rationale in
+    ``acceptance_criterion_ids``. That field is an ID relation, though, and
+    accepting prose there makes an otherwise valid source-grounded plan fail
+    after the agent handoff. The platform already derives ownership from each
+    phase's ``requirement_ids``; safely drop unknown optional references while
+    preserving every task, criterion, and executable verification command.
+    """
+
+    if not known_requirement_ids:
+        return draft
+    phases: list[PlanPhase] = []
+    for phase in draft.phases:
+        assignments = [
+            assignment.model_copy(
+                update={
+                    "acceptance_criterion_ids": [
+                        criterion_id
+                        for criterion_id in assignment.acceptance_criterion_ids
+                        if criterion_id in known_requirement_ids
+                    ]
+                }
+            )
+            for assignment in phase.requirement_assignments
+            if assignment.requirement_id in known_requirement_ids
+        ]
+        phases.append(
+            phase.model_copy(
+                update={
+                    "requirement_assignments": assignments,
+                    "verification_references": [
+                        requirement_id
+                        for requirement_id in phase.verification_references
+                        if requirement_id in known_requirement_ids
+                    ],
+                }
+            )
+        )
+    return draft.model_copy(update={"phases": phases})
+
+
+def _attach_operator_refinement_metadata(
+    draft: PlanDraft, refinement: "OperatorRefinement" | None
+) -> PlanDraft:
+    """Attach immutable operator feedback facts that an agent may not omit.
+
+    The planner owns delivery decomposition; the refinement identifier and its
+    acknowledgement are control-plane facts. Persisting them server-side keeps
+    a valid additive replacement from failing because an otherwise compliant
+    specialist handoff did not echo bookkeeping fields.
+    """
+
+    if refinement is None:
+        return draft
+    response = draft.operator_feedback_response
+    if not response or not response.strip():
+        response = f"Incorporates operator refinement: {refinement.comment}"[:2_000]
+    return draft.model_copy(
+        update={
+            "operator_feedback_id": refinement.refinement_id,
+            "operator_feedback_response": response,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -286,6 +369,8 @@ class LiteLLMPlanner:
                         "not through an optional or invented tool-specific configuration-table marker such as [tool.uv]. "
                         "For uv, use `uv sync --frozen` as a standalone exit-status check; do not pipe it to grep "
                         "for volatile status text such as 'Resolved' or 'Checked'. "
+                        "Do not require a `python-version` field in uv.lock: modern uv lockfiles express interpreter "
+                        "compatibility with `requires-python`; use `uv sync --frozen` and, if needed, `test -f uv.lock`. "
                         "For a Python project managed by uv, execute test, type-check, and lint verification "
                         "through the project environment using `uv run` (for example, `uv run mypy src/`, "
                         "`uv run ruff check src/`, and `uv run pytest`). Never invoke bare `mypy`, `ruff`, "
@@ -646,6 +731,16 @@ def _validate_generated_plan(
                         message=(
                             "planner verification commands must use uv sync's exit status, "
                             "not grep its volatile status output"
+                        ),
+                    )
+                )
+            if "uv.lock" in normalized_command and "python-version" in normalized_command:
+                violations.append(
+                    Violation(
+                        field="phases",
+                        message=(
+                            "planner verification commands must not require a `python-version` field in uv.lock; "
+                            "modern uv lockfiles express interpreter compatibility through `requires-python`"
                         ),
                     )
                 )

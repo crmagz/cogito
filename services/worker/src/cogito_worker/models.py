@@ -67,6 +67,9 @@ class RunEnvelope:
     submitted_by: str = ""
     requires_plan_approval: bool = False
     requires_implementation_approval: bool = False
+    # A redrive starts a new workflow execution. Preserve the outer attempt so
+    # its phase audit stream cannot collide with the failed execution's stream.
+    implementation_attempt: int = 1
     specification_evaluation_sha256: str | None = None
     specification_requirement_ids: list[str] = field(default_factory=list)
     registry_resolutions: list[RegistrationReference] = field(default_factory=list)
@@ -231,6 +234,7 @@ class PhaseExecutionRequest:
     timeout_seconds: int
     backup_reserve_turns: int = 25
     agent_role: str = "developer"
+    audit_attempt: int = 1
 
     traceparent: str | None = None
     tracestate: str | None = None
