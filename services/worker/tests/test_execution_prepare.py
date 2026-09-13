@@ -55,8 +55,11 @@ def test_clone_repositories_uses_git_argument_list_and_private_destination(
     def fake_run(
         arguments: list[str], *, check: bool, env: dict[str, str], **_: object
     ) -> subprocess.CompletedProcess[str]:
-        assert check is True
         calls.append((arguments, env))
+        if "ls-remote" in arguments:
+            assert check is False
+            return subprocess.CompletedProcess(arguments, 2)
+        assert check is True
         stdout = f"{COMMIT}\n" if arguments[-2:] == ["rev-parse", "HEAD"] else ""
         return subprocess.CompletedProcess(arguments, 0, stdout=stdout)
 
@@ -72,6 +75,26 @@ def test_clone_repositories_uses_git_argument_list_and_private_destination(
     assert any(call[0][-3:] == ["checkout", "-b", "adp/run-1"] for call in calls)
     assert calls[-2][0][-3:] == ["config", "user.name", "Cogito Agent"]
     assert calls[-1][0][-3:] == ["config", "user.email", "cogito@local.invalid"]
+
+
+def test_clone_repositories_resumes_an_existing_run_branch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A revision reuses its published branch instead of recreating it from the pin."""
+
+    calls: list[list[str]] = []
+
+    def fake_run(arguments: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(arguments)
+        stdout = f"{COMMIT}\n" if arguments[-2:] == ["rev-parse", "HEAD"] else ""
+        return subprocess.CompletedProcess(arguments, 0, stdout=stdout)
+
+    monkeypatch.setattr("cogito_worker.execution_prepare.subprocess.run", fake_run)
+
+    clone_repositories([REPOSITORY], tmp_path, ("github.com",), "adp/run-1")
+
+    assert any(call[-5:] == ["ls-remote", "--exit-code", "--heads", "origin", "adp/run-1"] for call in calls)
+    assert any(call[-5:] == ["fetch", "--depth", "1", "origin", "adp/run-1"] for call in calls)
+    assert any(call[-4:] == ["checkout", "-B", "adp/run-1", "FETCH_HEAD"] for call in calls)
+    assert not any(call[-3:] == ["checkout", "-b", "adp/run-1"] for call in calls)
 
 
 def test_clone_repositories_rejects_a_checkout_that_does_not_match_the_pin(

@@ -147,11 +147,34 @@ def clone_repositories(
         ).stdout.strip().lower()
         if checked_out_commit != commit:
             raise WorkspacePreparationError("repository checkout does not match the requested commit SHA")
-        subprocess.run(
-            ["git", "-C", str(destination), "checkout", "-b", feature_branch],
-            check=True,
+        existing_branch = subprocess.run(
+            ["git", "-C", str(destination), "ls-remote", "--exit-code", "--heads", "origin", feature_branch],
+            check=False,
             env=command_environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
+        if existing_branch.returncode == 0:
+            # A plan revision is a continuation of this run, not a second
+            # independent branch from the original pinned commit. Resume the
+            # previously published run branch so a normal fast-forward push
+            # can add the newly approved work.
+            subprocess.run(
+                ["git", "-C", str(destination), "fetch", "--depth", "1", "origin", feature_branch],
+                check=True,
+                env=command_environment,
+            )
+            subprocess.run(
+                ["git", "-C", str(destination), "checkout", "-B", feature_branch, "FETCH_HEAD"],
+                check=True,
+                env=command_environment,
+            )
+        else:
+            subprocess.run(
+                ["git", "-C", str(destination), "checkout", "-b", feature_branch],
+                check=True,
+                env=command_environment,
+            )
         subprocess.run(
             ["git", "-C", str(destination), "config", "user.name", author_name],
             check=True,
