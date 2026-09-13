@@ -18,6 +18,7 @@ with workflow.unsafe.imports_passed_through():
         AgentInvocationResult,
         AgentPathEnvelope,
         AgentPathResult,
+        AgentPathStage,
         BackupExecutionRequest,
         ExecutionRequest,
         ImplementationArtifact,
@@ -81,12 +82,12 @@ def _agent_handoff_prompt(prompt: str, handoffs: dict[str, str]) -> str:
     )
 
 
-def _agent_handoff_file_instruction(stage_id: str) -> str:
+def _agent_handoff_file_instruction(handoff_path: str) -> str:
     """Require a structured handoff file instead of trusting final-response prose."""
 
     return (
         "\n\nBefore finishing, write the complete JSON handoff (and nothing else) to "
-        f"`/workspace/.cogito/handoffs/{stage_id}.json`. Create the parent directory if needed. "
+        f"`{handoff_path}`. Create the parent directory if needed. "
         "The workflow reads that file as the authoritative agent handoff; a prose final response is not sufficient."
     )
 
@@ -193,7 +194,9 @@ class AgentPathWorkflow:
                             workspace=workspace,
                             prompt=(
                                 _agent_handoff_prompt(stage.prompt, handoffs)
-                                + _agent_handoff_file_instruction(stage.stage_id)
+                                + _agent_handoff_file_instruction(
+                                    f"{workspace.workspace_root}/.cogito/handoffs/{stage.stage_id}.json"
+                                )
                             ),
                             max_turns=stage.max_turns,
                             timeout_seconds=envelope.timeout_seconds,
@@ -537,7 +540,9 @@ class DeveloperRunWorkflow:
                             prompt=(
                                 "You are the adversarial-review agent. Inspect the approved feature branch "
                                 "and repository diff for correctness, security, and operational risks. Do not "
-                                "modify files, create commits, push branches, or create external delivery records. "
+                                "modify repository source files, create commits, push branches, or create external "
+                                "delivery records. The required JSON handoff under .cogito/handoffs is the sole "
+                                "permitted filesystem write. "
                                 "Return concise JSON findings with severity, evidence, and verification advice."
                             ),
                             max_turns=min(productive_turns, 16),
@@ -1176,6 +1181,10 @@ async def _review_implementation(
             phase_results=phase_results,
             round_number=round_number,
             review_profile=review_profile,
+            approved_contract=[
+                *[criterion for phase in phases for criterion in phase.acceptance_criteria],
+                *[command for phase in phases for command in phase.verification],
+            ],
         )
         await workflow.execute_activity(
             WorkerActivities.report_status,

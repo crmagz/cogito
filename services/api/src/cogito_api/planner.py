@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from collections import Counter
 from dataclasses import dataclass
@@ -31,6 +32,10 @@ from .models import (
 
 PLANNING_CONTRACT_VERSION = "plan-draft/v2"
 MAX_PLAN_CONTRACT_ATTEMPTS = 3
+_NON_EXECUTABLE_VERIFICATION_PATTERN = re.compile(
+    r"\b(?:completes?|shows?|confirms?|reports?)\b|\bruns\s+(?:successfully|without)\b|\bwithout\s+(?:errors?|warnings?)\b",
+    re.IGNORECASE,
+)
 
 
 class PlannerError(Exception):
@@ -285,6 +290,9 @@ class LiteLLMPlanner:
                         "`uv run ruff check src/`, and `uv run pytest`). Never invoke bare `mypy`, `ruff`, "
                         "`pytest`, or `python -m pytest`, because the execution environment does not add the "
                         "project virtual environment to PATH. "
+                        "When a plan verifies `uv sync --frozen` followed by `uv run pytest`, its tasks must "
+                        "require pytest as a development dependency synchronized by default (such as uv's "
+                        "dependency group), not solely as an optional extra. "
                         "Cogito enforces gates and approvals outside of executable phases. "
                         "Do not return target repositories, spec-set identity, execution constraints, or evaluation "
                         "provenance: Cogito adds that trusted envelope after validation. Treat the work "
@@ -620,6 +628,16 @@ def _validate_generated_plan(
                     )
                 )
             normalized_command = command.lower()
+            if _is_non_executable_verification(command):
+                violations.append(
+                    Violation(
+                        field="phases",
+                        message=(
+                            "planner verification entries must be directly executable shell commands, "
+                            "not natural-language descriptions of an expected result"
+                        ),
+                    )
+                )
             if "uv sync" in normalized_command and "grep" in normalized_command:
                 violations.append(
                     Violation(
@@ -660,6 +678,16 @@ def _uses_unmanaged_python_quality_tool(command: str) -> bool:
     if tokens[0] in {"mypy", "ruff", "pytest"}:
         return True
     return len(tokens) >= 3 and tokens[0] in {"python", "python3"} and tokens[1:3] == ["-m", "pytest"]
+
+
+def _is_non_executable_verification(command: str) -> bool:
+    """Reject prose that a shell would execute as arguments or redirections."""
+
+    try:
+        shlex.split(command)
+    except ValueError:
+        return True
+    return bool(_NON_EXECUTABLE_VERIFICATION_PATTERN.search(command))
 
 
 def _assemble_trusted_plan(draft: PlanDraft, context: PlanningContext) -> AiPlan:

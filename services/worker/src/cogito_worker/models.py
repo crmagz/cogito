@@ -395,6 +395,7 @@ class ReviewRequest:
     phase_results: list[dict[str, Any]]
     round_number: int
     review_profile: str
+    approved_contract: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

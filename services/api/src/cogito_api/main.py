@@ -1327,7 +1327,7 @@ def create_app(
                             {
                                 "stage_id": "discovery",
                                 "role": "discovery",
-                                "max_turns": 16,
+                                "max_turns": 40,
                                 "prompt": _discovery_agent_prompt(initial_specification, record.target_repos),
                             },
                             {
@@ -1838,7 +1838,7 @@ def create_app(
             )
             resolutions = await resolve_roles(
                 record.run_id,
-                ["planner", "python_coding", "nodejs_coding", "terraform_coding", "cdk_coding", "developer", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
+                ["planner", "python_coding", "nodejs_coding", "terraform_coding", "cdk_coding", "developer", "adversarial_review", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
                 record.project_id or settings.workbench_default_project_id,
                 record.target_repos,
             )
@@ -2733,7 +2733,6 @@ def create_app(
             if status is PlanningRunStatus.PLANNING and record.plan_artifact is None
             and record.selected_product_specification_artifact is not None
             and record.selected_specification_evaluation_artifact is not None
-            and agent_status is AgentRunStatus.RUNNING
             else WorkbenchStageState.QUEUED
             if status is PlanningRunStatus.PLANNING and record.plan_artifact is None
             and record.selected_product_specification_artifact is not None
@@ -2783,7 +2782,7 @@ def create_app(
             WorkbenchStageState.FAILED
             if status is PlanningRunStatus.IMPLEMENTATION_FAILED
             else WorkbenchStageState.IN_PROGRESS
-            if status is PlanningRunStatus.IMPLEMENTING and agent_status is AgentRunStatus.RUNNING
+            if status is PlanningRunStatus.IMPLEMENTING
             else WorkbenchStageState.QUEUED
             if status is PlanningRunStatus.IMPLEMENTING
             else WorkbenchStageState.COMPLETED
@@ -3232,7 +3231,7 @@ def create_app(
             invocation = payload.get("invocation")
             stage_id = invocation.get("stage_id") if isinstance(invocation, dict) else None
             if stage_id == "discovery":
-                return ["work_specification"]
+                return ["planning"]
             if stage_id == "planning":
                 return ["planning"]
             if isinstance(stage_id, str) and stage_id.startswith("implementation"):
@@ -3906,8 +3905,11 @@ def _discovery_agent_prompt(specification: str, repositories: list[str]) -> str:
 
     return (
         "You are the Discovery agent in a governed delivery workflow. Inspect only the "
-        "source-pinned repositories and the approved WorkSpecification below. Do not modify "
-        "files, create commits, push branches, or create external delivery records. Return ONLY "
+        "source-pinned repositories and the approved WorkSpecification below. You have a four-command research budget: "
+        "use it only to inspect repository shape, the project manifest/readme, and recent history. Do not install "
+        "dependencies, run test suites, search broadly, or revisit a file. After the fourth command (or sooner), stop "
+        "using tools and return the required JSON from the evidence you have. Do not modify files, create commits, "
+        "push branches, or create external delivery records. Return ONLY "
         "a JSON object with technical_context (array of strings), risks (array of strings), "
         "repository_findings (array of strings), and verification_notes (array of strings).\n\n"
         f"Repositories: {json.dumps(repositories, separators=(',', ':'))}\n"
@@ -3939,7 +3941,14 @@ def _planning_agent_prompt(
         "that phase must create every prerequisite (configuration, package, tests, and lockfile) before running "
         "its verification commands. Do not create a final verification or documentation phase that repeats earlier "
         "requirement ownership. Every verification command must be runnable immediately after its own phase tasks; "
-        "it cannot depend on work deferred to another phase.\n\n"
+        "it cannot depend on work deferred to another phase. For a repository managed by uv, verification commands "
+        "must use the project environment explicitly (for example, `uv run pytest` and `uv run python -c ...`). "
+        "Never use bare `python`, bare `pytest`, or `pip` as verification commands for a uv-managed project.\n\n"
+        "Discovery, adversarial review, implementation approval, and pull-request publication are platform-owned "
+        "workflow activities that Cogito runs outside this plan. Never create a phase for any of those activities, "
+        "or for describing the workflow/audit trail. Return only repository-delivery phases. Every returned phase "
+        "must own at least one supplied requirement ID; omit any activity that has no source-grounded repository "
+        "deliverable.\n\n"
         f"WorkSpecification: {specification}\n"
         f"Repositories: {json.dumps(repositories, separators=(',', ':'))}\n"
         f"Spec set: {spec_set}\n"
