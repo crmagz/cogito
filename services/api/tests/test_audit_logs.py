@@ -127,6 +127,47 @@ async def test_loki_reader_keeps_a_cursor_for_a_full_line_limited_page() -> None
     assert page.next_cursor == f"ns:{values[-1][0]}"
 
 
+async def test_loki_reader_reads_only_newer_output_when_tailing() -> None:
+    invocation_id = "a" * 64
+    occurred_at = datetime.now(timezone.utc)
+    cursor = 1_700_000_000_000_000_000
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "result": [{
+                        "stream": {},
+                        "values": [[str(cursor + 10), "new output"]],
+                    }]
+                }
+            },
+        )
+
+    reader = LokiAuditLogReader("http://loki.test", 3, transport=httpx.MockTransport(handler))
+    page = await reader.read_invocation(
+        invocation_id,
+        occurred_at=occurred_at.isoformat(),
+        tail_after=f"ns:{cursor}",
+    )
+
+    assert requests[0].url.params["start"] == str(cursor + 1)
+    assert requests[0].url.params["direction"] == "FORWARD"
+    assert page.next_cursor is None
+    assert page.tail_cursor == f"ns:{cursor + 10}"
+
+
+async def test_loki_reader_rejects_an_invalid_live_tail_cursor() -> None:
+    reader = LokiAuditLogReader("http://loki.test", 3, transport=httpx.MockTransport(lambda _: (_ for _ in ()).throw(AssertionError())))
+
+    page = await reader.read_invocation("a" * 64, tail_after="not-a-cursor")
+
+    assert page.availability == "unavailable"
+
+
 async def test_loki_reader_skips_an_out_of_range_timestamp() -> None:
     invocation_id = "a" * 64
 
