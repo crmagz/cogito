@@ -545,7 +545,10 @@ class DeveloperRunWorkflow:
                                 "permitted filesystem write. "
                                 "Return concise JSON findings with severity, evidence, and verification advice."
                             ),
-                            max_turns=min(productive_turns, 16),
+                            # The Work Specification's resolved phase budget is
+                            # authoritative for every specialist. ``productive_turns``
+                            # has already retained the configured backup reserve.
+                            max_turns=productive_turns,
                             timeout_seconds=max(1, int((deadline - workflow.now()).total_seconds()) - 1),
                             max_cost_usd=max_cost_usd,
                         )
@@ -656,7 +659,13 @@ class DeveloperRunWorkflow:
                             "identifies the repository, branch, delivery readiness, and checks that the governed "
                             "publisher should bind into the pull request."
                         ),
-                        max_turns=8,
+                        # The publisher performs repository inspection before the
+                        # governed GitHub activity. It is still a specialist,
+                        # so it must receive the same Work Specification-derived
+                        # productive budget as the coding and review agents.
+                        # A local eight-turn cap made a valid delivery fail even
+                        # when the approved contract allowed more work.
+                        max_turns=productive_turns,
                         timeout_seconds=min(_REVIEW_ACTIVITY_TIMEOUT.seconds, execution_timeout_seconds),
                         max_cost_usd=max_cost_usd,
                     )
@@ -1321,6 +1330,7 @@ def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, f
     if not isinstance(constraints, dict):
         raise ValueError("plan constraints are missing")
     max_turns = constraints.get("max_turns_per_phase")
+    agent_max_turns = plan.get("agent_max_turns_per_phase")
     max_wall_clock_minutes = constraints.get("max_wall_clock_minutes")
     max_cost_usd = constraints.get("max_cost_usd")
     max_review_rounds = constraints.get("max_review_rounds", 3)
@@ -1344,6 +1354,13 @@ def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, f
         )
     if max_turns <= backup_reserve_turns:
         raise ValueError("plan max_turns_per_phase must exceed backup_reserve_turns")
+    if agent_max_turns is not None and (
+        not isinstance(agent_max_turns, int)
+        or isinstance(agent_max_turns, bool)
+        or agent_max_turns <= backup_reserve_turns
+        or agent_max_turns > max_turns
+    ):
+        raise ValueError("plan agent_max_turns_per_phase must be within the approved phase budget")
     if (
         not isinstance(max_review_rounds, int)
         or isinstance(max_review_rounds, bool)
@@ -1393,7 +1410,7 @@ def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, f
             dependencies.discard(ready.id)
     return (
         ordered,
-        max_turns - backup_reserve_turns,
+        (agent_max_turns if agent_max_turns is not None else max_turns) - backup_reserve_turns,
         timedelta(minutes=max_wall_clock_minutes),
         backup_reserve_turns,
         float(max_cost_usd),

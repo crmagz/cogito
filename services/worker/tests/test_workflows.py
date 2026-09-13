@@ -1222,17 +1222,70 @@ async def test_duplicate_plan_approval_is_an_idempotent_acknowledgement() -> Non
 async def test_workflow_opens_one_pr_before_implementation_approval(env: WorkflowEnvironment) -> None:
     store = InMemoryRunStore()
     plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, ["https://github.com/acme/example.git#" + "1" * 40])
+    # A Work Specification may lower the per-agent budget without changing
+    # the template's global delivery budget. Every specialist, including the
+    # delivery publisher, must receive the resulting productive allowance.
+    plan["agent_max_turns_per_phase"] = 40
     store.plans["s3://plans/plans/run-implementation/plan.json"] = plan
     plan_sha256 = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     workspaces = InMemoryExecutionWorkspaces()
     publisher = InMemoryPullRequestPublisher()
-    activities = WorkerActivities(store, workspaces, InMemoryHarness(), pull_request_publisher=publisher)
+    harness = InMemoryHarness(
+        result=PhaseResult(
+            phase_id="phase-1",
+            branch_name="adp/run-implementation",
+            succeeded=True,
+            turns_used=3,
+            cost_usd=0.01,
+            changed_files=["/workspace/repos/example:src/main.py"],
+            commits={"/workspace/repos/example": "a" * 40},
+            verification=[VerificationResult(command="true", passed=True, output="ok")],
+            summary="completed",
+        )
+    )
+    activities = WorkerActivities(store, workspaces, harness, pull_request_publisher=publisher)
     task_queue = f"test-queue-{uuid.uuid4()}"
+    def pinned_role(role: str, grants: list[ToolGrant]) -> RegistrationReference:
+        return RegistrationReference(
+            role=role,
+            registration_id=role,
+            version="1.0.0",
+            manifest_sha256="a" * 64,
+            component_id=role,
+            component_version="1.0.0",
+            grants=grants,
+            gateway=AgentGatewayResolution(
+                policy_revision="test",
+                project_id="default",
+                role=role,
+                registration_id=role,
+                registration_version="1.0.0",
+                manifest_sha256="a" * 64,
+                model_alias="balanced",
+                max_budget_usd=1.0,
+                toolset="test",
+            ),
+        )
+
+    resolutions = [
+        pinned_role("planner", [ToolGrant("planning_model", "1.0.0", "plan_generation")]),
+        pinned_role("developer", [
+            ToolGrant("execution_workspace", "1.0.0", "run_scoped_workspace"),
+            ToolGrant("developer_harness", "1.0.0", "approved_phase"),
+        ]),
+        pinned_role("reviewer", [
+            ToolGrant("execution_workspace", "1.0.0", "read_only_workspace"),
+            ToolGrant("review_model", "1.0.0", "read_only_review"),
+        ]),
+        pinned_role("validator", [ToolGrant("validation_runner", "1.0.0", "approved_verification")]),
+        pinned_role("adversarial_review", []),
+        pinned_role("pull_request_publisher", [ToolGrant("github_publisher", "1.0.0", "approved_pull_request")]),
+    ]
 
     async with Worker(
         env.client,
         task_queue=task_queue,
-        workflows=[DeveloperRunWorkflow],
+        workflows=[DeveloperRunWorkflow, AgentPathWorkflow],
         activities=[
             activities.load_plan,
             activities.report_status,
@@ -1245,6 +1298,8 @@ async def test_workflow_opens_one_pr_before_implementation_approval(env: Workflo
             activities.review,
             activities.verify_review_findings,
             activities.address_review_findings,
+            activities.validate_implementation,
+            activities.invoke_agent,
         ],
     ):
         handle = await env.client.start_workflow(
@@ -1256,12 +1311,13 @@ async def test_workflow_opens_one_pr_before_implementation_approval(env: Workflo
                 spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
                 target_repos=plan["target_repos"],
                 requires_implementation_approval=True,
+                registry_resolutions=resolutions,
             ),
             id=f"test-workflow-{uuid.uuid4()}",
             task_queue=task_queue,
         )
         await _wait_for_status(store, "run-implementation", "awaiting_implementation_approval")
-        assert len(workspaces.cleaned) == 1
+        assert len(workspaces.cleaned) == 3
         assert len(publisher.requests) == 1
         digest = store.statuses["run-implementation"]["implementation_artifact"]["sha256"]
         accepted = await handle.execute_update(
@@ -1274,6 +1330,11 @@ async def test_workflow_opens_one_pr_before_implementation_approval(env: Workflo
     assert result == RunResult(run_id="run-implementation", status="completed")
     assert len(publisher.requests) == 1
     assert store.statuses["run-implementation"]["pull_request"]["number"] == 42
+    specialist_turns = {
+        request.role: request.max_turns
+        for request in harness.agent_invocation_requests
+    }
+    assert specialist_turns == {"adversarial_review": 15, "pull_request_publisher": 15}
 
 
 def test_plan_snapshot_validation_rejects_a_mutated_plan() -> None:
@@ -1336,6 +1397,16 @@ def test_execution_plan_orders_multi_phase_dependencies_stably() -> None:
     assert max_cost_usd == 1.0
     assert max_review_rounds == 3
     assert review_profile == "standard"
+
+
+def test_execution_plan_uses_the_resolved_work_specification_turn_budget() -> None:
+    plan = _single_phase_plan("typescript-backend@v2.1#sha256=" + "a" * 64, [])
+    plan["agent_max_turns_per_phase"] = 40
+
+    _, productive_turns, _, reserve, *_ = _execution_plan(plan)
+
+    assert reserve == 25
+    assert productive_turns == 15
 
 
 def test_review_revision_timeout_uses_the_remaining_workflow_budget() -> None:

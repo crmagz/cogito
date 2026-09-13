@@ -173,6 +173,26 @@ def test_product_manager_can_submit_only_structured_intake_after_platform_bindin
         }
 
 
+def test_work_specification_can_tighten_the_default_agent_turn_budget(
+    valid_plan: dict, valid_product_specification: dict
+) -> None:
+    app = _app(
+        roles=("cogito-product-manager", "cogito-policy-editor", "cogito-policy-publisher", "cogito-viewer"),
+        valid_plan=valid_plan,
+        valid_product_specification=valid_product_specification,
+    )
+    with TestClient(app, headers={"Authorization": "Bearer operator-test-token"}) as client:
+        assert client.put("/api/v1/project-workflow-bindings/default", json=_binding()).status_code == 200
+        response = client.post(
+            "/api/v1/projects/default/workflow-runs",
+            json={"work_specification": _intake() | {"max_turns_per_phase": 75}},
+        )
+        assert response.status_code == 202
+        source = json.loads(app.state.test_plan_store.source_specifications[response.json()["run_id"]])
+        assert source["work_specification"]["max_turns_per_phase"] == 75
+        assert source["constraints"]["max_turns_per_phase"] == 500
+
+
 def test_legacy_specification_field_remains_compatible_during_work_specification_migration(
     valid_plan: dict, valid_product_specification: dict
 ) -> None:

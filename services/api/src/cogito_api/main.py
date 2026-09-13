@@ -265,6 +265,19 @@ def _source_specification_contract(
     )
 
 
+def _agent_turn_budget_from_initial_specification(initial_specification: str) -> int | None:
+    """Return the optional product-authored agent ceiling from immutable intake."""
+
+    try:
+        work_specification = InitialSpecificationContract.model_validate_json(initial_specification).work_specification
+    except ValueError:
+        # Legacy planning records can retain a normalized product
+        # specification in this slot. They predate Work Specification budget
+        # overrides and therefore inherit the template default.
+        return None
+    return work_specification.max_turns_per_phase if work_specification is not None else None
+
+
 def _schema_violations(exc: RequestValidationError) -> list[Violation]:
     violations = []
     for error in exc.errors():
@@ -867,6 +880,18 @@ def create_app(
         except WorkflowConfigurationError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         constraints = admission.binding.constraints
+        requested_turn_budget = submission.resolved_work_specification.max_turns_per_phase
+        if requested_turn_budget is not None:
+            if requested_turn_budget <= constraints.backup_reserve_turns:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Work Specification max_turns_per_phase must exceed the backup reserve",
+                )
+            if requested_turn_budget > constraints.max_turns_per_phase:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Work Specification max_turns_per_phase cannot exceed the WorkflowTemplate/Policy default",
+                )
         maximum = admission.policy.max_constraints
         if (
             constraints.max_wall_clock_minutes > maximum.max_wall_clock_minutes
@@ -1275,6 +1300,17 @@ def create_app(
                     separators=(",", ":"),
                     ensure_ascii=False,
                 )
+                # Planning reasons over the normalized Work Specification, but
+                # operator-authored execution preferences live in the immutable
+                # source intake. Do not try to recover them from the normalized
+                # product artifact: that transformation intentionally excludes
+                # workflow controls such as the optional per-agent turn budget.
+                source_initial_specification = store.get_source_specification(
+                    record.source_artifact.ref
+                )
+                agent_turn_budget = _agent_turn_budget_from_initial_specification(
+                    source_initial_specification
+                )
             except (PlanStoreUnavailableError, ValueError) as error:
                 raise HTTPException(status_code=503, detail="run storage is temporarily unavailable") from error
             refinement = await supervisor_store.get_active_operator_refinement(run_id)
@@ -1301,6 +1337,7 @@ def create_app(
                             target_repos=record.target_repos,
                             spec_set=record.spec_set,
                             constraints=record.constraints,
+                            agent_max_turns_per_phase=agent_turn_budget,
                             requirement_ids=tuple(selected_specification.requirement_ids),
                             operator_refinement=(
                                 OperatorRefinement(
@@ -1363,6 +1400,7 @@ def create_app(
                             target_repos=record.target_repos,
                             spec_set=record.spec_set,
                             constraints=record.constraints,
+                            agent_max_turns_per_phase=agent_turn_budget,
                             requirement_ids=tuple(selected_specification.requirement_ids),
                             operator_refinement=(
                                 OperatorRefinement(
@@ -1377,6 +1415,7 @@ def create_app(
                         ),
                     )
             except (ValueError, json.JSONDecodeError) as error:
+                logger.exception("Planner contract assembly failed", extra={"run_id": run_id})
                 raise HTTPException(
                     status_code=422,
                     detail="planner agent output did not satisfy the approved planning contract",
@@ -1621,6 +1660,10 @@ def create_app(
                 )
             )
         except Exception as error:
+            logger.exception(
+                "Could not start persisted implementation workflow",
+                extra={"run_id": updated.run_id, "workflow_id": updated.workflow_id},
+            )
             raise HTTPException(
                 status_code=503,
                 detail="plan was persisted but Temporal is unavailable; retry this request to start its workflow",
