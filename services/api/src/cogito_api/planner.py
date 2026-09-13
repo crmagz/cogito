@@ -191,6 +191,7 @@ class PlanningContext:
     target_repos: list[str]
     spec_set: str
     constraints: PlanConstraints
+    agent_max_turns_per_phase: int | None = None
     requirement_ids: tuple[str, ...] = ()
     operator_refinement: "OperatorRefinement" | None = None
     base_plan: AiPlan | None = None
@@ -725,6 +726,7 @@ def _assemble_trusted_plan(draft: PlanDraft, context: PlanningContext) -> AiPlan
         spec_set=context.spec_set,
         phases=phases,
         constraints=context.constraints,
+        agent_max_turns_per_phase=context.agent_max_turns_per_phase,
         review_profile=draft.review_profile,
         operator_feedback_id=draft.operator_feedback_id,
         operator_feedback_response=draft.operator_feedback_response,

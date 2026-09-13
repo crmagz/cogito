@@ -113,6 +113,14 @@ class WorkSpecification(BaseModel):
         max_length=128,
         description="Optional Jira-supplied technical facts relevant to discovery and planning",
     )
+    max_turns_per_phase: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional per-agent turn budget. When omitted, Cogito uses the WorkflowTemplate/Policy default; "
+            "an override may only tighten the resolved policy limit."
+        ),
+    )
     repository_candidates: list["RepositoryCandidate"] = Field(
         default_factory=list,
         max_length=32,
@@ -168,6 +176,14 @@ class AiPlan(BaseModel):
     )
     phases: list[PlanPhase] = Field(description="Ordered execution phases")
     constraints: PlanConstraints = Field(description="Execution limits")
+    agent_max_turns_per_phase: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional Work Specification agent turn ceiling. When omitted, execution inherits the resolved "
+            "WorkflowTemplate/Policy phase budget."
+        ),
+    )
     review_profile: ReviewProfile = Field(
         default=ReviewProfile.STANDARD, description="How strict the review loop is"
     )

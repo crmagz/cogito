@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import httpx
 
@@ -118,9 +119,11 @@ class LiteLLMReviewHarness:
                     "filesystem actions. Return exactly JSON: {\"findings\":[{\"severity\":\"blocking|advisory|nit\","
                     "\"file\":\"relative/path\",\"line\":integer-or-null,\"description\":\"...\","
                     "\"evidence\":\"...\",\"suggested_fix\":\"...\"}]}. A blocking finding must be a "
-                    "specific correctness, security, or acceptance failure visible in the diff. The approved "
-                    "contract is authoritative: never classify an intentional requirement or its direct consequence "
-                    "as blocking, even if you would choose a different technology or version."
+                        "specific correctness, security, or acceptance failure visible in the diff. The approved "
+                        "contract is authoritative: never classify an intentional requirement or its direct consequence "
+                        "as blocking, even if you would choose a different technology or version. The current UTC "
+                        f"date is {datetime.now(timezone.utc).date().isoformat()}; do not call an earlier date in "
+                        "the diff a future timestamp."
                 ),
             },
             {
