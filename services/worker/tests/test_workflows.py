@@ -28,6 +28,7 @@ from cogito_worker.workflows import (
     AgentPathWorkflow,
     DeveloperRunWorkflow,
     _implementation_evidence,
+    _implementation_agent_role,
     _execution_plan,
     _failure_detail,
     _is_timeout_error,
@@ -309,6 +310,7 @@ async def test_agent_path_runs_each_specialist_in_an_isolated_workspace(
                 max_cost_usd=5.0,
                 stages=stages,
                 registry_resolutions=resolutions,
+                attempt=2,
             ),
             id=f"test-agent-path-{uuid.uuid4()}",
             task_queue=task_queue,
@@ -320,6 +322,9 @@ async def test_agent_path_runs_each_specialist_in_an_isolated_workspace(
     assert all("_" not in request.run_id and len(request.run_id) <= 63 for request in workspaces.requests)
     assert len({workspace.job_name for workspace in workspaces.cleaned}) == len(roles)
     assert [request.audit_run_id for request in harness.agent_invocation_requests] == ["run-agent-path"] * len(roles)
+    assert [request.audit_attempt for request in harness.agent_invocation_requests] == [2] * len(roles)
+    assert result.handoffs == {role: '{"title":"agent output"}' for role in roles}
+    assert all(request.feature_branch_run_id == "run-agent-path" for request in workspaces.requests)
 
 
 async def test_resolved_run_rejects_missing_developer_before_workspace_provisioning(
@@ -1346,6 +1351,18 @@ def test_execution_plan_requires_an_approved_verification_command() -> None:
 
     with pytest.raises(ValueError, match="non-empty tasks"):
         _execution_plan(plan)
+
+
+def test_implementation_agent_role_is_selected_from_approved_plan_evidence() -> None:
+    python_plan = _single_phase_plan("python@v1#sha256=" + "a" * 64, [])
+    python_plan["phases"][0]["tasks"] = ["Create pyproject.toml and run uv sync with pytest."]
+    python_phases, *_ = _execution_plan(python_plan)
+    assert _implementation_agent_role(python_phases) == "python_coding"
+
+    terraform_plan = _single_phase_plan("terraform@v1#sha256=" + "a" * 64, [])
+    terraform_plan["phases"][0]["tasks"] = ["Add a Terraform module for the bucket."]
+    terraform_phases, *_ = _execution_plan(terraform_plan)
+    assert _implementation_agent_role(terraform_phases) == "terraform_coding"
 
 
 def test_implementation_evidence_excludes_raw_command_and_reviewer_output() -> None:

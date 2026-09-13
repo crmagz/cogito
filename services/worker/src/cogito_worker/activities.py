@@ -250,13 +250,13 @@ class WorkerActivities:
             extra={"run_id": request.workspace.run_id, "phase_id": request.phase.id},
         )
         invocation_id = stage_invocation_id(
-            request.workspace.run_id, request.phase.id, "developer", activity.info().attempt
+            request.workspace.run_id, request.phase.id, request.agent_role, activity.info().attempt
         )
         try:
             await self._run_state.record_stage_invocation(
                 request.workspace.run_id,
                 request.phase.id,
-                "developer",
+                request.agent_role,
                 activity.info().attempt,
                 request.traceparent is not None,
             )
@@ -285,18 +285,23 @@ class WorkerActivities:
     async def invoke_agent(self, request: AgentInvocationRequest) -> AgentInvocationResult:
         """Run an isolated agent and emit one independently queryable audit stream."""
 
+        # Agent paths provision a distinct environment per role, but Workbench
+        # resolves logs through the root workflow's binding. Use that same
+        # root identity for the pod log prefix; otherwise Loki contains the
+        # output under an environment-only ID no audit row can query.
+        audit_run_id = request.audit_run_id or request.workspace.run_id
+        audit_attempt = request.audit_attempt
         invocation_id = stage_invocation_id(
-            request.workspace.run_id, request.stage_id, request.role, activity.info().attempt
+            audit_run_id, request.stage_id, request.role, audit_attempt
         )
         audited_workspace = replace(request.workspace, audit_invocation_id=invocation_id)
         audited_request = replace(request, workspace=audited_workspace)
         try:
-            audit_run_id = audited_request.audit_run_id or audited_workspace.run_id
             await self._run_state.record_stage_invocation(
                 audit_run_id,
                 audited_request.stage_id,
                 audited_request.role,
-                activity.info().attempt,
+                audit_attempt,
                 False,
                 audited_request.registration_id,
                 audited_workspace.job_name,
@@ -312,7 +317,7 @@ class WorkerActivities:
                 audited_request.audit_run_id or audited_workspace.run_id,
                 audited_request.stage_id,
                 audited_request.role,
-                activity.info().attempt,
+                audit_attempt,
                 "succeeded" if result.succeeded else "failed",
             )
         except Exception:
@@ -329,7 +334,7 @@ class WorkerActivities:
             await self._run_state.record_stage_invocation_result(
                 request.workspace.run_id,
                 request.phase.id,
-                "developer",
+                request.agent_role,
                 activity.info().attempt,
                 status,
             )

@@ -104,6 +104,34 @@ async def test_agent_invocation_records_one_role_bound_log_stream(
     assert reporter.completed[0][4] == "succeeded"
 
 
+async def test_agent_invocation_prefixes_environment_logs_with_the_root_run_binding(
+    env: ActivityEnvironment, store: InMemoryRunStore
+) -> None:
+    """Loki correlation must use the same root-run identity as the audit row."""
+
+    harness = InMemoryHarness()
+    activities = WorkerActivities(store, InMemoryExecutionWorkspaces(), harness)
+    workspace = ExecutionWorkspace(run_id="env-1", job_name="agent-job", workspace_root="/workspace")
+
+    await env.run(
+        activities.invoke_agent,
+        AgentInvocationRequest(
+            stage_id="planning",
+            role="planner",
+            workspace=workspace,
+            prompt="Produce a plan draft.",
+            max_turns=10,
+            timeout_seconds=60,
+            audit_run_id="root-run-1",
+            audit_attempt=2,
+        ),
+    )
+
+    assert harness.agent_invocation_request.workspace.audit_invocation_id == stage_invocation_id(
+        "root-run-1", "planning", "planner", 2
+    )
+
+
 async def test_report_status_creates_status_when_none_exists(
     env: ActivityEnvironment, activities: WorkerActivities, store: InMemoryRunStore
 ):

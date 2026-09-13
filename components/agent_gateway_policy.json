@@ -1,5 +1,5 @@
 {
-  "policy_revision": "agent_gateway_agent_first_poc_v1_0_1",
+  "policy_revision": "agent_gateway_agent_first_poc_v1_0_2",
   "bindings": [
     {
       "role": "planner",
@@ -45,6 +45,24 @@
       "model_alias": "complex",
       "max_budget_usd": 25,
       "toolset": "nodejs-development"
+    },
+    {
+      "role": "terraform_coding",
+      "registration_id": "terraform_coding",
+      "registration_version": "0.1.0",
+      "project_ids": ["default"],
+      "model_alias": "complex",
+      "max_budget_usd": 25,
+      "toolset": "terraform-development"
+    },
+    {
+      "role": "cdk_coding",
+      "registration_id": "cdk_coding",
+      "registration_version": "0.1.0",
+      "project_ids": ["default"],
+      "model_alias": "complex",
+      "max_budget_usd": 25,
+      "toolset": "cdk-development"
     },
     {
       "role": "adversarial_review",

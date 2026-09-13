@@ -15,6 +15,8 @@ class RunStarter(Protocol):
 
     async def start_agent_path(self, envelope: dict[str, Any]) -> None: ...
 
+    async def execute_agent_path(self, envelope: dict[str, Any], workflow_id: str) -> dict[str, Any]: ...
+
     async def submit_plan_approval(self, workflow_id: str, decision: dict[str, Any]) -> bool: ...
 
     async def submit_implementation_approval(self, workflow_id: str, decision: dict[str, str]) -> bool: ...
@@ -66,6 +68,28 @@ class TemporalRunStarter:
             )
         except WorkflowAlreadyStartedError:
             return
+
+    async def execute_agent_path(self, envelope: dict[str, Any], workflow_id: str) -> dict[str, Any]:
+        """Run a bounded specialist handoff and return its durable handoff evidence.
+
+        Planning generation is leased by the control plane.  Reusing the
+        deterministic workflow ID therefore makes a retry wait for the same
+        immutable agent result instead of starting a second discovery pass.
+        """
+
+        client = await self._get_client()
+        try:
+            result = await client.execute_workflow(
+                "AgentPathWorkflow",
+                args=[envelope],
+                id=workflow_id,
+                task_queue=self._task_queue,
+            )
+        except WorkflowAlreadyStartedError:
+            result = await client.get_workflow_handle(workflow_id).result()
+        if not isinstance(result, dict):
+            raise RuntimeError("agent path returned an invalid result")
+        return result
 
     async def submit_plan_approval(self, workflow_id: str, decision: dict[str, Any]) -> bool:
         """Deliver an idempotent, digest-bound decision through a Temporal Update."""

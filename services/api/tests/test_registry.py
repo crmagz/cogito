@@ -34,9 +34,11 @@ def test_component_catalog_is_complete_and_versioned() -> None:
     assert set(registrations) == {
         "discovery",
         "planner",
-        "python_coding",
-        "nodejs_coding",
-        "developer",
+            "python_coding",
+            "nodejs_coding",
+            "terraform_coding",
+            "cdk_coding",
+            "developer",
         "adversarial_review",
         "reviewer",
         "validator",
@@ -58,7 +60,9 @@ def test_component_catalog_is_complete_and_versioned() -> None:
             "1.2.0"
             if item.registration_id == "planner"
             else "0.1.0"
-            if item.registration_id in {"discovery", "python_coding", "nodejs_coding", "adversarial_review"}
+            if item.registration_id in {
+                "discovery", "python_coding", "nodejs_coding", "terraform_coding", "cdk_coding", "adversarial_review"
+            }
             else "1.0.1"
             if item.registration_id == "cogito_readonly_mcp"
             else "1.0.0"
@@ -71,7 +75,9 @@ def test_component_catalog_is_complete_and_versioned() -> None:
             "worker_service"
             if item.registration_id in {"cogito_readonly_mcp", "github_readonly_mcp"}
             else "isolated_job"
-            if item.registration_id in {"discovery", "python_coding", "nodejs_coding", "adversarial_review"}
+                if item.registration_id in {
+                    "discovery", "python_coding", "nodejs_coding", "terraform_coding", "cdk_coding", "adversarial_review"
+                }
             else "adapter"
         )
         for item in catalog.components
@@ -94,7 +100,7 @@ def test_agent_gateway_policy_selects_a_project_scoped_route_for_each_registered
 
     policy = load_agent_gateway_policy(_catalog_root(), catalog)
 
-    assert policy.policy_revision == "agent_gateway_agent_first_poc_v1_0_1"
+    assert policy.policy_revision == "agent_gateway_agent_first_poc_v1_0_2"
     planner = next(binding for binding in policy.bindings if binding.role == "planner")
     assert planner.registration_version == "1.2.0"
     assert planner.toolset == "planning-readonly"

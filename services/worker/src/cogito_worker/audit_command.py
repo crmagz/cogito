@@ -13,6 +13,9 @@ from typing import BinaryIO
 _AUDIT_OUTPUT_LIMIT_BYTES = 64 * 1024
 _TRUNCATION_MARKER = b"\n[audit output truncated]\n"
 _AUDIT_INVOCATION_ID = re.compile(r"^[a-f0-9]{64}$")
+_SENSITIVE_VALUE = re.compile(
+    r"(?i)(?:authorization[\"']?\s*[:=]\s*[\"']?(?:[a-z][a-z0-9_-]*\s+)?|bearer\s+|(?:api[_ -]?key|access[_ -]?key|secret(?:[_ -]?key)?|token|password)[\"']?\s*[:=]\s*[\"']?)[^\s,}\"']+"
+)
 
 
 def _binary_stream(stream: object) -> BinaryIO:
@@ -48,6 +51,31 @@ def _capture_stream(source: BinaryIO, destination: object, audit_path: Path) -> 
             audit.write(b"\n")
 
 
+def _emit_to_pod_log(invocation_id: str, audit_paths: list[Path]) -> None:
+    """Write the completed bounded stream directly to PID 1's log FD.
+
+    Kubernetes exec output is not container stdout.  Relying only on the
+    execution pod's one-second file poll races workspace deletion, which makes
+    short agent invocations invisible to Loki.  PID 1 remains the canonical
+    container logger and receives a complete, redacted record before exec
+    returns to the worker.
+    """
+
+    try:
+        destination = Path("/proc/1/fd/1").open("w", encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    with destination:
+        for audit_path in audit_paths:
+            try:
+                content = audit_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for line in content.splitlines():
+                destination.write(f"{invocation_id} {_SENSITIVE_VALUE.sub('[REDACTED]', line)}\n")
+        destination.flush()
+
+
 def main(arguments: list[str] | None = None) -> int:
     """Execute the command and let the pod entrypoint redact its retained output."""
 
@@ -64,14 +92,19 @@ def main(arguments: list[str] | None = None) -> int:
     audit_dir.mkdir(parents=True, exist_ok=True)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert process.stdout is not None and process.stderr is not None
+    audit_paths = [
+        audit_dir / f"{invocation_id}.stdout.capture",
+        audit_dir / f"{invocation_id}.stderr.capture",
+    ]
     captures = [
-        threading.Thread(target=_capture_stream, args=(process.stdout, sys.stdout, audit_dir / f"{invocation_id}.stdout.capture")),
-        threading.Thread(target=_capture_stream, args=(process.stderr, sys.stderr, audit_dir / f"{invocation_id}.stderr.capture")),
+        threading.Thread(target=_capture_stream, args=(process.stdout, sys.stdout, audit_paths[0])),
+        threading.Thread(target=_capture_stream, args=(process.stderr, sys.stderr, audit_paths[1])),
     ]
     for capture in captures:
         capture.start()
     for capture in captures:
         capture.join()
+    _emit_to_pod_log(invocation_id, audit_paths)
     return process.wait()
 
 
