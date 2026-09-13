@@ -190,6 +190,53 @@ async def test_review_harness_surfaces_failed_phase_verification_without_a_model
     ]
 
 
+async def test_review_harness_retries_one_malformed_blocking_finding_verification() -> None:
+    verification_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal verification_calls
+        payload = json.loads(request.content)
+        prompt = json.loads(payload["messages"][1]["content"])
+        if "lens" in prompt:
+            body: dict[str, list[dict[str, object]]] = {"findings": []}
+            if prompt["lens"] == "correctness":
+                body = {
+                    "findings": [
+                        {
+                            "severity": "blocking",
+                            "file": "src/main.py",
+                            "line": 7,
+                            "description": "missing validation",
+                            "evidence": "diff removes the guard",
+                            "suggested_fix": "restore the guard",
+                        }
+                    ]
+                }
+            content = json.dumps(body)
+        else:
+            verification_calls += 1
+            content = "not JSON" if verification_calls == 1 else '{"confirmed":false,"evidence":"not supported"}'
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    harness = LiteLLMReviewHarness(
+        _Workspaces("diff"),  # type: ignore[arg-type]
+        "http://litellm.test",
+        "reviewer-key",
+        "reviewer-secondary-key",
+        "balanced",
+        "complex",
+        transport=httpx.MockTransport(handler),
+    )
+
+    review = await harness.review(_request())
+    verified = await harness.verify_blocking(_request(), review.findings)
+
+    assert verification_calls == 2
+    assert verified[0].severity == "advisory"
+    assert verified[0].verified is False
+    assert verified[0].evidence == "not supported"
+
+
 async def test_review_harness_reads_merge_base_when_activity_state_has_no_baseline() -> None:
     request = _request()
     request.workspace.base_commits.clear()

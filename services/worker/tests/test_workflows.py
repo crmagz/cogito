@@ -4,8 +4,10 @@ import asyncio
 import hashlib
 import json
 import uuid
+from datetime import timedelta
 
 import pytest
+import cogito_worker.workflows as workflows
 from cogito_worker.activities import WorkerActivities
 from cogito_worker.models import (
     ExecutionWorkspace,
@@ -1249,6 +1251,13 @@ def test_execution_plan_orders_multi_phase_dependencies_stably() -> None:
     assert max_cost_usd == 1.0
     assert max_review_rounds == 3
     assert review_profile == "standard"
+
+
+def test_review_revision_timeout_uses_the_remaining_workflow_budget() -> None:
+    command_timeout, activity_timeout = workflows._review_revision_timeouts(timedelta(minutes=10))
+
+    assert command_timeout == 570
+    assert activity_timeout == timedelta(minutes=10)
 
 
 def test_execution_plan_requires_an_approved_verification_command() -> None:

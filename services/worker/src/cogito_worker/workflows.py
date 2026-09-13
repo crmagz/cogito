@@ -409,9 +409,15 @@ class DeveloperRunWorkflow:
                 )
                 return RunResult(run_id=envelope.run_id, status="stopped_with_backup")
             if review_outcome is not None and review_outcome["status"] == "escalated":
+                reason = review_outcome.get("reason", "unknown")
                 await workflow.execute_activity(
                     WorkerActivities.report_status,
-                    args=[envelope.run_id, "escalated", None, {"review": review_outcome}],
+                    args=[
+                        envelope.run_id,
+                        "escalated",
+                        f"implementation review escalated: {reason}",
+                        {"review": review_outcome},
+                    ],
                     start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 )
                 return RunResult(run_id=envelope.run_id, status="escalated")
@@ -942,6 +948,10 @@ async def _review_implementation(
             return {"status": "converged", "rounds": rounds}
         if round_number == max_review_rounds:
             return {"status": "escalated", "rounds": rounds, "reason": "max_review_rounds"}
+        revision_remaining = deadline - workflow.now()
+        if revision_remaining <= timedelta():
+            return {"status": "escalated", "rounds": rounds, "reason": "wall_clock"}
+        revision_timeout_seconds, revision_activity_timeout = _review_revision_timeouts(revision_remaining)
         try:
             revision = await workflow.execute_activity(
                 WorkerActivities.address_review_findings,
@@ -951,10 +961,16 @@ async def _review_implementation(
                         findings=blocking,
                         phases=phases,
                         max_turns=productive_turns,
-                        timeout_seconds=max(1, int(remaining.total_seconds()) - 1),
+                        # Reserve time for the harness to verify and publish the
+                        # agent's committed correction before the workflow deadline.
+                        timeout_seconds=revision_timeout_seconds,
                     )
                 ],
-                start_to_close_timeout=min(_REVIEW_ACTIVITY_TIMEOUT, remaining),
+                # A remediation is a developer execution, not a lightweight
+                # reviewer call.  The former may legitimately take longer than
+                # the 120-second review-model budget; it remains bounded by the
+                # authoritative phase wall-clock deadline.
+                start_to_close_timeout=revision_activity_timeout,
                 retry_policy=_RUN_PHASE_RETRY_POLICY,
             )
         except Exception as error:  # noqa: BLE001 - revision failures must escalate safely.
@@ -978,6 +994,14 @@ async def _review_implementation(
         if not revision.succeeded:
             return {"status": "escalated", "rounds": rounds, "reason": "revision_failed"}
     return {"status": "escalated", "rounds": rounds, "reason": "max_review_rounds"}
+
+
+def _review_revision_timeouts(remaining: timedelta) -> tuple[int, timedelta]:
+    """Bound a remediation by the workflow deadline while reserving verification time."""
+
+    if remaining <= timedelta():
+        raise ValueError("review revision requires positive remaining wall-clock time")
+    return max(1, int(remaining.total_seconds()) - 30), remaining
 
 
 def _execution_plan(plan: dict) -> tuple[list[PlanPhase], int, timedelta, int, float, int, str]:

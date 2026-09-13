@@ -22,10 +22,12 @@ _STATUS_MAP = {
     "phase_failed": "FAILED",
     "stopped_with_backup": "TIMED_OUT",
     "completed": "SUCCEEDED",
-    "escalated": "SUCCEEDED",
+    # An escalated review has not produced the immutable evidence required for
+    # implementation approval.  Treating it as success left the supervisor in
+    # IMPLEMENTING while the Workbench showed a misleading queued state.
+    "escalated": "FAILED",
     "failed": "FAILED",
     "rejected": "CANCELLED",
-    "revision_requested": "PENDING",
 }
 _TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"}
 _ALLOWED_TRANSITIONS = {
@@ -63,6 +65,15 @@ class RunStateReporter(Protocol):
         trace_context_available: bool,
     ) -> None: ...
 
+    async def record_stage_invocation_result(
+        self,
+        run_id: str,
+        stage_id: str,
+        role: str,
+        attempt: int,
+        status: str,
+    ) -> None: ...
+
     async def record_mcp_invocation_evidence(self, run_id: str, evidence: dict[str, object]) -> None: ...
 
     async def record_execution_workspace_lifecycle(self, run_id: str, job_name: str, lifecycle: str) -> None: ...
@@ -87,6 +98,11 @@ class NullRunStateReporter:
         trace_context_available: bool,
     ) -> None:
         del run_id, stage_id, role, attempt, trace_context_available
+
+    async def record_stage_invocation_result(
+        self, run_id: str, stage_id: str, role: str, attempt: int, status: str
+    ) -> None:
+        del run_id, stage_id, role, attempt, status
 
     async def record_mcp_invocation_evidence(self, run_id: str, evidence: dict[str, object]) -> None:
         del run_id, evidence
@@ -253,7 +269,7 @@ class PostgresRunStateReporter:
                         ),
                         {"run_id": run_id, "artifact_sha256": digest},
                     )
-            if status in {"failed", "phase_failed", "stopped_with_backup"}:
+            if status in {"failed", "phase_failed", "stopped_with_backup", "escalated"}:
                 # This status is emitted only after Temporal accepted a plan
                 # approval and entered execution. Preserve that distinction
                 # in the Supervisor projection: an execution failure must not
@@ -419,6 +435,52 @@ class PostgresRunStateReporter:
                     "event_id": str(uuid.uuid4()),
                     "run_id": run_id,
                     "dedupe_key": invocation_id,
+                    "payload": canonical,
+                    "created_at": datetime.now(timezone.utc),
+                },
+            )
+
+    async def record_stage_invocation_result(
+        self, run_id: str, stage_id: str, role: str, attempt: int, status: str
+    ) -> None:
+        """Append the terminal status for exactly one previously-started phase invocation."""
+
+        if status not in {"succeeded", "failed"}:
+            raise ValueError("stage invocation result status is invalid")
+        invocation_id = stage_invocation_id(run_id, stage_id, role, attempt)
+        payload = {
+            "schema_version": "1.0",
+            "event_type": "stage_invocation_finished",
+            "run_id": run_id,
+            "activity": {
+                "kind": "agent",
+                "actor_label": role.replace("_", " ").title(),
+                "log_evidence_available": False,
+            },
+            "invocation": {
+                "invocation_id": invocation_id,
+                "source": "worker_phase",
+                "stage_id": stage_id,
+                "role": role,
+                "attempt": attempt,
+            },
+            "result": {"status": status},
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO coordination_events (event_id, run_id, event_type, dedupe_key, payload, created_at)
+                    VALUES (:event_id, :run_id, 'stage_invocation_finished', :dedupe_key,
+                            CAST(:payload AS jsonb), :created_at)
+                    ON CONFLICT (dedupe_key) DO NOTHING
+                    """
+                ),
+                {
+                    "event_id": str(uuid.uuid4()),
+                    "run_id": run_id,
+                    "dedupe_key": f"{invocation_id}:finished",
                     "payload": canonical,
                     "created_at": datetime.now(timezone.utc),
                 },

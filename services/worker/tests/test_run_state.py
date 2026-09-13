@@ -69,16 +69,25 @@ async def test_successful_backup_stop_is_a_terminal_timed_out_lifecycle() -> Non
     assert event_parameters["to_status"] == "TIMED_OUT"
 
 
-async def test_review_escalation_is_a_terminal_successful_lifecycle() -> None:
+async def test_review_escalation_fails_the_implementation_projection() -> None:
     connection = _Connection(previous_status="RUNNING")
     reporter = object.__new__(PostgresRunStateReporter)
     reporter._engine = _Engine(connection)  # type: ignore[assignment]
 
-    await reporter.report("run-1", "escalated", None, {"review": {"status": "escalated"}})
+    await reporter.report(
+        "run-1",
+        "escalated",
+        "implementation review escalated: review_unavailable",
+        {"review": {"status": "escalated"}},
+    )
 
     _, update_parameters = connection.calls[1]
-    assert update_parameters["status"] == "SUCCEEDED"
+    supervisor_statement, supervisor_parameters = connection.calls[2]
+    assert update_parameters["status"] == "FAILED"
     assert update_parameters["terminal"] is True
+    assert update_parameters["error_summary"] == "implementation review escalated: review_unavailable"
+    assert "SET status = 'implementation_failed'" in supervisor_statement
+    assert supervisor_parameters["run_id"] == "run-1"
 
 
 async def test_failed_workflow_closes_the_supervisor_projection() -> None:

@@ -271,7 +271,30 @@ class WorkerActivities:
             workspace=replace(request.workspace, audit_invocation_id=invocation_id),
         )
         with self._telemetry.span("cogito.worker.phase", request.traceparent, request.tracestate):
-            return await self._harness.execute_phase(request)
+            try:
+                result = await self._harness.execute_phase(request)
+            except Exception:
+                await self._record_stage_invocation_result(request, "failed")
+                raise
+        await self._record_stage_invocation_result(request, "succeeded" if result.succeeded else "failed")
+        return result
+
+    async def _record_stage_invocation_result(self, request: PhaseExecutionRequest, status: str) -> None:
+        """Persist non-authoritative terminal audit evidence without changing workflow control flow."""
+
+        try:
+            await self._run_state.record_stage_invocation_result(
+                request.workspace.run_id,
+                request.phase.id,
+                "developer",
+                activity.info().attempt,
+                status,
+            )
+        except Exception:
+            activity.logger.warning(
+                "stage invocation completion audit evidence unavailable",
+                extra={"run_id": request.workspace.run_id, "phase_id": request.phase.id},
+            )
 
     @activity.defn
     async def backup_phase(self, request: BackupExecutionRequest) -> PhaseResult:
