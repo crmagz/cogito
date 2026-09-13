@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
 
 import httpx
 import pytest
 
 from cogito_api.models import AgentGatewayResolution, AiPlan, ProductSpecification
-from cogito_api.planner import LiteLLMPlanner, PlannerError, PlanningContext, ProductSpecificationContext
+from cogito_api.planner import LiteLLMPlanner, OperatorRefinement, PlannerError, PlanningContext, ProductSpecificationContext
 
 from .conftest import make_settings
 
@@ -77,14 +78,94 @@ async def test_litellm_planner_requests_json_with_dedicated_bearer_key(valid_pla
     assert '"title"' in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert "product specification has already been accepted" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert "repository-relative paths" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "Minimize the number of phases" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     planner_input = json.loads(captured["body"]["messages"][1]["content"])  # type: ignore[index]
     assert "target_repos" not in planner_input
     assert "constraints" not in planner_input
 
 
+async def test_litellm_planner_includes_operator_feedback_without_promoting_it_to_policy(valid_plan: dict) -> None:
+    """A reviewer comment is task input only; the trusted envelope remains API-owned."""
+
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        draft = copy.deepcopy(planner_draft(valid_plan)) | {
+            "operator_feedback_id": "decision-1",
+            "operator_feedback_response": "Adds the requested quality tooling to implementation and verification.",
+        }
+        draft["phases"][0]["tasks"] = ["Add Pydantic, mypy, and Ruff."]
+        draft["phases"][0]["verification"] = ["uv run ruff check src/"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(draft)}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
+    plan = await planner.generate(
+        PlanningContext(
+            initial_specification="Add a rate limiter.",
+            target_repos=valid_plan["target_repos"],
+            spec_set=valid_plan["spec_set"],
+            constraints=AiPlan.model_validate(valid_plan).constraints,
+            operator_refinement=OperatorRefinement(
+                refinement_id="decision-1",
+                source_gate="implementation",
+                comment="Add Pydantic, mypy, and Ruff before delivery.",
+            ),
+            base_plan=AiPlan.model_validate(valid_plan),
+        ),
+        planner_gateway(),
+    )
+
+    planner_input = json.loads(captured["body"]["messages"][1]["content"])  # type: ignore[index]
+    assert planner_input["operator_refinement"]["source_gate"] == "implementation"
+    assert planner_input["operator_refinement"]["comment"] == "Add Pydantic, mypy, and Ruff before delivery."
+    assert planner_input["base_plan"]["title"] == valid_plan["title"]
+    assert "cannot change repositories" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "do not create a separate phase solely" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "preserves every existing task" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert plan.operator_feedback_id == "decision-1"
+    assert valid_plan["phases"][0]["tasks"][0] in plan.phases[0].tasks
+    assert valid_plan["phases"][0]["verification"][0] in plan.phases[0].verification
+
+
+async def test_litellm_planner_honors_an_explicit_operator_replacement(valid_plan: dict) -> None:
+    """Only an exact removal directive may omit a base-plan verification command."""
+
+    removed = valid_plan["phases"][0]["verification"][0]
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        draft = copy.deepcopy(planner_draft(valid_plan)) | {
+            "operator_feedback_id": "decision-2",
+            "operator_feedback_response": "Replaces the failing verification command.",
+            "superseded_base_verification": [removed],
+        }
+        draft["phases"][0]["verification"] = ["npm run lint"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(draft)}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
+    plan = await planner.generate(
+        PlanningContext(
+            initial_specification="Replace the failing verification.",
+            target_repos=valid_plan["target_repos"],
+            spec_set=valid_plan["spec_set"],
+            constraints=AiPlan.model_validate(valid_plan).constraints,
+            operator_refinement=OperatorRefinement(
+                refinement_id="decision-2",
+                source_gate="implementation",
+                comment="Replace npm run typecheck with npm run lint.",
+            ),
+            base_plan=AiPlan.model_validate(valid_plan),
+        ),
+        planner_gateway(),
+    )
+
+    assert removed not in plan.phases[0].verification
+    assert "npm run lint" in plan.phases[0].verification
+
+
 async def test_litellm_planner_retries_an_invalid_requirement_partition(valid_plan: dict) -> None:
     duplicate = json.loads(json.dumps(valid_plan))
-    duplicate["phases"][1]["requirement_ids"] = ["functional-1"]
+    duplicate["phases"][1]["requirement_ids"] = ["acceptance-1"]
     requests: list[dict[str, object]] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -99,7 +180,7 @@ async def test_litellm_planner_retries_an_invalid_requirement_partition(valid_pl
             target_repos=valid_plan["target_repos"],
             spec_set=valid_plan["spec_set"],
             constraints=AiPlan.model_validate(valid_plan).constraints,
-            requirement_ids=("functional-1", "functional-2"),
+            requirement_ids=("acceptance-1", "acceptance-2"),
         ),
         planner_gateway(),
     )
@@ -110,7 +191,7 @@ async def test_litellm_planner_retries_an_invalid_requirement_partition(valid_pl
     assert "prior candidate was rejected" in requests[1]["messages"][2]["content"]  # type: ignore[index]
 
 
-@pytest.mark.parametrize("invalid_phase_ids", [["functional-1", "functional-1"], []])
+@pytest.mark.parametrize("invalid_phase_ids", [["acceptance-1", "acceptance-1"], []])
 async def test_litellm_planner_retries_requirement_partition_errors_rejected_by_the_schema(
     valid_plan: dict, invalid_phase_ids: list[str]
 ) -> None:
@@ -131,7 +212,7 @@ async def test_litellm_planner_retries_requirement_partition_errors_rejected_by_
             target_repos=valid_plan["target_repos"],
             spec_set=valid_plan["spec_set"],
             constraints=AiPlan.model_validate(valid_plan).constraints,
-            requirement_ids=("functional-1", "functional-2"),
+            requirement_ids=("acceptance-1", "acceptance-2"),
         ),
         planner_gateway(),
     )
@@ -142,7 +223,7 @@ async def test_litellm_planner_retries_requirement_partition_errors_rejected_by_
 
 async def test_litellm_planner_stops_after_three_requirement_partition_attempts(valid_plan: dict) -> None:
     duplicate = json.loads(json.dumps(valid_plan))
-    duplicate["phases"][1]["requirement_ids"] = ["functional-1"]
+    duplicate["phases"][1]["requirement_ids"] = ["acceptance-1"]
     requests = 0
 
     async def handler(_: httpx.Request) -> httpx.Response:
@@ -158,7 +239,7 @@ async def test_litellm_planner_stops_after_three_requirement_partition_attempts(
                 target_repos=valid_plan["target_repos"],
                 spec_set=valid_plan["spec_set"],
                 constraints=AiPlan.model_validate(valid_plan).constraints,
-                requirement_ids=("functional-1", "functional-2"),
+                requirement_ids=("acceptance-1", "acceptance-2"),
             ),
             planner_gateway(),
         )
@@ -201,6 +282,88 @@ async def test_litellm_planner_repairs_ephemeral_workspace_verification_paths(va
     plan = await planner.generate(
         PlanningContext(
             initial_specification="Add a rate limiter.",
+            target_repos=valid_plan["target_repos"],
+            spec_set=valid_plan["spec_set"],
+            constraints=AiPlan.model_validate(valid_plan).constraints,
+        ),
+        planner_gateway(),
+    )
+
+    assert_trusted_plan(plan, valid_plan)
+    assert requests == 2
+
+
+async def test_litellm_planner_repairs_optional_uv_configuration_marker_verification(valid_plan: dict) -> None:
+    invalid = json.loads(json.dumps(valid_plan))
+    invalid["phases"][0]["verification"] = ["grep -q '\\[tool.uv\\]' pyproject.toml"]
+    requests = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        candidate = planner_draft(invalid) if requests == 1 else planner_draft(valid_plan)
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(candidate)}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
+    plan = await planner.generate(
+        PlanningContext(
+            initial_specification="Scaffold a Python project with uv.",
+            target_repos=valid_plan["target_repos"],
+            spec_set=valid_plan["spec_set"],
+            constraints=AiPlan.model_validate(valid_plan).constraints,
+        ),
+        planner_gateway(),
+    )
+
+    assert_trusted_plan(plan, valid_plan)
+    assert requests == 2
+
+
+async def test_litellm_planner_repairs_volatile_uv_sync_output_verification(valid_plan: dict) -> None:
+    invalid = json.loads(json.dumps(valid_plan))
+    invalid["phases"][0]["verification"] = ["uv sync --frozen 2>&1 | grep -q 'Resolved'"]
+    requests = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        candidate = planner_draft(invalid) if requests == 1 else planner_draft(valid_plan)
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(candidate)}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
+
+    plan = await planner.generate(
+        PlanningContext(
+            initial_specification="Scaffold a Python project with uv.",
+            target_repos=valid_plan["target_repos"],
+            spec_set=valid_plan["spec_set"],
+            constraints=AiPlan.model_validate(valid_plan).constraints,
+        ),
+        planner_gateway(),
+    )
+
+    assert_trusted_plan(plan, valid_plan)
+    assert requests == 2
+
+
+@pytest.mark.parametrize("command", ["mypy src/", "ruff check src/", "pytest", "python -m pytest tests/"])
+async def test_litellm_planner_repairs_quality_tool_verification_outside_uv(
+    valid_plan: dict, command: str
+) -> None:
+    invalid = json.loads(json.dumps(valid_plan))
+    invalid["phases"][0]["verification"] = [command]
+    requests = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        candidate = planner_draft(invalid) if requests == 1 else planner_draft(valid_plan)
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(candidate)}}]})
+
+    planner = LiteLLMPlanner(make_settings(), transport=httpx.MockTransport(handler))
+    plan = await planner.generate(
+        PlanningContext(
+            initial_specification="Scaffold a Python project with uv.",
             target_repos=valid_plan["target_repos"],
             spec_set=valid_plan["spec_set"],
             constraints=AiPlan.model_validate(valid_plan).constraints,
@@ -255,31 +418,22 @@ def test_ai_plan_rejects_undeclared_output_fields(valid_plan: dict) -> None:
 def valid_product_specification() -> dict:
     """Return a source-grounded product specification fixture for planner contract tests."""
 
-    def source(statement_id: str, text: str, requirement_ids: list[str] | None = None) -> dict:
-        return {"id": statement_id, "text": text, "kind": "source", "source_segment_ids": ["source-1"], "requirement_ids": requirement_ids or []}
+    def source(statement_id: str, text: str) -> dict:
+        return {"kind": "source", "id": statement_id, "text": text, "source_segment_ids": ["source-1"]}
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "title": source("title", "Rate limiting"),
-        "problem_statement": source("problem", "The API needs bounded request rates."),
-        "desired_outcomes": [source("outcome-1", "Protect API endpoints from abuse.")],
-        "actors": [source("actor-1", "API consumers")],
-        "in_scope": [source("scope-in-1", "Rate limiting on API endpoints")],
-        "out_of_scope": [source("scope-out-1", "Changing authentication")],
-        "functional_requirements": [source("functional-1", "Enforce a bounded request rate.")],
-        "non_functional_requirements": [],
-        "acceptance_criteria": [source("acceptance-1", "Requests beyond the limit are rejected.", ["functional-1"])],
+        "user_story": source("user-story", "As an API operator, I need bounded request rates so the service remains available."),
+        "outcome": source("outcome", "Protect API endpoints from abuse."),
+        "acceptance_criteria": [source("acceptance-1", "Requests beyond the limit are rejected.")],
+        "technical_context": [source("technical-context", "Rate limiting is applied in the API gateway middleware pipeline.")],
         "assumptions": [
             {"id": "assumption-1", "text": "A default threshold is acceptable.", "kind": "assumption", "source_segment_ids": []}
         ],
-        "risks": [source("risk-1", "A low threshold can reject valid traffic.")],
         "unresolved_questions": [
             {"id": "question-1", "text": "What threshold should apply?", "kind": "question", "source_segment_ids": []}
         ],
-        "personas": [source("persona-1", "API consumer")],
-        "user_journeys": [source("journey-1", "Consumer receives an explicit rate-limit response")],
-        "constraints": [source("constraint-1", "The rate limiter remains observable")],
-        "dependencies": [source("dependency-1", "The API gateway middleware pipeline")],
     }
 
 
@@ -305,21 +459,15 @@ async def test_litellm_planner_generates_a_source_grounded_product_specification
     payload = json.loads(captured["body"]["messages"][1]["content"])  # type: ignore[index]
     assert payload == {"source_segments": [{"id": "source-1", "content": "Add a rate limiter."}]}
     assert "no tools" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
-    assert "title and problem_statement" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "Title, user_story, outcome" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert "Only assumptions may use kind=assumption" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "Default assumptions and unresolved_questions to empty arrays" in captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert '"acceptance_criteria"' in captured["body"]["messages"][0]["content"]  # type: ignore[index]
 
 
-async def test_litellm_planner_repairs_incomplete_product_specification_coverage() -> None:
+async def test_litellm_planner_repairs_an_incomplete_work_specification() -> None:
     incomplete = valid_product_specification()
-    incomplete["non_functional_requirements"] = [
-        {
-            "id": "non-functional-1",
-            "text": "Record rate limit decisions in metrics.",
-            "kind": "source",
-            "source_segment_ids": ["source-1"],
-        }
-    ]
+    incomplete["schema_version"] = 2
     requests = 0
 
     async def handler(_: httpx.Request) -> httpx.Response:
@@ -371,8 +519,8 @@ async def test_litellm_planner_repairs_omitted_citation_for_a_single_source_segm
 
 def test_product_specification_rejects_a_question_as_a_requirement() -> None:
     fixture = valid_product_specification()
-    fixture["functional_requirements"][0]["kind"] = "question"
-    fixture["functional_requirements"][0]["source_segment_ids"] = []
+    fixture["acceptance_criteria"][0]["kind"] = "question"
+    fixture["acceptance_criteria"][0]["source_segment_ids"] = []
 
     with pytest.raises(ValueError, match="must be source-grounded"):
         ProductSpecification.model_validate(fixture)
@@ -380,7 +528,7 @@ def test_product_specification_rejects_a_question_as_a_requirement() -> None:
 
 def test_product_specification_is_bounded_to_readable_workbench_evidence() -> None:
     fixture = valid_product_specification()
-    fixture["desired_outcomes"] = [
+    fixture["technical_context"] = [
         {
             "id": f"outcome-{index}",
             "text": "x" * 10_000,
