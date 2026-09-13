@@ -147,6 +147,7 @@ def operator_receives_bounded_redacted_output(
             "message": f"{audit_context['invocation_id']} stdout token=[REDACTED]",
         }],
         "next_cursor": None,
+        "tail_cursor": None,
     }
     assert audit_log_reader.invocations == [audit_context["invocation_id"]]
     assert len(audit_log_reader.occurred_at) == 1
@@ -157,4 +158,4 @@ def operator_receives_bounded_redacted_output(
 def unrelated_event_has_no_raw_output(audit_context: dict[str, object]) -> None:
     response = audit_context["non_log_response"]
     assert response.status_code == 200
-    assert response.json() == {"availability": "not_available", "lines": [], "next_cursor": None}
+    assert response.json() == {"availability": "not_available", "lines": [], "next_cursor": None, "tail_cursor": None}

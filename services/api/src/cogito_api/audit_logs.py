@@ -37,19 +37,28 @@ class AuditLogPage:
     availability: str
     lines: list[AuditLogLine]
     next_cursor: str | None = None
+    tail_cursor: str | None = None
 
 
 class AuditLogReader(Protocol):
     async def read_invocation(
-        self, invocation_id: str, cursor: str | None = None, occurred_at: str | None = None
+        self,
+        invocation_id: str,
+        cursor: str | None = None,
+        occurred_at: str | None = None,
+        tail_after: str | None = None,
     ) -> AuditLogPage: ...
 
 
 class DisabledAuditLogReader:
     async def read_invocation(
-        self, invocation_id: str, cursor: str | None = None, occurred_at: str | None = None
+        self,
+        invocation_id: str,
+        cursor: str | None = None,
+        occurred_at: str | None = None,
+        tail_after: str | None = None,
     ) -> AuditLogPage:
-        del invocation_id, cursor, occurred_at
+        del invocation_id, cursor, occurred_at, tail_after
         return AuditLogPage(availability="disabled", lines=[])
 
 
@@ -62,11 +71,25 @@ class LokiAuditLogReader:
         self._transport = transport
 
     async def read_invocation(
-        self, invocation_id: str, cursor: str | None = None, occurred_at: str | None = None
+        self,
+        invocation_id: str,
+        cursor: str | None = None,
+        occurred_at: str | None = None,
+        tail_after: str | None = None,
     ) -> AuditLogPage:
         if not _INVOCATION_ID.fullmatch(invocation_id):
             return AuditLogPage(availability="unavailable", lines=[])
-        start, end = _invocation_window(cursor, occurred_at)
+        if tail_after is not None:
+            tail_window = _tail_invocation_window(tail_after, occurred_at)
+            if tail_window is None:
+                return AuditLogPage(availability="unavailable", lines=[])
+            start, end = tail_window
+            start_nanoseconds = str(start)
+            direction = "FORWARD"
+        else:
+            start, end = _invocation_window(cursor, occurred_at)
+            start_nanoseconds = str(int(start.timestamp() * 1_000_000_000))
+            direction = "BACKWARD"
         query = '{namespace=~"cogito|cogito-executions"} |= "' + invocation_id + ' "'
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds, transport=self._transport) as client:
@@ -74,19 +97,24 @@ class LokiAuditLogReader:
                     f"{self._endpoint}/loki/api/v1/query_range",
                     params={
                         "query": query,
-                        "start": str(int(start.timestamp() * 1_000_000_000)),
+                        "start": start_nanoseconds,
                         "end": str(end),
                         "limit": str(_MAX_LINES),
-                        "direction": "BACKWARD",
+                        "direction": direction,
                     },
                 )
                 response.raise_for_status()
                 body = response.json()
         except (httpx.HTTPError, ValueError):
             return AuditLogPage(availability="unavailable", lines=[])
-        lines, last_timestamp, truncated = _parse_loki_lines(body)
-        next_cursor = _loki_cursor(last_timestamp) if lines and (truncated or len(lines) == _MAX_LINES) else None
-        return AuditLogPage(availability="available", lines=lines, next_cursor=next_cursor)
+        lines, page_boundary_timestamp, newest_timestamp, truncated = _parse_loki_lines(body)
+        next_cursor = _loki_cursor(page_boundary_timestamp) if lines and (truncated or len(lines) == _MAX_LINES) else None
+        return AuditLogPage(
+            availability="available",
+            lines=lines,
+            next_cursor=next_cursor,
+            tail_cursor=_loki_cursor(newest_timestamp) if newest_timestamp is not None else tail_after,
+        )
 
 
 def _parse_cursor(value: str | None) -> datetime | None:
@@ -139,15 +167,27 @@ def _invocation_window(cursor: str | None, occurred_at: str | None) -> tuple[dat
     return event_time - _INVOCATION_LOOKBACK, min(end_nanoseconds, maximum_nanoseconds)
 
 
-def _parse_loki_lines(body: object) -> tuple[list[AuditLogLine], int | None, bool]:
+def _tail_invocation_window(tail_after: str, occurred_at: str | None) -> tuple[int, int] | None:
+    """Return the exclusive forward window for one already-authorized live invocation."""
+
+    cursor = _parse_loki_cursor(tail_after)
+    if cursor is None:
+        return None
+    event_time = _parse_cursor(occurred_at)
+    end = min(datetime.now(timezone.utc), event_time + _INVOCATION_MAX_DURATION) if event_time else datetime.now(timezone.utc)
+    return cursor + 1, _datetime_nanoseconds(end)
+
+
+def _parse_loki_lines(body: object) -> tuple[list[AuditLogLine], int | None, int | None, bool]:
     if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
         return [], None, False
     streams = body["data"].get("result")
     if not isinstance(streams, list):
-        return [], None, False
+        return [], None, None, False
     lines: list[AuditLogLine] = []
     byte_count = 0
-    last_timestamp: int | None = None
+    page_boundary_timestamp: int | None = None
+    newest_timestamp: int | None = None
     for stream in streams:
         if not isinstance(stream, dict) or not isinstance(stream.get("values"), list):
             continue
@@ -165,8 +205,9 @@ def _parse_loki_lines(body: object) -> tuple[list[AuditLogLine], int | None, boo
             message = _SECRET.sub(r"\1[REDACTED]", raw)[:4096]
             encoded = len(message.encode())
             if len(lines) >= _MAX_LINES or byte_count + encoded > _MAX_BYTES:
-                return lines, last_timestamp, True
+                return lines, page_boundary_timestamp, newest_timestamp, True
             lines.append(AuditLogLine(timestamp=timestamp_iso, stream=source[:256], message=message))
             byte_count += encoded
-            last_timestamp = timestamp_nanoseconds
-    return lines, last_timestamp, False
+            page_boundary_timestamp = timestamp_nanoseconds
+            newest_timestamp = max(newest_timestamp or timestamp_nanoseconds, timestamp_nanoseconds)
+    return lines, page_boundary_timestamp, newest_timestamp, False
