@@ -132,6 +132,7 @@ from .notifications import NotificationOutboxDispatcher, notification_sink, stop
 from .observability import Telemetry, TelemetrySettings
 from .planner import (
     assemble_agent_plan_draft,
+    validate_agent_plan_draft,
     LiteLLMPlanner,
     Planner,
     PlannerError,
@@ -1393,27 +1394,26 @@ def create_app(
                     planner_output = handoffs.get("planner") if isinstance(handoffs, dict) else None
                     if not isinstance(planner_output, str):
                         raise PlannerError("planner agent did not return a handoff")
-                    generated_plan = assemble_agent_plan_draft(
-                        planner_output,
-                        PlanningContext(
-                            initial_specification=initial_specification,
-                            target_repos=record.target_repos,
-                            spec_set=record.spec_set,
-                            constraints=record.constraints,
-                            agent_max_turns_per_phase=agent_turn_budget,
-                            requirement_ids=tuple(selected_specification.requirement_ids),
-                            operator_refinement=(
-                                OperatorRefinement(
-                                    refinement_id=refinement.refinement_id,
-                                    source_gate=refinement.source_gate,
-                                    comment=refinement.comment,
-                                )
-                                if refinement is not None
-                                else None
-                            ),
-                            base_plan=base_plan,
+                    agent_planning_context = PlanningContext(
+                        initial_specification=initial_specification,
+                        target_repos=record.target_repos,
+                        spec_set=record.spec_set,
+                        constraints=record.constraints,
+                        agent_max_turns_per_phase=agent_turn_budget,
+                        requirement_ids=tuple(selected_specification.requirement_ids),
+                        operator_refinement=(
+                            OperatorRefinement(
+                                refinement_id=refinement.refinement_id,
+                                source_gate=refinement.source_gate,
+                                comment=refinement.comment,
+                            )
+                            if refinement is not None
+                            else None
                         ),
+                        base_plan=base_plan,
                     )
+                    generated_plan = assemble_agent_plan_draft(planner_output, agent_planning_context)
+                    validate_agent_plan_draft(generated_plan, agent_planning_context, settings)
             except (ValueError, json.JSONDecodeError) as error:
                 logger.exception("Planner contract assembly failed", extra={"run_id": run_id})
                 raise HTTPException(
@@ -1486,6 +1486,8 @@ def create_app(
             )
             carrier: dict[str, str] = {}
             telemetry.inject(carrier)
+            coordination_events = await supervisor_store.list_coordination_events(updated.run_id, limit=100)
+            implementation_attempt = next_implementation_attempt(coordination_events)
             resolutions = await resolve_roles(
                 updated.run_id,
                 ["discovery", "planner", "python_coding", "nodejs_coding", "terraform_coding", "cdk_coding", "developer", "adversarial_review", "reviewer", "validator", "ephemeral_environment_tester", "pull_request_publisher"],
@@ -1647,6 +1649,7 @@ def create_app(
                     workflow_id=updated.workflow_id,
                     requires_plan_approval=True,
                     requires_implementation_approval=True,
+                    implementation_attempt=implementation_attempt,
                     specification_evaluation_sha256=updated.selected_specification_evaluation_artifact.sha256,
                     specification_requirement_ids=selected_specification.requirement_ids,
                     registry_resolutions=resolutions,
@@ -1891,6 +1894,13 @@ def create_app(
             resolved_workflow_artifact = (
                 store.put_resolved_workflow(record.run_id, resolved_workflow) if resolved_workflow is not None else None
             )
+            # Temporal retries of a closed implementation start a fresh
+            # workflow execution, so the activity retry counter restarts at
+            # one. Derive the next durable outer attempt from audit evidence
+            # before reopening the run; this keeps Attempt 2 log rows and
+            # graph nodes distinct from the failed invocation.
+            coordination_events = await supervisor_store.list_coordination_events(run_id, limit=100)
+            implementation_attempt = next_implementation_attempt(coordination_events, minimum_attempt=2)
             carrier: dict[str, str] = {}
             telemetry.inject(carrier)
             redriven = await supervisor_store.redrive_failed_implementation(run_id)
@@ -1909,6 +1919,7 @@ def create_app(
                     workflow_id=redriven.workflow_id,
                     requires_plan_approval=False,
                     requires_implementation_approval=True,
+                    implementation_attempt=implementation_attempt,
                     specification_evaluation_sha256=redriven.selected_specification_evaluation_artifact.sha256,
                     specification_requirement_ids=tuple(
                         sorted({requirement_id for phase in approved_plan.phases for requirement_id in phase.requirement_ids})
@@ -2672,6 +2683,33 @@ def create_app(
                 requires_confirmation=True,
             )
         ] if record.plan_artifact is None else []
+
+    def next_implementation_attempt(
+        coordination_events: list[tuple[CoordinationEvent, bool, int, str | None]],
+        *,
+        minimum_attempt: int = 1,
+    ) -> int:
+        """Return the next durable implementation attempt without inferring workflow state.
+
+        Discovery and planning belong to their own agent path. Every other
+        recorded agent binding is implementation evidence and therefore
+        participates in a redrive's monotonically increasing attempt number.
+        Callers can require a redrive to be the second or later attempt even
+        when the prior execution failed before its first environment emitted
+        an audit event.
+        """
+
+        maximum = 0
+        for event, _delivered, _attempts, _last_error in coordination_events:
+            if event.event_type != "stage_invocation_started":
+                continue
+            binding = event.payload.get("agent_binding")
+            if not isinstance(binding, dict) or binding.get("role") in {"discovery", "planner"}:
+                continue
+            attempt = binding.get("attempt")
+            if isinstance(attempt, int) and attempt > maximum:
+                maximum = attempt
+        return max(minimum_attempt, maximum + 1)
 
     def workbench_graph(
         stages: list[WorkbenchStageSummary],
@@ -3986,7 +4024,9 @@ def _planning_agent_prompt(
         "requirement ownership. Every verification command must be runnable immediately after its own phase tasks; "
         "it cannot depend on work deferred to another phase. For a repository managed by uv, verification commands "
         "must use the project environment explicitly (for example, `uv run pytest` and `uv run python -c ...`). "
-        "Never use bare `python`, bare `pytest`, or `pip` as verification commands for a uv-managed project.\n\n"
+        "Never use bare `python`, bare `pytest`, or `pip` as verification commands for a uv-managed project. "
+        "For uv.lock, do not assert an invented `python-version` field: modern uv lockfiles use `requires-python`; "
+        "use `uv sync --frozen` plus a file-existence check instead.\n\n"
         "Discovery, adversarial review, implementation approval, and pull-request publication are platform-owned "
         "workflow activities that Cogito runs outside this plan. Never create a phase for any of those activities, "
         "or for describing the workflow/audit trail. Return only repository-delivery phases. Every returned phase "

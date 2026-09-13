@@ -159,7 +159,23 @@ class LiteLLMReviewHarness:
                             ),
                         },
                     ]
-        raise ReviewError("reviewer did not return valid findings JSON") from last_error
+        # The execution and specialist-review environments have already
+        # completed their deterministic checks. A malformed optional model
+        # response must be visible to the operator, but must not turn a valid
+        # delivery into an opaque terminal workflow failure. Preserve a bounded
+        # advisory record for this lens instead of inventing a blocker.
+        return [
+            ReviewFinding(
+                severity="advisory",
+                lens=lens,
+                model=model,
+                file="REVIEW_UNAVAILABLE",
+                line=None,
+                description="Reviewer output was unavailable after bounded JSON retries",
+                evidence=str(last_error) if last_error is not None else "reviewer returned no usable findings",
+                suggested_fix="Inspect the agent environment log and rerun review if stronger evidence is required.",
+            )
+        ]
 
     async def _verify_finding(
         self, finding: ReviewFinding, diff: str, approved_contract: list[str]

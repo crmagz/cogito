@@ -250,14 +250,14 @@ class WorkerActivities:
             extra={"run_id": request.workspace.run_id, "phase_id": request.phase.id},
         )
         invocation_id = stage_invocation_id(
-            request.workspace.run_id, request.phase.id, request.agent_role, activity.info().attempt
+            request.workspace.run_id, request.phase.id, request.agent_role, request.audit_attempt
         )
         try:
             await self._run_state.record_stage_invocation(
                 request.workspace.run_id,
                 request.phase.id,
                 request.agent_role,
-                activity.info().attempt,
+                request.audit_attempt,
                 request.traceparent is not None,
             )
         except Exception:
@@ -335,7 +335,7 @@ class WorkerActivities:
                 request.workspace.run_id,
                 request.phase.id,
                 request.agent_role,
-                activity.info().attempt,
+                request.audit_attempt,
                 status,
             )
         except Exception:

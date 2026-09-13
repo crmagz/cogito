@@ -320,6 +320,10 @@ def test_workbench_offers_and_starts_an_immutable_plan_redrive(
             "requires_confirmation": True,
         }
     ]
+    # The initial workflow was started when the immutable plan was persisted.
+    # Isolate the resumed execution envelope so this assertion models Temporal
+    # starting a new run after the failed workflow has closed.
+    starter.started_runs.clear()
 
     redrive = client.post(f"/api/v1/planning-runs/{run_id}/redrive-implementation", headers=_headers("redrive-1"))
 
@@ -328,6 +332,7 @@ def test_workbench_offers_and_starts_an_immutable_plan_redrive(
     assert supervisor_store.planning_runs[run_id].plan_artifact == record.plan_artifact
     assert supervisor_store.agent_runs[run_id].status is AgentRunStatus.QUEUED
     assert len(starter.started_runs) == 1
+    assert starter.started_runs[-1].implementation_attempt == 2
 
 
 def test_redrive_restores_the_failed_state_when_temporal_startup_fails(
