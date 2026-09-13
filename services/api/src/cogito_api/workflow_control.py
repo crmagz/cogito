@@ -89,9 +89,9 @@ class WorkflowConfigurationStore(Protocol):
 
     async def get_binding(self, project_id: str) -> ProjectWorkflowBinding | None: ...
 
-    async def put_run_resolution(self, resolution: ResolvedWorkflow) -> None: ...
+    async def put_run_resolution(self, resolution: ResolvedWorkflow, *, workflow_id: str) -> None: ...
 
-    async def get_run_resolution(self, run_id: str) -> ResolvedWorkflow | None: ...
+    async def get_run_resolution(self, run_id: str, *, workflow_id: str | None = None) -> ResolvedWorkflow | None: ...
 
     async def put_run_admission(self, admission: WorkflowAdmissionSnapshot) -> None: ...
 
@@ -208,7 +208,7 @@ class InMemoryWorkflowConfigurationStore:
         self.templates: dict[str, WorkflowTemplate] = {}
         self.policies: dict[str, WorkflowPolicy] = {}
         self.bindings: dict[str, ProjectWorkflowBinding] = {}
-        self.resolutions: dict[str, ResolvedWorkflow] = {}
+        self.resolutions: dict[tuple[str, str], ResolvedWorkflow] = {}
         self.admissions: dict[str, WorkflowAdmissionSnapshot] = {}
         self.template_states: dict[str, WorkflowConfigurationState] = {}
         self.policy_states: dict[str, WorkflowConfigurationState] = {}
@@ -317,14 +317,20 @@ class InMemoryWorkflowConfigurationStore:
     async def get_binding(self, project_id: str) -> ProjectWorkflowBinding | None:
         return self.bindings.get(project_id)
 
-    async def put_run_resolution(self, resolution: ResolvedWorkflow) -> None:
-        existing = self.resolutions.get(resolution.run_id)
+    async def put_run_resolution(self, resolution: ResolvedWorkflow, *, workflow_id: str) -> None:
+        key = (resolution.run_id, workflow_id)
+        existing = self.resolutions.get(key)
         if existing is not None and existing != resolution:
             raise WorkflowConfigurationError("run workflow resolution is immutable")
-        self.resolutions[resolution.run_id] = resolution
+        self.resolutions[key] = resolution
 
-    async def get_run_resolution(self, run_id: str) -> ResolvedWorkflow | None:
-        return self.resolutions.get(run_id)
+    async def get_run_resolution(self, run_id: str, *, workflow_id: str | None = None) -> ResolvedWorkflow | None:
+        if workflow_id is not None:
+            return self.resolutions.get((run_id, workflow_id))
+        return next(
+            (resolution for (stored_run_id, _), resolution in reversed(self.resolutions.items()) if stored_run_id == run_id),
+            None,
+        )
 
     async def put_run_admission(self, admission: WorkflowAdmissionSnapshot) -> None:
         existing = self.admissions.get(admission.run_id)
@@ -510,12 +516,16 @@ class PostgresWorkflowConfigurationStore:
             )).mappings().one_or_none()
         return ProjectWorkflowBinding.model_validate(row["payload"]) if row is not None else None
 
-    async def put_run_resolution(self, resolution: ResolvedWorkflow) -> None:
+    async def put_run_resolution(self, resolution: ResolvedWorkflow, *, workflow_id: str) -> None:
         payload = canonical_configuration_bytes(resolution).decode()
         digest = sha256(payload.encode()).hexdigest()
         async with self._engine.begin() as connection:
             result = await connection.execute(
-                text("SELECT payload_sha256 FROM run_workflow_resolutions WHERE run_id = :run_id"), {"run_id": resolution.run_id}
+                text(
+                    "SELECT payload_sha256 FROM run_workflow_resolutions "
+                    "WHERE run_id = :run_id AND workflow_id = :workflow_id"
+                ),
+                {"run_id": resolution.run_id, "workflow_id": workflow_id},
             )
             existing = result.scalar_one_or_none()
             if existing is not None:
@@ -523,15 +533,29 @@ class PostgresWorkflowConfigurationStore:
                     raise WorkflowConfigurationError("run workflow resolution is immutable")
                 return
             await connection.execute(
-                text("""INSERT INTO run_workflow_resolutions (run_id, payload, payload_sha256, created_at)
-                    VALUES (:run_id, CAST(:payload AS jsonb), :digest, :created_at)"""),
-                {"run_id": resolution.run_id, "payload": payload, "digest": digest, "created_at": datetime.now(timezone.utc)},
+                text("""INSERT INTO run_workflow_resolutions (run_id, workflow_id, payload, payload_sha256, created_at)
+                    VALUES (:run_id, :workflow_id, CAST(:payload AS jsonb), :digest, :created_at)"""),
+                {
+                    "run_id": resolution.run_id,
+                    "workflow_id": workflow_id,
+                    "payload": payload,
+                    "digest": digest,
+                    "created_at": datetime.now(timezone.utc),
+                },
             )
 
-    async def get_run_resolution(self, run_id: str) -> ResolvedWorkflow | None:
+    async def get_run_resolution(self, run_id: str, *, workflow_id: str | None = None) -> ResolvedWorkflow | None:
+        predicate = "AND workflow_id = :workflow_id" if workflow_id is not None else ""
+        parameters: dict[str, str] = {"run_id": run_id}
+        if workflow_id is not None:
+            parameters["workflow_id"] = workflow_id
         async with self._engine.connect() as connection:
             row = (await connection.execute(
-                text("SELECT payload FROM run_workflow_resolutions WHERE run_id = :run_id"), {"run_id": run_id}
+                text(
+                    "SELECT payload FROM run_workflow_resolutions WHERE run_id = :run_id "
+                    f"{predicate} ORDER BY created_at DESC LIMIT 1"
+                ),
+                parameters,
             )).mappings().one_or_none()
         return ResolvedWorkflow.model_validate(row["payload"]) if row is not None else None
 

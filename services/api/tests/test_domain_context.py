@@ -43,16 +43,14 @@ def test_domain_context_rejects_a_hand_edited_generated_graph() -> None:
 def test_product_manager_can_supply_known_repositories_without_relationships() -> None:
     intake = SpecificationIntake.model_validate(
         {
-            "objective": "Add a checkout receipt.",
-            "actors": ["buyer"],
-            "desired_outcomes": ["A buyer receives a receipt."],
-            "scope_in": ["Receipt generation"],
-            "acceptance_expectations": ["The receipt includes an order ID."],
+            "title": "Add a checkout receipt",
+            "user_story": "As a buyer, I need a receipt so I can confirm my purchase.",
+            "outcome": "A buyer receives a receipt with an order ID.",
+            "acceptance_criteria": ["The receipt includes an order ID."],
             "repository_candidates": [
                 {"repository_id": "storefront"},
                 {"repository_id": "orders-api", "note": "Likely order contract change."},
             ],
-            "discovery_preference": "supplied_first",
         }
     )
 

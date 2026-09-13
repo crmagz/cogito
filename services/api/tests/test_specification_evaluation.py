@@ -16,11 +16,11 @@ def test_v2_specification_evaluation_is_ready_and_digest_bound(valid_product_spe
     assert evaluation.readiness.value == "ready"
     assert evaluation.specification_sha256 == "a" * 64
     assert evaluation.specification_revision == 3
-    assert evaluation.coverage.covered_requirement_ids == ["functional-1", "functional-2"]
+    assert evaluation.coverage.covered_requirement_ids == ["acceptance-1", "acceptance-2"]
 
 
 def test_legacy_or_ambiguous_specification_needs_revision(valid_product_specification: dict) -> None:
-    valid_product_specification["schema_version"] = 1
+    valid_product_specification["schema_version"] = 2
     valid_product_specification["unresolved_questions"] = [
         {"id": "question-1", "text": "What rate applies?", "kind": "question", "source_segment_ids": []}
     ]
@@ -35,13 +35,52 @@ def test_legacy_or_ambiguous_specification_needs_revision(valid_product_specific
     assert {finding.kind.value for finding in evaluation.findings} == {"missing", "ambiguous"}
 
 
+def test_legacy_specification_is_compacted_but_cannot_skip_revision() -> None:
+    legacy = {
+        "schema_version": 2,
+        "title": {"kind": "source", "id": "title", "text": "Rate limiting", "source_segment_ids": ["source-1"]},
+        "problem_statement": {"kind": "source", "id": "problem", "text": "Protect the API.", "source_segment_ids": ["source-1"]},
+        "desired_outcomes": [
+            {"kind": "source", "id": "outcome", "text": "Requests are bounded.", "source_segment_ids": ["source-1"]}
+        ],
+        "functional_requirements": [
+            {"kind": "source", "id": "requirement", "text": "Enforce limits.", "source_segment_ids": ["source-1"]}
+        ],
+        "acceptance_criteria": [
+            {
+                "kind": "source",
+                "id": "acceptance",
+                "text": "Over-limit requests are rejected.",
+                "source_segment_ids": ["source-1"],
+                "requirement_ids": ["requirement"],
+            }
+        ],
+    }
+
+    specification = ProductSpecification.model_validate(legacy)
+    evaluation = evaluate_specification(specification, specification_sha256="d" * 64, specification_revision=1)
+
+    assert specification.schema_version == 2
+    assert list(specification.model_dump(mode="json")) == [
+        "schema_version",
+        "title",
+        "user_story",
+        "outcome",
+        "acceptance_criteria",
+        "technical_context",
+        "assumptions",
+        "unresolved_questions",
+    ]
+    assert evaluation.readiness.value == "needs_revision"
+
+
 def test_traceability_rejects_unknown_duplicate_and_uncovered_requirements(valid_product_specification: dict) -> None:
     specification = ProductSpecification.model_validate(valid_product_specification)
 
     for phases, message in (
         ([[]], "each plan phase"),
         ([["unknown"]], "unknown"),
-        ([["functional-1"], ["functional-1"]], "more than once"),
+        ([["acceptance-1"], ["acceptance-1"]], "more than once"),
     ):
         try:
             validate_plan_traceability(specification, phases)
@@ -52,7 +91,7 @@ def test_traceability_rejects_unknown_duplicate_and_uncovered_requirements(valid
 
 
 def test_evaluation_requires_acceptance_coverage_for_each_requirement(valid_product_specification: dict) -> None:
-    valid_product_specification["acceptance_criteria"][1]["requirement_ids"] = []
+    valid_product_specification["acceptance_criteria"] = []
 
     evaluation = evaluate_specification(
         ProductSpecification.model_validate(valid_product_specification),
@@ -61,12 +100,12 @@ def test_evaluation_requires_acceptance_coverage_for_each_requirement(valid_prod
     )
 
     assert evaluation.readiness.value == "needs_revision"
-    assert evaluation.coverage.uncovered_requirement_ids == ["functional-2"]
+    assert evaluation.coverage.uncovered_requirement_ids == []
 
 
 def test_claimed_requirement_cannot_be_an_assumption(valid_product_specification: dict) -> None:
-    valid_product_specification["functional_requirements"][0]["kind"] = "assumption"
-    valid_product_specification["functional_requirements"][0]["source_segment_ids"] = []
+    valid_product_specification["acceptance_criteria"][0]["kind"] = "assumption"
+    valid_product_specification["acceptance_criteria"][0]["source_segment_ids"] = []
 
     try:
         ProductSpecification.model_validate(valid_product_specification)

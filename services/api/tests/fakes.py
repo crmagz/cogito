@@ -41,6 +41,7 @@ from cogito_api.supervisor import (
     CoordinationEvent,
     ImplementationApprovalRecord,
     NotificationDelivery,
+    OperatorRefinementRecord,
     OutboxDelivery,
     PlanningGenerationDelivery,
     PlanningRunRecord,
@@ -208,13 +209,17 @@ class InMemorySupervisorStore:
         self.plan_product_specification_bindings: dict[tuple[str, int], tuple[int, ArtifactReference]] = {}
         self.approvals: dict[tuple[str, int, str], ApprovalRecord] = {}
         self.approval_request_hashes: dict[tuple[str, int, str], str] = {}
+        self.approval_comments: dict[str, str] = {}
         self.outbox: dict[str, OutboxDelivery] = {}
         self.leased_decision_ids: set[str] = set()
         self.agent_runs: dict[str, AgentRunRecord] = {}
         self.agent_run_lifecycle_transitions: dict[str, list[WorkbenchAgentLifecycleTransitionRecord]] = {}
         self.implementation_approvals: dict[tuple[str, int, str], ImplementationApprovalRecord] = {}
         self.implementation_request_hashes: dict[tuple[str, int, str], str] = {}
+        self.implementation_comments: dict[str, str] = {}
         self.implementation_outbox: dict[str, OutboxDelivery] = {}
+        self.operator_refinements: dict[str, OperatorRefinementRecord] = {}
+        self.active_refinements: dict[str, str] = {}
         self.registrations: dict[tuple[str, str], RegistrationManifest] = {}
         self.registry_policies: dict[str, dict[str, str]] = {}
         self.registry_mcp_policies: dict[str, McpBindingPolicy] = {}
@@ -646,6 +651,56 @@ class InMemorySupervisorStore:
     async def get_planning_run(self, run_id: str) -> PlanningRunRecord | None:
         return self.planning_runs.get(run_id)
 
+    async def get_active_operator_refinement(self, run_id: str) -> OperatorRefinementRecord | None:
+        refinement_id = self.active_refinements.get(run_id)
+        return self.operator_refinements.get(refinement_id) if refinement_id is not None else None
+
+    async def clear_active_operator_refinement(self, run_id: str, refinement_id: str) -> None:
+        if self.active_refinements.get(run_id) == refinement_id:
+            self.active_refinements.pop(run_id, None)
+
+    async def redrive_failed_implementation(self, run_id: str) -> PlanningRunRecord:
+        record = self.planning_runs[run_id]
+        if (
+            record.status is not PlanningRunStatus.IMPLEMENTATION_FAILED
+            or record.plan_artifact is None
+            or record.workflow_id is None
+        ):
+            raise ValueError("planning run is not eligible for an implementation redrive")
+        updated = replace(record, status=PlanningRunStatus.IMPLEMENTING, implementation_artifact=None)
+        self.planning_runs[run_id] = updated
+        agent = self.agent_runs.get(run_id)
+        if agent is not None:
+            self.agent_runs[run_id] = replace(
+                agent,
+                status=AgentRunStatus.QUEUED,
+                error_summary=None,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                last_heartbeat_at=None,
+            )
+        self._append_coordination_event(run_id, "implementation_redrive_requested", lifecycle_status="QUEUED")
+        return updated
+
+    async def abort_implementation_redrive(self, run_id: str, error_summary: str) -> None:
+        record = self.planning_runs[run_id]
+        if record.status is not PlanningRunStatus.IMPLEMENTING or record.implementation_artifact is not None:
+            return
+        self.planning_runs[run_id] = replace(record, status=PlanningRunStatus.IMPLEMENTATION_FAILED)
+        agent = self.agent_runs.get(run_id)
+        if agent is not None:
+            self.agent_runs[run_id] = replace(
+                agent,
+                status=AgentRunStatus.FAILED,
+                error_summary=error_summary[:512],
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+        self._append_coordination_event(
+            run_id,
+            "implementation_redrive_start_failed",
+            lifecycle_status="FAILED",
+            message=error_summary[:512],
+        )
+
     async def cancel_planning_run(self, run_id: str) -> PlanningRunRecord:
         record = self.planning_runs[run_id]
         if record.status is PlanningRunStatus.CANCELLED:
@@ -1023,6 +1078,9 @@ class InMemorySupervisorStore:
         )
         self.approvals[approval_key] = record
         self.approval_request_hashes[approval_key] = request_sha256
+        if decision is PlanApprovalDecision.REQUEST_REVISION:
+            assert comment is not None
+            self.approval_comments[record.decision_id] = comment
         self.outbox[record.decision_id] = OutboxDelivery(
             decision_id=record.decision_id,
             run_id=record.run_id,
@@ -1072,6 +1130,20 @@ class InMemorySupervisorStore:
                     PlanApprovalDecision.REJECT: PlanningRunStatus.REJECTED,
                     PlanApprovalDecision.REQUEST_REVISION: PlanningRunStatus.PLANNING,
                 }[record.decision]
+                if record.decision is PlanApprovalDecision.REQUEST_REVISION:
+                    refinement = OperatorRefinementRecord(
+                        refinement_id=record.decision_id,
+                        run_id=record.run_id,
+                        source_gate="plan",
+                        artifact_sha256=record.artifact_sha256,
+                        actor_id=record.actor_id,
+                        comment=self.approval_comments[record.decision_id],
+                        created_at=record.created_at,
+                        base_plan_artifact=run.plan_artifact,
+                        base_plan_revision=run.plan_revision,
+                    )
+                    self.operator_refinements[refinement.refinement_id] = refinement
+                    self.active_refinements[record.run_id] = refinement.refinement_id
                 self.planning_runs[record.run_id] = PlanningRunRecord(
                     run_id=run.run_id,
                     status=status,
@@ -1171,6 +1243,9 @@ class InMemorySupervisorStore:
         )
         self.implementation_approvals[key] = record
         self.implementation_request_hashes[key] = request_sha256
+        if decision is ImplementationApprovalDecision.REQUEST_REVISION:
+            assert comment is not None
+            self.implementation_comments[record.decision_id] = comment
         self.implementation_outbox[record.decision_id] = OutboxDelivery(
             decision_id=record.decision_id, run_id=run_id, workflow_id=run.workflow_id or "",
             payload={"decision_id": record.decision_id, "artifact_sha256": artifact_sha256, "decision": decision.value},
@@ -1196,10 +1271,27 @@ class InMemorySupervisorStore:
             status = {
                 ImplementationApprovalDecision.APPROVE: PlanningRunStatus.FINALIZING,
                 ImplementationApprovalDecision.REJECT: PlanningRunStatus.REJECTED,
-                ImplementationApprovalDecision.REQUEST_REVISION: PlanningRunStatus.IMPLEMENTING,
+                ImplementationApprovalDecision.REQUEST_REVISION: PlanningRunStatus.PLANNING,
             }[record.decision]
+            if record.decision is ImplementationApprovalDecision.REQUEST_REVISION:
+                refinement = OperatorRefinementRecord(
+                    refinement_id=record.decision_id,
+                    run_id=record.run_id,
+                    source_gate="implementation",
+                    artifact_sha256=record.artifact_sha256,
+                    actor_id=record.actor_id,
+                    comment=self.implementation_comments[record.decision_id],
+                    created_at=record.created_at,
+                    base_plan_artifact=run.plan_artifact,
+                    base_plan_revision=run.plan_revision,
+                )
+                self.operator_refinements[refinement.refinement_id] = refinement
+                self.active_refinements[record.run_id] = refinement.refinement_id
             self.planning_runs[record.run_id] = PlanningRunRecord(
                 **{**run.__dict__, "status": status,
+                   "workflow_id": None if record.decision is ImplementationApprovalDecision.REQUEST_REVISION else run.workflow_id,
+                   "plan_artifact": None if record.decision is ImplementationApprovalDecision.REQUEST_REVISION else run.plan_artifact,
+                   "planner_model": None if record.decision is ImplementationApprovalDecision.REQUEST_REVISION else run.planner_model,
                    "implementation_artifact": None if record.decision is ImplementationApprovalDecision.REQUEST_REVISION else run.implementation_artifact}
             )
             self.implementation_outbox.pop(decision_id, None)
@@ -1467,19 +1559,21 @@ class FakePlanner:
         self, context: ProductSpecificationContext, gateway: AgentGatewayResolution
     ) -> ProductSpecification:
         if self.product_specification is None:
-            def source(statement_id: str, requirement_ids: list[str] | None = None) -> dict[str, object]:
-                return {"id": statement_id, "text": statement_id.replace("-", " "), "kind": "source", "source_segment_ids": ["source-1"], "requirement_ids": requirement_ids or []}
+            def source(statement_id: str) -> dict[str, object]:
+                return {
+                    "kind": "source",
+                    "id": statement_id,
+                    "text": statement_id.replace("-", " "),
+                    "source_segment_ids": ["source-1"],
+                }
 
             self.product_specification = ProductSpecification.model_validate(
                 {
-                    "schema_version": 2,
-                    "title": source("title"), "problem_statement": source("problem"),
-                    "desired_outcomes": [source("outcome")], "actors": [source("actor")],
-                    "in_scope": [source("in-scope")], "out_of_scope": [source("out-of-scope")],
-                    "functional_requirements": [source("functional-1"), source("functional-2")],
-                    "acceptance_criteria": [source("acceptance-1", ["functional-1"]), source("acceptance-2", ["functional-2"])],
-                    "personas": [source("persona")], "user_journeys": [source("journey")],
-                    "constraints": [source("constraint")], "dependencies": [source("dependency")],
+                    "schema_version": 3,
+                    "title": source("title"),
+                    "user_story": source("user-story"),
+                    "outcome": source("outcome"),
+                    "acceptance_criteria": [source("acceptance-1"), source("acceptance-2")],
                 }
             )
         self.product_specification_contexts.append(context)

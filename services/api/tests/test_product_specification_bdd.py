@@ -35,27 +35,18 @@ def source_grounded_product_specification_response(refinement_context: dict[str,
         return {"id": statement_id, "text": text, "kind": "source", "source_segment_ids": ["source-1"]}
 
     refinement_context["response"] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "title": source("title", "Rate limiting"),
-        "problem_statement": source("problem", "The API needs bounded request rates."),
-        "desired_outcomes": [source("outcome-1", "Protect API endpoints from abuse.")],
-        "actors": [source("actor-1", "API consumers")],
-        "in_scope": [source("scope-in-1", "Rate limiting on API endpoints")],
-        "out_of_scope": [source("scope-out-1", "Changing authentication")],
-        "functional_requirements": [source("functional-1", "Enforce a bounded request rate.")],
-        "non_functional_requirements": [],
-        "acceptance_criteria": [{**source("acceptance-1", "Requests beyond the limit are rejected."), "requirement_ids": ["functional-1"]}],
+        "user_story": source("user-story", "As an API operator, I need bounded request rates so the service remains available."),
+        "outcome": source("outcome", "Protect API endpoints from abuse."),
+        "acceptance_criteria": [source("acceptance-1", "Requests beyond the limit are rejected.")],
+        "technical_context": [source("technical-context", "Rate limiting is applied in the API gateway middleware pipeline.")],
         "assumptions": [
             {"id": "assumption-1", "text": "A default threshold is acceptable.", "kind": "assumption", "source_segment_ids": []}
         ],
-        "risks": [source("risk-1", "A low threshold can reject valid traffic.")],
         "unresolved_questions": [
             {"id": "question-1", "text": "What threshold should apply?", "kind": "question", "source_segment_ids": []}
         ],
-        "personas": [source("persona-1", "API consumer")],
-        "user_journeys": [source("journey-1", "Consumer receives an explicit rate-limit response")],
-        "constraints": [source("constraint-1", "The rate limiter remains observable")],
-        "dependencies": [source("dependency-1", "The API gateway middleware pipeline")],
     }
 
 
@@ -98,7 +89,7 @@ def structured_draft_preserves_provenance(refinement_context: dict[str, object])
     """Assert that uncertainty remains visibly separate from sourced requirements."""
 
     specification = refinement_context["specification"]
-    assert specification.functional_requirements[0].source_segment_ids == ["source-1"]
+    assert specification.user_story.source_segment_ids == ["source-1"]
     assert specification.assumptions[0].kind.value == "assumption"
     assert specification.unresolved_questions[0].kind.value == "question"
 

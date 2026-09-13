@@ -10,10 +10,13 @@ from pydantic import ValidationError
 from cogito_api.main import create_app
 from cogito_api.models import (
     AiPlan,
+    ArtifactReference,
     ModelTier,
     PlanPhase,
     PlanConstraints,
     ProductSpecification,
+    ResolvedWorkflow,
+    ResolvedWorkflowPhase,
     WorkflowConfigurationState,
     WorkflowGateDecisionRequest,
     WorkflowPhaseDefinition,
@@ -28,14 +31,11 @@ from .fakes import FakePlanner, FakeRunStarter, InMemoryPlanStore, InMemorySuper
 
 def _intake() -> dict:
     return {
-        "objective": "Give API operators a bounded rate limit.",
-        "actors": ["API operator"],
-        "desired_outcomes": ["Requests are safely rate limited."],
-        "scope_in": ["API gateway rate limiting"],
-        "scope_out": ["Authentication changes"],
-        "acceptance_expectations": ["Over-limit requests have a clear response."],
-        "constraints": ["Keep metrics observable."],
-        "unknowns": [],
+        "title": "Bound API request rates",
+        "user_story": "As an API operator, I need bounded request rates so the service remains available.",
+        "outcome": "Requests are safely rate limited.",
+        "acceptance_criteria": ["Over-limit requests have a clear response."],
+        "technical_context": ["Keep metrics observable."],
     }
 
 
@@ -116,8 +116,8 @@ def test_requirement_relationships_allow_support_reuse_but_one_owner(valid_produ
                 "id": "build", "name": "Build", "description": "Build", "tasks": ["build"],
                 "acceptance_criteria": ["done"], "verification": ["test"],
                 "requirement_assignments": [
-                    {"requirement_id": "functional-1", "relationship": "owns"},
-                    {"requirement_id": "functional-2", "relationship": "supports"},
+                    {"requirement_id": "acceptance-1", "relationship": "owns"},
+                    {"requirement_id": "acceptance-2", "relationship": "supports"},
                 ],
             }
         ),
@@ -126,8 +126,8 @@ def test_requirement_relationships_allow_support_reuse_but_one_owner(valid_produ
                 "id": "verify", "name": "Verify", "description": "Verify", "tasks": ["verify"],
                 "acceptance_criteria": ["verified"], "verification": ["test"],
                 "requirement_assignments": [
-                    {"requirement_id": "functional-1", "relationship": "verifies", "acceptance_criterion_ids": ["acceptance-1"]},
-                    {"requirement_id": "functional-2", "relationship": "owns"},
+                    {"requirement_id": "acceptance-1", "relationship": "verifies", "acceptance_criterion_ids": ["acceptance-1"]},
+                    {"requirement_id": "acceptance-2", "relationship": "owns"},
                 ],
             }
         ),
@@ -153,7 +153,7 @@ def test_product_manager_can_submit_only_structured_intake_after_platform_bindin
         assert body["source_artifact"]["ref"].endswith("/source-spec.json")
         source = json.loads(app.state.test_plan_store.source_specifications[body["run_id"]])
         assert source["schema_version"] == "cogito.initial-specification/v1"
-        assert source["goal"] == _intake()["objective"]
+        assert source["goal"] == _intake()["user_story"]
         assert source["repositories"] == [
             {"ref": _binding()["target_repos"][0], "role": "primary_target"}
         ]
@@ -168,9 +168,8 @@ def test_product_manager_can_submit_only_structured_intake_after_platform_bindin
             ],
         }
         assert source["work_specification"] == _intake() | {
-            "schema_version": 1,
+            "schema_version": 2,
             "repository_candidates": [],
-            "discovery_preference": "supplied_first",
         }
 
 
@@ -187,7 +186,7 @@ def test_legacy_specification_field_remains_compatible_during_work_specification
         response = client.post("/api/v1/projects/default/workflow-runs", json={"specification": _intake()})
         assert response.status_code == 202
         source = json.loads(app.state.test_plan_store.source_specifications[response.json()["run_id"]])
-        assert source["work_specification"]["objective"] == _intake()["objective"]
+        assert source["work_specification"]["title"] == _intake()["title"]
 
 
 def test_workflow_run_rejects_ambiguous_work_specification_input(
@@ -244,6 +243,45 @@ def test_bootstrap_keeps_an_existing_immutable_default_policy() -> None:
     asyncio.run(store.bootstrap_defaults(project_id="default", constraints=PlanConstraints(max_cost_usd=50)))
 
     assert asyncio.run(store.get_policy("platform_standard@1.0.0")) == default_policy("default", initial_constraints)
+
+
+def test_run_resolution_retains_each_plan_revision_immutably() -> None:
+    store = InMemoryWorkflowConfigurationStore()
+    template = default_template()
+    source = ArtifactReference(ref="s3://plans/source.json", sha256="a" * 64)
+    specification = ArtifactReference(ref="s3://plans/specification.json", sha256="b" * 64)
+    evaluation = ArtifactReference(ref="s3://plans/evaluation.json", sha256="c" * 64)
+    first = ResolvedWorkflow(
+        run_id="run-1",
+        project_id="default",
+        template_ref="software_delivery@1.0.0",
+        policy_ref="platform_standard@1.0.0",
+        source_artifact=source,
+        product_specification_artifact=specification,
+        specification_evaluation_artifact=evaluation,
+        plan_artifact=ArtifactReference(ref="s3://plans/1.json", sha256="d" * 64),
+        gates=template.required_gates,
+        phases=[
+            ResolvedWorkflowPhase(
+                id="implementation",
+                active=True,
+                activation_reason="test",
+                agent_role="developer",
+                model_tier=ModelTier.COMPLEX,
+            )
+        ],
+        effective_constraints=PlanConstraints(),
+    )
+    second = first.model_copy(
+        update={"plan_artifact": ArtifactReference(ref="s3://plans/2.json", sha256="e" * 64)}
+    )
+
+    asyncio.run(store.put_run_resolution(first, workflow_id="run-1:plan:1"))
+    asyncio.run(store.put_run_resolution(second, workflow_id="run-1:plan:2"))
+
+    assert asyncio.run(store.get_run_resolution("run-1", workflow_id="run-1:plan:1")) == first
+    assert asyncio.run(store.get_run_resolution("run-1", workflow_id="run-1:plan:2")) == second
+    assert asyncio.run(store.get_run_resolution("run-1")) == second
 
 
 def test_platform_can_publish_a_policy_only_after_validation(

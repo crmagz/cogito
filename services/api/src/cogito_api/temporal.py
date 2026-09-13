@@ -56,15 +56,17 @@ class TemporalRunStarter:
             return False
         client = await self._get_client()
         handle = client.get_workflow_handle(workflow_id)
-        # Temporal persists an Update ID. Reusing the durable approval ID lets
-        # an outbox retry recover the original accepted result even if its
-        # database acknowledgement failed after Temporal accepted the update.
+        # The workflow owns idempotency through ``decision_id``. Do not reuse it
+        # as Temporal's Update ID: an update submitted before the workflow has
+        # entered its approval wait resolves to ``False`` and Temporal would
+        # replay that stale result forever instead of allowing the outbox retry
+        # to deliver once the workflow is ready.
         update_name = (
             "submit_plan_approval_with_mcp_selection"
             if decision.get("mcp_selection") is not None
             else "submit_plan_approval"
         )
-        return await handle.execute_update(update_name, decision, id=decision_id)
+        return await handle.execute_update(update_name, decision)
 
     async def submit_implementation_approval(self, workflow_id: str, decision: dict[str, str]) -> bool:
         """Deliver an idempotent decision for the frozen implementation artifact."""
@@ -74,7 +76,7 @@ class TemporalRunStarter:
             return False
         client = await self._get_client()
         handle = client.get_workflow_handle(workflow_id)
-        return await handle.execute_update("submit_implementation_approval", decision, id=decision_id)
+        return await handle.execute_update("submit_implementation_approval", decision)
 
     async def submit_workflow_gate(self, workflow_id: str, gate_id: str, decision: dict[str, Any]) -> bool:
         """Deliver a resolution-bound gate decision, retaining legacy fallbacks in dispatchers."""
@@ -84,9 +86,7 @@ class TemporalRunStarter:
             return False
         client = await self._get_client()
         handle = client.get_workflow_handle(workflow_id)
-        return await handle.execute_update(
-            "submit_workflow_gate", args=[gate_id, decision], id=decision_id
-        )
+        return await handle.execute_update("submit_workflow_gate", args=[gate_id, decision])
 
     async def get_terminal_outcome(self, workflow_id: str) -> str | None:
         """Return a recognized terminal workflow result, or ``None`` while it is live.

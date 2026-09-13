@@ -123,6 +123,21 @@ class ImplementationApprovalRecord:
 
 
 @dataclass(frozen=True)
+class OperatorRefinementRecord:
+    """Immutable operator feedback carried into the next planning revision."""
+
+    refinement_id: str
+    run_id: str
+    source_gate: str
+    artifact_sha256: str
+    actor_id: str
+    comment: str
+    created_at: str
+    base_plan_artifact: ArtifactReference | None = None
+    base_plan_revision: int | None = None
+
+
+@dataclass(frozen=True)
 class WorkbenchApprovalRecord:
     """Normalized immutable decision history for the scoped Workbench projection."""
 
@@ -536,6 +551,14 @@ class SupervisorStore(Protocol):
     ) -> ImplementationApprovalRecord: ...
 
     async def mark_implementation_approval_delivered(self, decision_id: str) -> None: ...
+
+    async def get_active_operator_refinement(self, run_id: str) -> OperatorRefinementRecord | None: ...
+
+    async def clear_active_operator_refinement(self, run_id: str, refinement_id: str) -> None: ...
+
+    async def redrive_failed_implementation(self, run_id: str) -> PlanningRunRecord: ...
+
+    async def abort_implementation_redrive(self, run_id: str, error_summary: str) -> None: ...
 
     async def claim_implementation_approval_deliveries(
         self, *, limit: int, lease_seconds: int, decision_id: str | None = None
@@ -1819,6 +1842,143 @@ class PostgresSupervisorStore:
             return None
         return _planning_run_record(row)
 
+    async def get_active_operator_refinement(self, run_id: str) -> OperatorRefinementRecord | None:
+        """Return the immutable operator direction active for the next plan only."""
+
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT refinement_id, run_id, source_gate, artifact_sha256, actor_id, comment, created_at,
+                           base_plan_artifact_ref, base_plan_artifact_sha256, base_plan_revision
+                    FROM workflow_refinements
+                    WHERE run_id = :run_id
+                      AND refinement_id = (
+                          SELECT active_refinement_id
+                          FROM supervisor_runs
+                          WHERE run_id = :run_id
+                      )
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            row = result.mappings().one_or_none()
+        if row is None:
+            return None
+        return OperatorRefinementRecord(
+            refinement_id=row["refinement_id"],
+            run_id=row["run_id"],
+            source_gate=row["source_gate"],
+            artifact_sha256=row["artifact_sha256"],
+            actor_id=row["actor_id"],
+            comment=row["comment"],
+            created_at=row["created_at"].isoformat(),
+            base_plan_artifact=(
+                ArtifactReference(
+                    ref=row["base_plan_artifact_ref"], sha256=row["base_plan_artifact_sha256"]
+                )
+                if row["base_plan_artifact_ref"] is not None and row["base_plan_artifact_sha256"] is not None
+                else None
+            ),
+            base_plan_revision=row["base_plan_revision"],
+        )
+
+    async def clear_active_operator_refinement(self, run_id: str, refinement_id: str) -> None:
+        """Clear only the pointer consumed by a successfully persisted replacement plan."""
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs
+                    SET active_refinement_id = NULL
+                    WHERE run_id = :run_id AND active_refinement_id = :refinement_id
+                    """
+                ),
+                {"run_id": run_id, "refinement_id": refinement_id},
+            )
+
+    async def redrive_failed_implementation(self, run_id: str) -> PlanningRunRecord:
+        """Reopen only a failed execution for the already-approved immutable plan."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs
+                    SET status = 'implementing', implementation_artifact_ref = NULL, implementation_artifact_sha256 = NULL
+                    WHERE run_id = :run_id
+                      AND status = 'implementation_failed'
+                      AND plan_artifact_ref IS NOT NULL
+                      AND plan_artifact_sha256 IS NOT NULL
+                      AND active_workflow_id IS NOT NULL
+                    RETURNING run_id
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            if result.scalar_one_or_none() is None:
+                raise ValueError("planning run is not eligible for an implementation redrive")
+            await connection.execute(
+                text(
+                    """
+                    UPDATE agent_runs
+                    SET status = 'QUEUED', error_summary = NULL, completed_at = NULL,
+                        updated_at = now(), last_heartbeat_at = NULL
+                    WHERE run_id = :run_id
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            await self._append_coordination_event(
+                connection,
+                run_id=run_id,
+                event_type="implementation_redrive_requested",
+                lifecycle_status="QUEUED",
+            )
+        record = await self.get_planning_run(run_id)
+        if record is None:
+            raise ValueError("planning run does not exist")
+        return record
+
+    async def abort_implementation_redrive(self, run_id: str, error_summary: str) -> None:
+        """Restore the retryable failed state when Temporal cannot start a redrive."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE supervisor_runs
+                    SET status = 'implementation_failed'
+                    WHERE run_id = :run_id
+                      AND status = 'implementing'
+                      AND implementation_artifact_ref IS NULL
+                    RETURNING run_id
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            if result.scalar_one_or_none() is None:
+                return
+            await connection.execute(
+                text(
+                    """
+                    UPDATE agent_runs
+                    SET status = 'FAILED', error_summary = :error_summary, completed_at = now(),
+                        updated_at = now(), last_heartbeat_at = NULL
+                    WHERE run_id = :run_id
+                    """
+                ),
+                {"run_id": run_id, "error_summary": error_summary[:512]},
+            )
+            await self._append_coordination_event(
+                connection,
+                run_id=run_id,
+                event_type="implementation_redrive_start_failed",
+                lifecycle_status="FAILED",
+                message=error_summary[:512],
+            )
+
     async def cancel_planning_run(self, run_id: str) -> PlanningRunRecord:
         """Terminally stop a run before any generated plan can be executed."""
 
@@ -2588,7 +2748,8 @@ class PostgresSupervisorStore:
             decision = await connection.execute(
                 text(
                     """
-                    SELECT run_id, decision, plan_revision FROM plan_approval_decisions
+                    SELECT run_id, decision, plan_revision, artifact_sha256, actor_id, comment, created_at
+                    FROM plan_approval_decisions
                     WHERE decision_id = :decision_id
                     FOR UPDATE
                     """
@@ -2625,6 +2786,43 @@ class PostgresSupervisorStore:
                 "request_revision": PlanningRunStatus.PLANNING.value,
             }[row["decision"]]
             clear_current_plan = row["decision"] == "request_revision"
+            if clear_current_plan:
+                run = await connection.execute(
+                    text(
+                        """
+                        SELECT plan_artifact_ref, plan_artifact_sha256, plan_revision
+                        FROM supervisor_runs
+                        WHERE run_id = :run_id
+                        FOR UPDATE
+                        """
+                    ),
+                    {"run_id": row["run_id"]},
+                )
+                run_row = run.mappings().one()
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO workflow_refinements (
+                            refinement_id, run_id, source_gate, artifact_sha256, actor_id, comment, created_at,
+                            base_plan_artifact_ref, base_plan_artifact_sha256, base_plan_revision
+                        ) VALUES (
+                            :refinement_id, :run_id, 'plan', :artifact_sha256, :actor_id, :comment, :created_at,
+                            :base_plan_artifact_ref, :base_plan_artifact_sha256, :base_plan_revision
+                        ) ON CONFLICT (refinement_id) DO NOTHING
+                        """
+                    ),
+                    {
+                        "refinement_id": decision_id,
+                        "run_id": row["run_id"],
+                        "artifact_sha256": row["artifact_sha256"],
+                        "actor_id": row["actor_id"],
+                        "comment": row["comment"],
+                        "created_at": row["created_at"],
+                        "base_plan_artifact_ref": run_row["plan_artifact_ref"],
+                        "base_plan_artifact_sha256": run_row["plan_artifact_sha256"],
+                        "base_plan_revision": run_row["plan_revision"],
+                    },
+                )
             await connection.execute(
                 text(
                     """
@@ -2633,13 +2831,15 @@ class PostgresSupervisorStore:
                         active_workflow_id = CASE WHEN :clear_current_plan THEN NULL ELSE active_workflow_id END,
                         plan_artifact_ref = CASE WHEN :clear_current_plan THEN NULL ELSE plan_artifact_ref END,
                         plan_artifact_sha256 = CASE WHEN :clear_current_plan THEN NULL ELSE plan_artifact_sha256 END,
-                        planner_model = CASE WHEN :clear_current_plan THEN NULL ELSE planner_model END
+                        planner_model = CASE WHEN :clear_current_plan THEN NULL ELSE planner_model END,
+                        active_refinement_id = CASE WHEN :clear_current_plan THEN :refinement_id ELSE active_refinement_id END
                     WHERE run_id = :run_id AND plan_revision = :plan_revision
                     """
                 ),
                 {
                     "status": status,
                     "clear_current_plan": clear_current_plan,
+                    "refinement_id": decision_id if clear_current_plan else None,
                     "run_id": row["run_id"],
                     "plan_revision": row["plan_revision"],
                 },
@@ -2900,7 +3100,8 @@ class PostgresSupervisorStore:
             result = await connection.execute(
                 text(
                     """
-                    SELECT run_id, decision, implementation_revision FROM implementation_approval_decisions
+                    SELECT run_id, decision, implementation_revision, artifact_sha256, actor_id, comment, created_at
+                    FROM implementation_approval_decisions
                     WHERE decision_id = :decision_id FOR UPDATE
                     """
                 ),
@@ -2920,16 +3121,61 @@ class PostgresSupervisorStore:
             status = {
                 "approve": PlanningRunStatus.FINALIZING.value,
                 "reject": PlanningRunStatus.REJECTED.value,
-                "request_revision": PlanningRunStatus.IMPLEMENTING.value,
+                # Implementation feedback changes the requested outcome.  It
+                # must therefore be incorporated by the planner before a new
+                # developer workflow can be started.
+                "request_revision": PlanningRunStatus.PLANNING.value,
             }[row["decision"]]
             clear_artifact = row["decision"] == "request_revision"
+            if clear_artifact:
+                run = await connection.execute(
+                    text(
+                        """
+                        SELECT plan_artifact_ref, plan_artifact_sha256, plan_revision
+                        FROM supervisor_runs
+                        WHERE run_id = :run_id
+                        FOR UPDATE
+                        """
+                    ),
+                    {"run_id": row["run_id"]},
+                )
+                run_row = run.mappings().one()
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO workflow_refinements (
+                            refinement_id, run_id, source_gate, artifact_sha256, actor_id, comment, created_at,
+                            base_plan_artifact_ref, base_plan_artifact_sha256, base_plan_revision
+                        ) VALUES (
+                            :refinement_id, :run_id, 'implementation', :artifact_sha256, :actor_id, :comment, :created_at,
+                            :base_plan_artifact_ref, :base_plan_artifact_sha256, :base_plan_revision
+                        ) ON CONFLICT (refinement_id) DO NOTHING
+                        """
+                    ),
+                    {
+                        "refinement_id": decision_id,
+                        "run_id": row["run_id"],
+                        "artifact_sha256": row["artifact_sha256"],
+                        "actor_id": row["actor_id"],
+                        "comment": row["comment"],
+                        "created_at": row["created_at"],
+                        "base_plan_artifact_ref": run_row["plan_artifact_ref"],
+                        "base_plan_artifact_sha256": run_row["plan_artifact_sha256"],
+                        "base_plan_revision": run_row["plan_revision"],
+                    },
+                )
             await connection.execute(
                 text(
                     """
                     UPDATE supervisor_runs
                     SET status = :status,
+                        active_workflow_id = CASE WHEN :clear_artifact THEN NULL ELSE active_workflow_id END,
+                        plan_artifact_ref = CASE WHEN :clear_artifact THEN NULL ELSE plan_artifact_ref END,
+                        plan_artifact_sha256 = CASE WHEN :clear_artifact THEN NULL ELSE plan_artifact_sha256 END,
+                        planner_model = CASE WHEN :clear_artifact THEN NULL ELSE planner_model END,
                         implementation_artifact_ref = CASE WHEN :clear_artifact THEN NULL ELSE implementation_artifact_ref END,
-                        implementation_artifact_sha256 = CASE WHEN :clear_artifact THEN NULL ELSE implementation_artifact_sha256 END
+                        implementation_artifact_sha256 = CASE WHEN :clear_artifact THEN NULL ELSE implementation_artifact_sha256 END,
+                        active_refinement_id = CASE WHEN :clear_artifact THEN :refinement_id ELSE active_refinement_id END
                     WHERE run_id = :run_id AND implementation_revision = :implementation_revision
                     """
                 ),
@@ -2937,6 +3183,7 @@ class PostgresSupervisorStore:
                     "run_id": row["run_id"],
                     "status": status,
                     "clear_artifact": clear_artifact,
+                    "refinement_id": decision_id if clear_artifact else None,
                     "implementation_revision": row["implementation_revision"],
                 },
             )

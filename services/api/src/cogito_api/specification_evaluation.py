@@ -25,65 +25,38 @@ def evaluate_specification(
 ) -> SpecificationEvaluation:
     """Return reproducible readiness facts without rewriting the specification.
 
-    Version 1 is intentionally display-only: historical artifacts remain
-    reviewable but require a version-2 revision before they can authorize a
-    new plan.  Version 2's mandatory structural sections are checked here so
-    failures are explicit evidence rather than silent evaluator repair.
+    Historical artifacts remain reviewable but require a compact version-3
+    revision before they can authorize a new plan. Acceptance criteria are the
+    shared approval and planning units, avoiding a duplicate requirement tree.
     """
 
     findings: list[SpecificationEvaluationFinding] = []
     decisions: list[str] = []
     requirements = specification.requirement_ids
 
-    if specification.schema_version < 2:
+    if specification.schema_version < 3:
         findings.append(
             SpecificationEvaluationFinding(
                 kind=SpecificationEvaluationFindingKind.MISSING,
-                message="A version 2 product specification is required before planning.",
+                message="A version 3 Work Specification is required before planning.",
             )
         )
-    else:
-        for field, label in (
-            (specification.personas, "personas"),
-            (specification.user_journeys, "user journeys"),
-            (specification.constraints, "constraints"),
-            (specification.dependencies, "dependencies"),
-        ):
-            if not field:
-                findings.append(
-                    SpecificationEvaluationFinding(
-                        kind=SpecificationEvaluationFindingKind.MISSING,
-                        message=f"The version 2 specification has no {label}.",
-                    )
-                )
 
     if not requirements:
         findings.append(
             SpecificationEvaluationFinding(
                 kind=SpecificationEvaluationFindingKind.MISSING,
-                message="The specification has no functional or non-functional requirements.",
+                message="The Work Specification has no acceptance criteria.",
             )
         )
-    covered_requirement_ids = {
-        requirement_id
-        for criterion in specification.acceptance_criteria
-        for requirement_id in criterion.requirement_ids
-    }
-    uncovered_requirement_ids = sorted(set(requirements) - covered_requirement_ids)
+    covered_requirement_ids = set(requirements)
+    uncovered_requirement_ids: list[str] = []
     if not specification.acceptance_criteria:
         findings.append(
             SpecificationEvaluationFinding(
                 kind=SpecificationEvaluationFindingKind.UNVERIFIABLE,
                 message="The specification has no measurable acceptance criteria.",
                 requirement_ids=requirements,
-            )
-        )
-    elif uncovered_requirement_ids:
-        findings.append(
-            SpecificationEvaluationFinding(
-                kind=SpecificationEvaluationFindingKind.UNVERIFIABLE,
-                message="Some requirements have no linked acceptance criterion.",
-                requirement_ids=uncovered_requirement_ids,
             )
         )
     if specification.unresolved_questions:
@@ -103,20 +76,22 @@ def evaluate_specification(
         )
         decisions.extend(assumption.text for assumption in specification.assumptions)
 
-    conflicting_requirement_ids = _find_conflicting_requirement_ids(
-        specification.functional_requirements + specification.non_functional_requirements
-    )
+    conflicting_requirement_ids = _find_conflicting_requirement_ids(specification.acceptance_criteria)
     if conflicting_requirement_ids:
         findings.append(
             SpecificationEvaluationFinding(
                 kind=SpecificationEvaluationFindingKind.CONFLICTING,
-                message="Requirements contain directly contradictory statements.",
+                message="Acceptance criteria contain directly contradictory statements.",
                 requirement_ids=conflicting_requirement_ids,
             )
         )
 
-    high_risk = any("security" in risk.text.lower() or "data loss" in risk.text.lower() for risk in specification.risks)
-    risk_tier = SpecificationRiskTier.HIGH if high_risk else SpecificationRiskTier.MEDIUM if specification.risks else SpecificationRiskTier.LOW
+    technical_text = " ".join(statement.text.lower() for statement in specification.technical_context)
+    risk_tier = (
+        SpecificationRiskTier.HIGH
+        if "security" in technical_text or "data loss" in technical_text
+        else SpecificationRiskTier.LOW
+    )
     readiness = SpecificationEvaluationReadiness.READY if not findings else SpecificationEvaluationReadiness.NEEDS_REVISION
     return SpecificationEvaluation(
         specification_sha256=specification_sha256,
@@ -189,7 +164,7 @@ def validate_requirement_assignments(specification: ProductSpecification, phases
     """
 
     known = set(specification.requirement_ids)
-    criterion_ids = {criterion.id for criterion in specification.acceptance_criteria}
+    criterion_ids = set(specification.requirement_ids)
     owners: dict[str, list[str]] = {}
     referenced: set[str] = set()
     for phase in phases:
