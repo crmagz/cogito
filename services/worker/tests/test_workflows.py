@@ -1311,6 +1311,7 @@ async def test_workflow_opens_one_pr_before_implementation_approval(env: Workflo
                 spec_ref="typescript-backend@v2.1#sha256=" + "a" * 64,
                 target_repos=plan["target_repos"],
                 requires_implementation_approval=True,
+                implementation_attempt=3,
                 registry_resolutions=resolutions,
             ),
             id=f"test-workflow-{uuid.uuid4()}",
@@ -1335,6 +1336,7 @@ async def test_workflow_opens_one_pr_before_implementation_approval(env: Workflo
         for request in harness.agent_invocation_requests
     }
     assert specialist_turns == {"adversarial_review": 15, "pull_request_publisher": 15}
+    assert {request.audit_attempt for request in harness.agent_invocation_requests} == {3}
 
 
 def test_plan_snapshot_validation_rejects_a_mutated_plan() -> None:

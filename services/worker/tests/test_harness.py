@@ -31,6 +31,8 @@ class ScriptedWorkspaces:
         origin: str = "https://github.com/acme/example.git",
         dirty_after_verification: bool = False,
         staged_changes: bool = False,
+        no_committed_changes: bool = False,
+        push_rejected_but_remote_matches: bool = False,
         handoff_content: str | None = None,
     ) -> None:
         self.calls: list[tuple[list[str], str]] = []
@@ -47,6 +49,8 @@ class ScriptedWorkspaces:
         self._agent_exit_code = agent_exit_code
         self._agent_stderr = agent_stderr
         self._staged_changes = staged_changes
+        self._no_committed_changes = no_committed_changes
+        self._push_rejected_but_remote_matches = push_rejected_but_remote_matches
         self._handoff_content = handoff_content
 
     async def execute(
@@ -71,12 +75,18 @@ class ScriptedWorkspaces:
             return CommandResult(0, "adp/run-1\n", "")
         if command[-3:] == ["remote", "get-url", "origin"]:
             return CommandResult(0, f"{self._origin}\n", "")
+        if command[-2:] == ["rev-parse", "FETCH_HEAD"]:
+            return CommandResult(0, "after\n", "")
         if command[-2:] == ["rev-parse", "HEAD"]:
             self._head_calls += 1
+            if self._no_committed_changes:
+                return CommandResult(0, "before\n", "")
             return CommandResult(0, "before\n" if self._head_calls == 1 else "after\n", "")
         if command[-3:] == ["diff", "--cached", "--quiet"]:
             return CommandResult(1 if self._staged_changes else 0, "", "")
         if "diff" in command:
+            if self._no_committed_changes:
+                return CommandResult(0, "", "")
             return CommandResult(0, "src/feature.py\n", "")
         if command[-2:] == ["add", "-A"] or "commit" in command:
             return CommandResult(0, "", "")
@@ -94,7 +104,11 @@ class ScriptedWorkspaces:
             self._verification_calls += 1
             return CommandResult(exit_code, "verification output", "")
         if "push" in command:
+            if self._push_rejected_but_remote_matches:
+                return CommandResult(1, "", "non-fast-forward")
             return CommandResult(0, "published", "")
+        if "fetch" in command:
+            return CommandResult(0, "", "")
         raise AssertionError(f"unexpected command: {command}")
 
 
@@ -146,8 +160,29 @@ async def test_harness_records_turns_cost_changes_verification_and_published_com
     assert "- npm test" in prompt
     assert "runs these exact commands after your work" in prompt
     assert "Completion is executable evidence" in prompt
+    assert "Do not rewrite branch history" in prompt
     assert "uv sync --frozen" in prompt
     assert workspaces.calls[-1][0][-4:] == ["push", "--set-upstream", "origin", "adp/run-1"]
+
+
+async def test_harness_accepts_an_idempotent_phase_when_approved_verification_passes() -> None:
+    """A revision can already be satisfied by a prior delivery and needs no synthetic commit."""
+
+    workspaces = ScriptedWorkspaces(no_committed_changes=True)
+    result = await ClaudeCodeHarness(workspaces).execute_phase(_request())  # type: ignore[arg-type]
+
+    assert result.succeeded is True
+    assert result.changed_files == []
+    assert result.verification[0].passed is True
+
+
+async def test_harness_accepts_a_non_fast_forward_when_the_remote_already_has_the_verified_head() -> None:
+    workspaces = ScriptedWorkspaces(push_rejected_but_remote_matches=True)
+
+    result = await ClaudeCodeHarness(workspaces).execute_phase(_request())  # type: ignore[arg-type]
+
+    assert result.succeeded is True
+    assert any(command[-2:] == ["rev-parse", "FETCH_HEAD"] for command, _ in workspaces.calls)
 
 
 async def test_successful_agent_persists_terminal_response_when_handoff_file_is_missing() -> None:
