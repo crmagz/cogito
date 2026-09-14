@@ -1286,8 +1286,11 @@ async def test_workflow_opens_one_pr_before_implementation_approval(env: Workflo
             ToolGrant("review_model", "1.0.0", "read_only_review"),
         ]),
         pinned_role("validator", [ToolGrant("validation_runner", "1.0.0", "approved_verification")]),
-        pinned_role("adversarial_review", []),
-        pinned_role("pull_request_publisher", [ToolGrant("github_publisher", "1.0.0", "approved_pull_request")]),
+            pinned_role("adversarial_review", [ToolGrant("execution_workspace", "1.0.0", "read_only_workspace")]),
+            pinned_role("pull_request_publisher", [
+                ToolGrant("github_publisher", "1.0.0", "approved_pull_request"),
+                ToolGrant("execution_workspace", "1.0.0", "read_only_workspace"),
+            ]),
     ]
 
     async with Worker(

@@ -43,3 +43,16 @@ def test_audit_output_waits_for_a_complete_line_before_redacting(tmp_path: Path,
     output = capsys.readouterr().out
     assert "secret-token" not in output
     assert "[REDACTED]" in output
+
+
+def test_audit_output_honors_a_direct_emitter_offset(tmp_path: Path, capsys) -> None:
+    invocation_id = "b" * 64
+    audit_dir = tmp_path / ".cogito" / "audit"
+    audit_dir.mkdir(parents=True)
+    path = audit_dir / f"{invocation_id}.stdout.capture"
+    path.write_text("already emitted\nnew output\n", encoding="utf-8")
+    path.with_suffix(".offset").write_text(str(len("already emitted\n")), encoding="ascii")
+
+    _emit_audit_output(audit_dir, {})
+
+    assert capsys.readouterr().out == f"{invocation_id} new output\n"
