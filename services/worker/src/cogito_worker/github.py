@@ -87,7 +87,15 @@ async def _find_pull_request(
         if not isinstance(pull_requests, list):
             raise RuntimeError("GitHub pull-request lookup returned an invalid response")
         for existing in pull_requests:
-            if isinstance(existing, dict) and marker in str(existing.get("body", "")):
+            if not isinstance(existing, dict):
+                continue
+            # A redrive can produce a new immutable implementation artifact
+            # while continuing to use the same run-owned branch.  The open
+            # PR is then still the delivery vehicle, even though its first
+            # artifact marker differs.  Reusing it avoids GitHub's
+            # "no commits between" response and keeps the operator's review
+            # surface stable.  Closed PRs still require the exact marker.
+            if marker in str(existing.get("body", "")) or str(existing.get("state", "")).lower() == "open":
                 return PullRequestResult(number=int(existing["number"]), url=str(existing["html_url"]), reused=True)
         if len(pull_requests) < 100:
             return None

@@ -62,19 +62,6 @@ class ClaudeCodeHarness:
         commits = await self._head_commits(request)
         await self._assert_expected_repositories(request, branch_name)
         changed_files = await self._changed_files(request, before_commits, commits)
-        if not changed_files:
-            return PhaseResult(
-                phase_id=request.phase.id,
-                branch_name=branch_name,
-                succeeded=False,
-                turns_used=agent.turns_used,
-                cost_usd=agent.cost_usd,
-                changed_files=[],
-                commits=commits,
-                verification=[],
-                summary="agent completed without a committed change on the feature branch",
-                outcome="failed",
-            )
 
         dirty_repositories = await self._dirty_repositories(request)
         if dirty_repositories:
@@ -547,6 +534,35 @@ class ClaudeCodeHarness:
                 timeout_seconds=request.timeout_seconds,
             )
             if result.exit_code != 0:
+                # A recovery environment may be racing an earlier successful
+                # publication of the same run-owned branch.  Never overwrite
+                # it, but accept the non-fast-forward response when the
+                # remote head is already exactly this verified local head.
+                # Any divergence remains a hard failure for an operator to
+                # resolve safely.
+                fetch = await self._workspaces.execute(
+                    request.workspace,
+                    ["git", "-C", repository, "fetch", "--depth", "1", "origin", branch_name],
+                    timeout_seconds=request.timeout_seconds,
+                )
+                if fetch.exit_code == 0:
+                    local_head = await self._workspaces.execute(
+                        request.workspace,
+                        ["git", "-C", repository, "rev-parse", "HEAD"],
+                        timeout_seconds=request.timeout_seconds,
+                    )
+                    remote_head = await self._workspaces.execute(
+                        request.workspace,
+                        ["git", "-C", repository, "rev-parse", "FETCH_HEAD"],
+                        timeout_seconds=request.timeout_seconds,
+                    )
+                    if (
+                        local_head.exit_code == 0
+                        and remote_head.exit_code == 0
+                        and local_head.stdout.strip()
+                        and local_head.stdout.strip() == remote_head.stdout.strip()
+                    ):
+                        continue
                 return f"could not publish feature branch: {_command_error(result)}"
         return None
 
@@ -583,6 +599,9 @@ Workspace context:
 Read all relevant specification files before editing. Work only inside the listed repositories.
 Do not create or modify credentials, deployment control-plane resources, or files outside the workspace.
 Do not push: the harness publishes a clean, verified feature branch after you finish.
+Do not rewrite branch history: never use `git reset`, `git rebase`, `git commit --amend`, or force-push. A prior
+agent may already have delivered this exact revision; in that case leave the existing commits intact and do not
+manufacture a replacement commit.
 Make the implementation, run the approved verification commands yourself before finalizing, commit all intended changes
 on the existing feature branch, and leave every repository clean. In your final response, summarize the implementation
 and checks performed.

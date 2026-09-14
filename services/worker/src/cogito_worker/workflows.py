@@ -795,9 +795,13 @@ async def _run_specialist_handoff(
             target_repos=envelope.target_repos,
             timeout_seconds=timeout_seconds,
             max_cost_usd=max_cost_usd,
-            stages=[AgentPathStage(stage_id=stage_id, role=role, prompt=prompt, max_turns=max_turns)],
-            registry_resolutions=[registration],
-        ),
+        stages=[AgentPathStage(stage_id=stage_id, role=role, prompt=prompt, max_turns=max_turns)],
+        registry_resolutions=[registration],
+        # Preserve the durable delivery attempt on child environments.  A
+        # redrive must create a new audit binding instead of colliding with
+        # the same specialist from the original delivery attempt.
+        attempt=envelope.implementation_attempt,
+    ),
         id=f"{workflow.info().workflow_id}:agent:{stage_id}",
     )
     if not result.succeeded:

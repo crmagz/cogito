@@ -92,7 +92,7 @@ def test_clone_repositories_resumes_an_existing_run_branch(monkeypatch: pytest.M
     clone_repositories([REPOSITORY], tmp_path, ("github.com",), "adp/run-1")
 
     assert any(call[-5:] == ["ls-remote", "--exit-code", "--heads", "origin", "adp/run-1"] for call in calls)
-    assert any(call[-5:] == ["fetch", "--depth", "1", "origin", "adp/run-1"] for call in calls)
+    assert any(call[-5:] == ["fetch", "--depth", "2", "origin", "adp/run-1"] for call in calls)
     assert any(call[-4:] == ["checkout", "-B", "adp/run-1", "FETCH_HEAD"] for call in calls)
     assert not any(call[-3:] == ["checkout", "-b", "adp/run-1"] for call in calls)
 

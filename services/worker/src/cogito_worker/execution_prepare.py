@@ -160,7 +160,12 @@ def clone_repositories(
             # previously published run branch so a normal fast-forward push
             # can add the newly approved work.
             subprocess.run(
-                ["git", "-C", str(destination), "fetch", "--depth", "1", "origin", feature_branch],
+                # Keep the immediate parent available for an approved
+                # verification such as ``git diff HEAD~1 HEAD``.  One commit
+                # is enough for an idempotent checkout but makes that valid
+                # verification look broken and tempts an agent to rewrite
+                # history during a redrive.
+                ["git", "-C", str(destination), "fetch", "--depth", "2", "origin", feature_branch],
                 check=True,
                 env=command_environment,
             )

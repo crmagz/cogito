@@ -61,6 +61,46 @@ async def test_publisher_reuses_an_artifact_marker_found_on_a_later_page(monkeyp
     assert requests == [1, 2]
 
 
+async def test_publisher_reuses_the_open_run_branch_after_an_idempotent_redrive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "number": 43,
+                    "html_url": "https://github.com/acme/example/pull/43",
+                    "body": "<!-- cogito-implementation-artifact:old -->",
+                    "state": "open",
+                }
+            ],
+        )
+
+    transport = httpx.MockTransport(handler)
+    async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        github.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: async_client(*args, transport=transport, **kwargs),
+    )
+    publisher = GitHubPullRequestPublisher("token", "https://api.github.com", "main")
+
+    result = await publisher.open_or_reuse(
+        "b" * 64,
+        {
+            "branch_name": "adp/run-1",
+            "commits": {"/workspace/repo": "b" * 40},
+            "repository_origin": "https://github.com/acme/example.git",
+        },
+    )
+
+    assert result == github.PullRequestResult(
+        number=43, url="https://github.com/acme/example/pull/43", reused=True
+    )
+
+
 @pytest.mark.parametrize(
     ("path", "line", "expected"),
     [
