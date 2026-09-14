@@ -11,6 +11,6 @@
   "input_schema": {"schema_id": "approved_implementation", "version": "1"},
   "output_schema": {"schema_id": "pull_request_result", "version": "1"},
   "capabilities": ["publish_approved_pull_request"],
-  "grants": [{"tool_id": "github_publisher", "tool_version": "1.0.0", "scope": "approved_pull_request"}],
+  "grants": [{"tool_id": "github_publisher", "tool_version": "1.0.0", "scope": "approved_pull_request"}, {"tool_id": "execution_workspace", "tool_version": "1.0.0", "scope": "read_only_workspace"}],
   "quality_gates": ["implementation_approval", "artifact_marker_idempotency", "credential_redaction"]
 }

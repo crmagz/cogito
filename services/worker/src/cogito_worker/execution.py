@@ -115,6 +115,9 @@ def build_execution_job(
         _RUN_HASH_LABEL: run_hash,
     }
     active_deadline_seconds = request.execution_timeout_seconds or settings.active_deadline_seconds
+    execution_git_environment = (
+        _git_token_env(request.run_git_secret) if request.workspace_mode == "read_write" else []
+    )
     if active_deadline_seconds > settings.active_deadline_seconds:
         raise ValueError("approved execution timeout exceeds the operator-configured Job deadline")
     if active_deadline_seconds < 1:
@@ -242,7 +245,7 @@ def build_execution_job(
                                         }
                                     },
                                 },
-                                *_git_token_env(request.run_git_secret),
+                                *execution_git_environment,
                             ],
                             "volumeMounts": [
                                 {"name": "workspace", "mountPath": settings.workspace_root}

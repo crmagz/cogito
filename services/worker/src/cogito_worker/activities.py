@@ -305,27 +305,41 @@ class WorkerActivities:
                 False,
                 audited_request.registration_id,
                 audited_workspace.job_name,
+                audited_request.audit_source,
             )
         except Exception:
             activity.logger.warning(
                 "agent invocation audit evidence unavailable",
                 extra={"run_id": audited_workspace.run_id, "stage_id": audited_request.stage_id, "role": audited_request.role},
             )
-        result = await self._harness.invoke_agent(audited_request)
+        try:
+            result = await self._harness.invoke_agent(audited_request)
+        except Exception:
+            await self._record_agent_invocation_result(audited_request, "failed")
+            raise
+        await self._record_agent_invocation_result(
+            audited_request, "succeeded" if result.succeeded else "failed"
+        )
+        return result
+
+    async def _record_agent_invocation_result(
+        self, request: AgentInvocationRequest, status: str
+    ) -> None:
+        """Persist terminal agent evidence even when an invocation raises."""
+
         try:
             await self._run_state.record_stage_invocation_result(
-                audited_request.audit_run_id or audited_workspace.run_id,
-                audited_request.stage_id,
-                audited_request.role,
-                audit_attempt,
-                "succeeded" if result.succeeded else "failed",
+                request.audit_run_id or request.workspace.run_id,
+                request.stage_id,
+                request.role,
+                request.audit_attempt,
+                status,
             )
         except Exception:
             activity.logger.warning(
                 "agent invocation completion audit evidence unavailable",
-                extra={"run_id": audited_workspace.run_id, "stage_id": audited_request.stage_id, "role": audited_request.role},
+                extra={"run_id": request.workspace.run_id, "stage_id": request.stage_id, "role": request.role},
             )
-        return result
 
     async def _record_stage_invocation_result(self, request: PhaseExecutionRequest, status: str) -> None:
         """Persist non-authoritative terminal audit evidence without changing workflow control flow."""

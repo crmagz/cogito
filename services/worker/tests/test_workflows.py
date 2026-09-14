@@ -271,6 +271,13 @@ async def test_agent_path_runs_each_specialist_in_an_isolated_workspace(
             manifest_sha256="a" * 64,
             component_id=role,
             component_version="0.1.0",
+            grants=[
+                ToolGrant(
+                    "execution_workspace",
+                    "1.0.0",
+                    "run_scoped_workspace" if role in {"python_coding", "nodejs_coding"} else "read_only_workspace",
+                )
+            ],
             gateway=AgentGatewayResolution(
                 policy_revision="agent_first_test",
                 project_id="default",
@@ -325,6 +332,7 @@ async def test_agent_path_runs_each_specialist_in_an_isolated_workspace(
     assert [request.audit_attempt for request in harness.agent_invocation_requests] == [2] * len(roles)
     assert result.handoffs == {role: '{"title":"agent output"}' for role in roles}
     assert all(request.feature_branch_run_id == "run-agent-path" for request in workspaces.requests)
+    assert [request.max_cost_usd for request in workspaces.requests] == [5.0 / len(roles)] * len(roles)
 
 
 async def test_resolved_run_rejects_missing_developer_before_workspace_provisioning(
