@@ -1327,6 +1327,7 @@ def create_app(
                         detail="the prior approved plan is temporarily unavailable for refinement",
                     ) from error
             try:
+                next_plan_revision = record.plan_revision + 1
                 execute_agent_path = getattr(starter, "execute_agent_path", None)
                 if execute_agent_path is None:
                     # Third-party starters from the rolling upgrade retain the
@@ -1387,7 +1388,7 @@ def create_app(
                             discovery_resolution.model_dump(mode="json"),
                             planner_resolution.model_dump(mode="json"),
                         ],
-                    }, f"agent-planning-{record.run_id}-{record.product_specification_revision}")
+                    }, f"agent-planning-{record.run_id}-{next_plan_revision}-{agent_attempt}")
                     if agent_result.get("succeeded") is not True:
                         raise PlannerError("discovery or planner agent did not complete")
                     handoffs = agent_result.get("handoffs")
@@ -1436,7 +1437,6 @@ def create_app(
             generated_plan = generated_plan.model_copy(
                 update={"specification_evaluation_sha256": record.selected_specification_evaluation_artifact.sha256}
             )
-            next_plan_revision = record.plan_revision + 1
             try:
                 snapshot = store.put_planning_plan(run_id, next_plan_revision, generated_plan)
             except PlanStoreUnavailableError as error:
@@ -2704,7 +2704,12 @@ def create_app(
             if event.event_type != "stage_invocation_started":
                 continue
             binding = event.payload.get("agent_binding")
-            if not isinstance(binding, dict) or binding.get("role") in {"discovery", "planner"}:
+            invocation = event.payload.get("invocation")
+            if (
+                not isinstance(binding, dict)
+                or binding.get("role") in {"discovery", "planner"}
+                or isinstance(invocation, dict) and invocation.get("source") == "agent_path_poc"
+            ):
                 continue
             attempt = binding.get("attempt")
             if isinstance(attempt, int) and attempt > maximum:
@@ -3759,6 +3764,7 @@ def create_app(
             "target_repos": record.target_repos,
             "timeout_seconds": min(record.constraints.max_wall_clock_minutes * 60, 600),
             "max_cost_usd": record.constraints.max_cost_usd,
+            "path_kind": "agent_path_poc",
             "stages": stages,
             "registry_resolutions": [item.model_dump(mode="json") for item in resolutions],
         }

@@ -65,6 +65,7 @@ class RunStateReporter(Protocol):
         trace_context_available: bool,
         registration_id: str = "",
         environment_id: str = "",
+        source: str = "worker_phase",
     ) -> None: ...
 
     async def record_stage_invocation_result(
@@ -100,8 +101,9 @@ class NullRunStateReporter:
         trace_context_available: bool,
         registration_id: str = "",
         environment_id: str = "",
+        source: str = "worker_phase",
     ) -> None:
-        del run_id, stage_id, role, attempt, trace_context_available, registration_id, environment_id
+        del run_id, stage_id, role, attempt, trace_context_available, registration_id, environment_id, source
 
     async def record_stage_invocation_result(
         self, run_id: str, stage_id: str, role: str, attempt: int, status: str
@@ -417,6 +419,7 @@ class PostgresRunStateReporter:
         trace_context_available: bool,
         registration_id: str = "",
         environment_id: str = "",
+        source: str = "worker_phase",
     ) -> None:
         """Append non-authoritative, correlation-only evidence for one phase attempt."""
 
@@ -432,7 +435,7 @@ class PostgresRunStateReporter:
             },
             "invocation": {
                 "invocation_id": invocation_id,
-                "source": "worker_phase",
+                "source": source,
                 "stage_id": stage_id,
                 "role": role,
                 "attempt": attempt,

@@ -154,10 +154,14 @@ class AgentPathWorkflow:
         resolved = {item.role: item for item in envelope.registry_resolutions}
         completed: list[str] = []
         handoffs: dict[str, str] = {}
+        # Each environment receives a fixed share of the immutable run ceiling.
+        # Separate LiteLLM keys cannot otherwise collectively enforce it.
+        stage_cost_budget = envelope.max_cost_usd / max(1, len(envelope.stages))
         for index, stage in enumerate(envelope.stages, start=1):
             registration = resolved.get(stage.role)
             if registration is None or registration.gateway is None:
                 raise ValueError(f"agent path is missing a pinned gateway route for {stage.role}")
+            workspace_mode = _agent_workspace_mode(registration)
             # The execution initializer derives a Git branch from its run ID,
             # whose contract permits only alphanumeric characters and hyphens.
             # Roles may contain underscores, so keep their identity in the
@@ -173,10 +177,11 @@ class AgentPathWorkflow:
                         spec_ref=envelope.spec_ref,
                         target_repos=envelope.target_repos,
                         execution_timeout_seconds=envelope.timeout_seconds,
-                        max_cost_usd=envelope.max_cost_usd,
+                        max_cost_usd=stage_cost_budget,
                         registration=registration,
                         gateway=registration.gateway,
                         agent_role=stage.role,
+                        workspace_mode=workspace_mode,
                         feature_branch_run_id=envelope.run_id,
                     )
                 ],
@@ -206,6 +211,7 @@ class AgentPathWorkflow:
                                 f"{workspace.workspace_root}/.cogito/handoffs/{stage.stage_id}.json"
                             ),
                             audit_attempt=envelope.attempt,
+                            audit_source=envelope.path_kind,
                         )
                     ],
                     start_to_close_timeout=timedelta(seconds=envelope.timeout_seconds),
@@ -813,6 +819,19 @@ def _has_pinned_role(envelope: RunEnvelope, role: str) -> bool:
     """Keep legacy envelopes executable while new admissions require specialists."""
 
     return any(item.role == role and item.gateway is not None for item in envelope.registry_resolutions)
+
+
+def _agent_workspace_mode(registration) -> str:
+    """Require an explicit workspace grant before an agent receives a clone."""
+
+    for grant in registration.grants:
+        if grant.tool_id != "execution_workspace":
+            continue
+        if grant.scope == "run_scoped_workspace":
+            return "read_write"
+        if grant.scope == "read_only_workspace":
+            return "read_only"
+    raise ValueError(f"{registration.role} is not granted an execution workspace")
 
 
 def _implementation_evidence(envelope: RunEnvelope, workspace, phase_results: list[dict], review: dict, validation=None) -> dict:

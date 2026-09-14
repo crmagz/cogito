@@ -266,6 +266,9 @@ class ExecutionRequest:
     run_key_secret: str = ""
     run_git_secret: str = ""
     agent_role: str = "developer"
+    # Read-only specialists may inspect a clone but never receive its Git
+    # credential in the execution container.
+    workspace_mode: str = "read_write"
     # Separate agent environments in one delivery must inspect and advance
     # the same reviewed branch, rather than creating one branch per pod.
     feature_branch_run_id: str = ""
@@ -287,6 +290,7 @@ class AgentInvocationRequest:
     # A supervisor retry starts a fresh agent path rather than retrying this
     # Temporal activity. Preserve that outer attempt in audit correlation.
     audit_attempt: int = 1
+    audit_source: str = "worker_phase"
 
 
 @dataclass(frozen=True)
@@ -341,6 +345,9 @@ class AgentPathEnvelope:
     # One-based planning/delivery attempt supplied by the control plane.
     # It must remain distinct from Temporal activity retries.
     attempt: int = 1
+    # Separates non-delivery exercises from governed implementation attempts in
+    # durable audit evidence. It is not user-supplied execution authority.
+    path_kind: str = "agent_path"
 
 
 @dataclass(frozen=True)
