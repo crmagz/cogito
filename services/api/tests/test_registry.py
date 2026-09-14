@@ -186,7 +186,10 @@ def test_manifest_identity_is_canonical_and_role_reference_is_audit_safe() -> No
     assert reference.manifest_sha256 == manifest_sha256(manifest)
     require_tool(reference, "planning_model", "plan_generation")
     assert manifest.capabilities == ["generate_plan", "generate_product_specification"]
-    assert [(grant.tool_id, grant.scope) for grant in reference.grants] == [("planning_model", "plan_generation")]
+    assert [(grant.tool_id, grant.scope) for grant in reference.grants] == [
+        ("planning_model", "plan_generation"),
+        ("execution_workspace", "read_only_workspace"),
+    ]
 
 
 def test_non_mcp_manifest_identity_is_pinned_for_the_current_release() -> None:
@@ -194,7 +197,7 @@ def test_non_mcp_manifest_identity_is_pinned_for_the_current_release() -> None:
     planner = next(item for item in catalog.components if item.registration_id == "planner")
     planning_model = next(item for item in catalog.components if item.registration_id == "planning_model")
 
-    assert manifest_sha256(planner) == "78325b83dab87959c52d2eba8fce16db0f9ea3b5d799d0c06145ee6614d385a4"
+    assert manifest_sha256(planner) == "c106aed26526c98b72195387b8bd2615752cc9917a926d9576efa4d612ee1cd7"
     assert manifest_sha256(planning_model) == "e26a3b427c07ef786885344de24481187b1f2a6a6dd51dffdd4fe196c5245cc6"
 
 
