@@ -540,7 +540,7 @@ class DeveloperRunWorkflow:
                         )
                 if stopped_phase is None:
                     if _has_pinned_role(envelope, "adversarial_review"):
-                        await _run_specialist_handoff(
+                        specialist_review = await _run_specialist_handoff(
                             envelope,
                             stage_id="adversarial_review",
                             role="adversarial_review",
@@ -559,7 +559,8 @@ class DeveloperRunWorkflow:
                             timeout_seconds=max(1, int((deadline - workflow.now()).total_seconds()) - 1),
                             max_cost_usd=max_cost_usd,
                         )
-                    review_outcome = await _review_implementation(
+                    review_outcome = _specialist_review_outcome(specialist_review) if _has_pinned_role(envelope, "adversarial_review") else None
+                    review_outcome = review_outcome or await _review_implementation(
                         envelope,
                         workspace,
                         phases,
@@ -656,7 +657,7 @@ class DeveloperRunWorkflow:
                 publisher_registration = require_role(envelope, "pull_request_publisher")
                 require_tool(publisher_registration, "github_publisher", "approved_pull_request")
                 if _has_pinned_role(envelope, "pull_request_publisher"):
-                    await _run_specialist_handoff(
+                    publisher_handoff = await _run_specialist_handoff(
                         envelope,
                         stage_id="pull_request",
                         role="pull_request_publisher",
@@ -676,6 +677,10 @@ class DeveloperRunWorkflow:
                         timeout_seconds=min(_REVIEW_ACTIVITY_TIMEOUT.seconds, execution_timeout_seconds),
                         max_cost_usd=max_cost_usd,
                     )
+                    implementation_evidence = {
+                        **implementation_evidence,
+                        "publisher_handoff": _required_specialist_handoff(publisher_handoff, "pull_request_publisher"),
+                    }
                 pull_request = await workflow.execute_activity(
                     WorkerActivities.open_pull_request,
                     args=[implementation_artifact.sha256, implementation_evidence],
@@ -813,6 +818,34 @@ async def _run_specialist_handoff(
     if not result.succeeded:
         raise RuntimeError(f"{role} agent handoff failed")
     return result
+
+
+def _required_specialist_handoff(result: AgentPathResult, role: str) -> dict[str, Any]:
+    """Accept only a structured specialist handoff into governed decisions."""
+
+    output = result.handoffs.get(role)
+    if not isinstance(output, str):
+        raise ValueError(f"{role} did not return a handoff")
+    try:
+        handoff = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{role} returned malformed handoff JSON") from error
+    if not isinstance(handoff, dict):
+        raise ValueError(f"{role} handoff must be an object")
+    return handoff
+
+
+def _specialist_review_outcome(result: AgentPathResult) -> dict[str, Any] | None:
+    """Escalate verified specialist blockers instead of silently dropping them."""
+
+    handoff = _required_specialist_handoff(result, "adversarial_review")
+    findings = handoff.get("findings")
+    if not isinstance(findings, list):
+        return None
+    blocking = [item for item in findings if isinstance(item, dict) and item.get("severity") == "blocking"]
+    if not blocking:
+        return None
+    return {"status": "escalated", "rounds": [{"specialist_findings": blocking}], "reason": "specialist_blocking"}
 
 
 def _has_pinned_role(envelope: RunEnvelope, role: str) -> bool:

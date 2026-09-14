@@ -19,9 +19,14 @@ def _emit_audit_output(audit_dir: Path, offsets: dict[Path, int], *, final: bool
 
     for path in sorted(audit_dir.glob("*.*")):
         match = _AUDIT_LOG_FILE.fullmatch(path.name)
-        if match is None:
+        if match is None or path.suffix == ".offset":
             continue
-        offset = offsets.get(path, 0)
+        offset_path = path.with_suffix(".offset")
+        try:
+            persisted_offset = int(offset_path.read_text(encoding="ascii"))
+        except (OSError, ValueError):
+            persisted_offset = 0
+        offset = max(offsets.get(path, 0), persisted_offset)
         try:
             with path.open("rb") as handle:
                 handle.seek(offset)
@@ -36,6 +41,7 @@ def _emit_audit_output(audit_dir: Path, offsets: dict[Path, int], *, final: bool
                 continue
             data = data[: final_newline + 1]
         offsets[path] = offset + len(data)
+        offset_path.write_text(str(offsets[path]), encoding="ascii")
         stream = sys.stderr if match.group("stream") == "stderr" else sys.stdout
         invocation_id = match.group("invocation_id")
         for line in data.decode("utf-8", errors="replace").splitlines(keepends=True):

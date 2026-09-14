@@ -69,10 +69,20 @@ def _emit_to_pod_log(invocation_id: str, audit_paths: list[Path]) -> None:
         for audit_path in audit_paths:
             try:
                 content = audit_path.read_text(encoding="utf-8", errors="replace")
+                offset_path = audit_path.with_suffix(".offset")
+                try:
+                    offset = int(offset_path.read_text(encoding="ascii"))
+                except (OSError, ValueError):
+                    offset = 0
             except OSError:
                 continue
-            for line in content.splitlines():
+            pending = content[max(0, offset):]
+            for line in pending.splitlines():
                 destination.write(f"{invocation_id} {_SENSITIVE_VALUE.sub('[REDACTED]', line)}\n")
+            try:
+                offset_path.write_text(str(len(content.encode("utf-8"))), encoding="ascii")
+            except OSError:
+                pass
         destination.flush()
 
 
